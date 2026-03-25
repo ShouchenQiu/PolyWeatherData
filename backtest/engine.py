@@ -1,0 +1,308 @@
+"""BacktestEngine: replay historical pipeline runs against CLOB snapshot data.
+
+Ported from Herbie-main/_sniper_backtest.py.
+
+For each init_time in the requested date range:
+  1. Run pipeline.run() to get per-bucket MC probabilities.
+  2. Look up the contemporaneous CLOB snapshot (+-30 min window).
+  3. Compute edge = mc_prob - clob_price.
+  4. Record raw PnL and metadata for each (init, bucket) pair.
+
+Key constants
+-------------
+HALFSPREAD_DRAG : float = -1.27 pts
+    Average half-spread cost applied in real PnL calculations.
+CLOB_WIN_MIN : int = 30
+    Half-width of the CLOB price look-up window in minutes.
+MIN_HOURS : int = 8
+    Minimum target-day EST hours to include a partial-coverage init.
+"""
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
+import pandas as pd
+
+if TYPE_CHECKING:
+    from config.stations import StationConfig
+    from core.strategy.base import BaseStrategy
+    from data.storage.parquet_store import ParquetStore
+    from model.pipeline import ModelPipeline
+
+# Matching _sniper_analysis.py: average half-spread cost in probability pts
+HALFSPREAD_DRAG: float = -1.27 / 100.0   # -0.0127 as a fraction of $1
+
+_TZ_OFFSET_HOURS  = -5    # EST = UTC - 5 h
+_MIN_HOURS        = 8     # minimum target-day EST hours
+_CUTOFF_EST_HOUR  = 16    # no new signals at or after 16:00 EST
+_CLOB_WIN_MIN     = 30    # CLOB look-up half-window in minutes
+
+
+def _mc_prob_bucket(samps_f: np.ndarray, lo: float, hi: float) -> float:
+    """Fraction of MC samples that fall inside the temperature bucket.
+
+    Boundary convention (matches _sniper_backtest.py):
+      range  : samps >= lo AND samps < hi + 1
+      below  : samps < hi + 1
+      higher : samps >= lo
+    """
+    if hi == float("inf"):
+        return float((samps_f >= lo).mean())
+    elif lo == float("-inf"):
+        return float((samps_f < hi + 1.0).mean())
+    else:
+        return float(((samps_f >= lo) & (samps_f < hi + 1.0)).mean())
+
+
+def _bucket_outcome(actual_f: float, lo: float, hi: float) -> float:
+    """Return 1.0 if actual temperature falls in the bucket, 0.0 otherwise.
+
+    NaN actual -> NaN outcome.
+    """
+    if np.isnan(actual_f):
+        return float("nan")
+    if hi == float("inf"):
+        return 1.0 if actual_f >= lo else 0.0
+    elif lo == float("-inf"):
+        return 1.0 if actual_f <= hi else 0.0
+    else:
+        return 1.0 if (actual_f >= lo and actual_f <= hi) else 0.0
+
+
+class BacktestEngine:
+    """Replay historical model runs against CLOB price snapshots.
+
+    Parameters
+    ----------
+    pipeline:
+        A ModelPipeline instance.  Its ``data_mgr`` must be able to serve
+        historical HRRR + obs data for the requested date range.
+    strategy:
+        BaseStrategy implementation.  Used only to inspect which buckets
+        are meaningful; PnL is computed directly from edge, not from
+        order placement.
+    clob_df:
+        Historical CLOB snapshot DataFrame with columns:
+          timestamp_utc  (UTC-aware datetime)
+          event_end_date (UTC-aware datetime)
+          market_slug    (str)
+          bucket_lo_f    (float)
+          bucket_hi_f    (float)
+          mid_price_yes  (float in 0..1)
+          estimated_spread (float)
+          is_filled      (int: 0=real, 1=synthetic fill)
+    actual_highs:
+        Mapping of ``date_str -> actual_daily_high_f`` (e.g. from IEM).
+        Keys are ``"YYYY-MM-DD"`` strings.
+    min_edge:
+        Minimum absolute edge required to record a signal row.  Set to
+        0.0 to record all (init, bucket) pairs regardless of edge.
+    """
+
+    def __init__(
+        self,
+        pipeline:      "ModelPipeline",
+        strategy:      "BaseStrategy",
+        clob_df:       pd.DataFrame,
+        actual_highs:  dict[str, float],
+        min_edge:      float = 0.0,
+    ) -> None:
+        self.pipeline     = pipeline
+        self.strategy     = strategy
+        self.actual_highs = actual_highs
+        self.min_edge     = min_edge
+        self._clob_index  = self._build_clob_index(clob_df)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def run(
+        self,
+        start_date: str,
+        end_date:   str,
+        station:    "StationConfig",
+        init_hours: list[int] | None = None,
+    ) -> pd.DataFrame:
+        """Run the backtest over the requested date range.
+
+        Parameters
+        ----------
+        start_date / end_date:
+            Inclusive date strings ``"YYYY-MM-DD"`` (UTC calendar dates).
+        station:
+            Station configuration for the pipeline.
+        init_hours:
+            UTC hours to use as init times (default 0, 6, 12, 18).
+
+        Returns
+        -------
+        DataFrame with one row per (init_time, bucket) signal, columns:
+          target_date, init_utc, init_est, n_hours, coverage_type,
+          lead_hours_to_4pm, bucket_lo_f, bucket_hi_f, market_slug,
+          mc_prob, clob_price, estimated_spread, halfspread,
+          clob_quality, edge, actual_max_f, actual_outcome,
+          pnl_if_yes, pnl_if_no
+        """
+        if init_hours is None:
+            init_hours = [0, 6, 12, 18]
+
+        dates = pd.date_range(start_date, end_date, freq="D", tz="UTC")
+        records: list[dict] = []
+
+        for day in dates:
+            for hour in init_hours:
+                init_utc = day + pd.Timedelta(hours=hour)
+                self._process_init(init_utc, station, records)
+
+        return pd.DataFrame(records)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _build_clob_index(
+        self, df: pd.DataFrame
+    ) -> dict[str, pd.DataFrame]:
+        """Pre-index CLOB rows by event_end_date string for fast look-up."""
+        idx: dict[str, pd.DataFrame] = {}
+        if df.empty:
+            return idx
+        col = "event_end_date"
+        for ev_date, grp in df.groupby(df[col].dt.date):
+            idx[str(ev_date)] = grp.sort_values("timestamp_utc").reset_index(
+                drop=True
+            )
+        return idx
+
+    def _clob_window(
+        self, event_str: str, init_utc: pd.Timestamp
+    ) -> tuple[pd.DataFrame | None, str | None]:
+        """Return aggregated CLOB prices in the +-CLOB_WIN_MIN window.
+
+        Prefers ``is_filled=0`` rows; falls back to all rows.
+        Returns (aggregated_df, quality) where quality is 'real' or 'filled',
+        or (None, None) if no data.
+        """
+        if event_str not in self._clob_index:
+            return None, None
+        grp = self._clob_index[event_str]
+        lo  = init_utc - pd.Timedelta(minutes=_CLOB_WIN_MIN)
+        hi  = init_utc + pd.Timedelta(minutes=_CLOB_WIN_MIN)
+        win = grp[
+            (grp["timestamp_utc"] >= lo) & (grp["timestamp_utc"] <= hi)
+        ]
+        if len(win) == 0:
+            return None, None
+        real = win[win["is_filled"] == 0]
+        src  = real if len(real) > 0 else win
+        qual = "real" if len(real) > 0 else "filled"
+        agg  = src.groupby(
+            ["market_slug", "bucket_lo_f", "bucket_hi_f"], as_index=False
+        ).agg(
+            clob_price        =("mid_price_yes",     "median"),
+            estimated_spread  =("estimated_spread",   "median"),
+        )
+        return agg, qual
+
+    def _process_init(
+        self,
+        init_utc: pd.Timestamp,
+        station:  "StationConfig",
+        records:  list[dict],
+    ) -> None:
+        """Run pipeline for one init time and append rows to records."""
+        from collections import Counter
+
+        init_est = init_utc + pd.Timedelta(hours=_TZ_OFFSET_HOURS)
+
+        # EST dates covered by this init's 48 forecast hours
+        fxx_dates = [
+            (init_utc + pd.Timedelta(hours=h + _TZ_OFFSET_HOURS)).date()
+            for h in range(1, 49)
+        ]
+        date_count: Counter = Counter(fxx_dates)
+
+        for target_date, n_hours in date_count.items():
+            target_str = str(target_date)
+
+            if target_str not in self.actual_highs:
+                continue
+            if n_hours < _MIN_HOURS:
+                continue
+
+            # Cutoff: 21:00 UTC == 16:00 EST on target day
+            cutoff_utc = pd.Timestamp(target_str, tz="UTC") + pd.Timedelta(hours=21)
+            if init_utc >= cutoff_utc:
+                continue
+
+            coverage_type = "full" if n_hours == 24 else "partial"
+            lead_hours    = (
+                (cutoff_utc - init_utc).total_seconds() / 3600.0
+            )
+
+            # fxx mask for this target date
+            mask = [d == target_date for d in fxx_dates]
+            fxx_in_target = [i + 1 for i, m in enumerate(mask) if m]
+
+            # Collect bucket list from CLOB window
+            agg, qual = self._clob_window(target_str, init_utc)
+            if agg is None:
+                continue
+
+            buckets = [
+                (float(r["bucket_lo_f"]), float(r["bucket_hi_f"]))
+                for _, r in agg.iterrows()
+            ]
+            if not buckets:
+                continue
+
+            # Run pipeline
+            try:
+                result = self.pipeline.run(station, init_utc, buckets)
+            except Exception:
+                continue
+
+            probs      = result.get("probs", {})
+            actual_f   = self.actual_highs[target_str]
+
+            for _, br in agg.iterrows():
+                lo = float(br["bucket_lo_f"])
+                hi = float(br["bucket_hi_f"])
+                cp = float(br["clob_price"])
+                sp = float(br["estimated_spread"])
+
+                mc_p = probs.get((lo, hi), float("nan"))
+                if np.isnan(mc_p):
+                    continue
+
+                edge = mc_p - cp
+                if abs(edge) < self.min_edge:
+                    continue
+
+                out = _bucket_outcome(actual_f, lo, hi)
+
+                records.append({
+                    "target_date":        target_str,
+                    "init_utc":           str(init_utc)[:16],
+                    "init_est":           str(init_est)[:16],
+                    "n_hours":            n_hours,
+                    "coverage_type":      coverage_type,
+                    "lead_hours_to_4pm":  round(lead_hours, 2),
+                    "bucket_lo_f":        lo,
+                    "bucket_hi_f":        hi,
+                    "market_slug":        str(br["market_slug"]),
+                    "mc_prob":            round(mc_p, 5),
+                    "clob_price":         round(cp, 5),
+                    "estimated_spread":   round(sp, 5),
+                    "halfspread":         round(sp / 2.0, 5),
+                    "clob_quality":       qual,
+                    "edge":               round(edge, 5),
+                    "actual_max_f":       actual_f,
+                    "actual_outcome":     out,
+                    "pnl_if_yes":         round(float(out) - cp, 5)
+                                          if not np.isnan(out) else float("nan"),
+                    "pnl_if_no":          round(cp - float(out), 5)
+                                          if not np.isnan(out) else float("nan"),
+                })

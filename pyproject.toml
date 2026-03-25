@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polyweatherbot"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "xarray",
+    "cfgrib",
+    "eccodes",
+    "zarr",
+    "fsspec",
+    "requests",
+    "torch",
+    "pytorch-forecasting",
+    "python-dotenv",
+    "streamlit",
+    "plotly",
+]
+
+[project.optional-dependencies]
+clob = ["py-clob-client"]
+herbie = ["herbie-data"]
+dev = ["pytest", "pytest-cov", "black", "ruff"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["tests*", "scripts*"]
