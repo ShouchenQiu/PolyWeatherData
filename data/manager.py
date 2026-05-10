@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pandas as pd
+from loguru import logger
 
 if TYPE_CHECKING:
     from config.stations import StationConfig
@@ -85,12 +86,20 @@ class DataManager:
         """
         last_exc: Exception | None = None
         for src in self._forecast_sources:
+            src_name = type(src).__name__
             try:
                 df = src.fetch(init_time, fxx_range, station)
                 if df is not None and not df.empty:
+                    logger.debug(
+                        "HRRR fetch: source={} init={} rows={}",
+                        src_name, init_time, len(df),
+                    )
                     self._forecast_store.append(station.station_id, df)
                     return df
             except Exception as exc:
+                logger.warning(
+                    "HRRR source {} failed for init={}: {}", src_name, init_time, exc
+                )
                 last_exc = exc
                 continue
         raise RuntimeError(
@@ -132,12 +141,21 @@ class DataManager:
         """
         last_exc: Exception | None = None
         for src in self._obs_sources:
+            src_name = type(src).__name__
             try:
                 df = src.fetch(station, start, end)
                 if df is not None and not df.empty:
+                    logger.debug(
+                        "Obs fetch: source={} station={} rows={}",
+                        src_name, station.station_id, len(df),
+                    )
                     self._obs_store.append(station.station_id, df)
                     return df
             except Exception as exc:
+                logger.warning(
+                    "Obs source {} failed for station={}: {}",
+                    src_name, station.station_id, exc,
+                )
                 last_exc = exc
                 continue
         raise RuntimeError(

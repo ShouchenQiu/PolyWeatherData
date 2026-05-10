@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 if TYPE_CHECKING:
     from config.stations import StationConfig
@@ -150,13 +151,23 @@ class BacktestEngine:
 
         dates = pd.date_range(start_date, end_date, freq="D", tz="UTC")
         records: list[dict] = []
+        total_inits = len(dates) * len(init_hours)
+        logger.info(
+            "Backtest starting: {} to {} ({} inits)",
+            start_date, end_date, total_inits,
+        )
 
         for day in dates:
             for hour in init_hours:
                 init_utc = day + pd.Timedelta(hours=hour)
                 self._process_init(init_utc, station, records)
 
-        return pd.DataFrame(records)
+        df = pd.DataFrame(records)
+        logger.info(
+            "Backtest done: {} rows, {} unique inits",
+            len(df), df["init_utc"].nunique() if not df.empty else 0,
+        )
+        return df
 
     # ------------------------------------------------------------------
     # Internal helpers

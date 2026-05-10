@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import requests
+from loguru import logger
 
 if TYPE_CHECKING:
     from config.settings import Settings
@@ -119,6 +120,7 @@ class EventDiscovery:
         """
         events = self._fetch_events(params or {})
         discovered: list[dict] = []
+        logger.debug("EventDiscovery: {} events from Gamma API", len(events))
 
         for ev in events:
             slug = (ev.get("slug") or "").lower()
@@ -142,6 +144,10 @@ class EventDiscovery:
 
             markets_parsed = self._process_markets(
                 ev.get("markets", []), condition_id
+            )
+            logger.info(
+                "Discovered event: {} end={} station={} markets={}",
+                condition_id, event_end_date, station_id, len(markets_parsed),
             )
 
             discovered.append({

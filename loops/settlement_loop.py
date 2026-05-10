@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from loguru import logger
+
 if TYPE_CHECKING:
     from core.exchange.base import BaseExchange
     from core.exchange.settlement import Settler
@@ -51,26 +53,30 @@ class SettlementLoop:
         """Periodically advance lifecycles and settle expired events."""
         import pandas as pd
 
+        logger.info("SettlementLoop started (interval={}s)", self._interval_seconds)
         while True:
             now = pd.Timestamp.utcnow()
             try:
                 events = self._db.get_active_events()
                 for event in events:
+                    cid        = event["condition_id"]
+                    old_status = event.get("status")
                     new_status = self._lifecycle.advance(event, now)
-                    if new_status != event.get("status"):
-                        self._db.update_event_status(
-                            event["condition_id"], new_status
+                    if new_status != old_status:
+                        logger.info(
+                            "Event {} status: {} -> {}", cid, old_status, new_status
                         )
+                        self._db.update_event_status(cid, new_status)
                     if new_status == "pending_settle":
+                        logger.info("Settling event {}", cid)
                         try:
-                            await asyncio.to_thread(
+                            result = await asyncio.to_thread(
                                 self._settler.settle, event, self._exchange
                             )
-                            self._db.update_event_status(
-                                event["condition_id"], "settled"
-                            )
+                            logger.info("Event {} settled via {}", cid, result)
+                            self._db.update_event_status(cid, "settled")
                         except Exception:
-                            pass
+                            logger.exception("Failed to settle event {}", cid)
             except Exception:
-                pass
+                logger.exception("SettlementLoop: unhandled error in run()")
             await asyncio.sleep(self._interval_seconds)

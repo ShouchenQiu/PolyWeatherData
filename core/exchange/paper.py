@@ -8,6 +8,8 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from loguru import logger
+
 from core.exchange.base import BaseExchange
 
 
@@ -54,10 +56,12 @@ class PaperExchange(BaseExchange):
             "status":      "filled",
         }
         self._orders[order_id] = order
-
-        # Track net position per token
         self._apply_position(order)
 
+        logger.debug(
+            "[PAPER] {} {} ${:.2f} @ {:.4f} (fill={:.4f}) id={}",
+            side.upper(), token_id, size_usd, price, fill_price, order_id,
+        )
         return order_id
 
     def cancel_order(self, order_id: str) -> bool:

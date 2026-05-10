@@ -135,14 +135,11 @@ class BotManager:
 
         sniper_loop = SniperLoop(
             sniper_mgr = self.snipers,
-            pipeline   = self.pipeline,
             orderbook  = self.orderbook,
-            strategy   = self.strategy,
             risk       = self.risk,
             exchange   = self.exchange,
             positions  = self.positions,
             db         = self.db,
-            station    = self.station,
         )
 
         async def _forecast_hourly():

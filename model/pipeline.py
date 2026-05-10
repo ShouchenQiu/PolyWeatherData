@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 if TYPE_CHECKING:
     from config.settings import Settings
@@ -73,12 +74,15 @@ class ModelPipeline:
         }
         """
         # 1. Fetch 48-hour HRRR forecast (decoder rows fxx 1..48)
+        logger.debug("Pipeline: fetching HRRR init={} station={}",
+                     init_time, station.station_id)
         hrrr_df = self.data_mgr.fetch_hrrr(init_time)
 
         # 2. Fetch 24-hour observations for the encoder window
         #    encoder covers fxx -23..0  =>  valid_time = init_time-23h .. init_time
         enc_start = init_time - pd.Timedelta(hours=23)
         enc_end   = init_time
+        logger.debug("Pipeline: fetching IEM obs {}..{}", enc_start, enc_end)
         iem_df    = self.data_mgr.fetch_iem(enc_start, enc_end)
 
         # 3. Assemble encoder_df and decoder_df
@@ -108,6 +112,11 @@ class ModelPipeline:
         # Median daily high from MC samples (degF)
         p50_high_f = float(np.median(daily_highs))
 
+        logger.info(
+            "Pipeline result: station={} init={} p50_high_f={:.1f}F buckets={}",
+            station.station_id, init_time, p50_high_f,
+            {f"{lo:.0f}-{hi:.0f}": f"{p:.3f}" for (lo, hi), p in probs.items()},
+        )
         return {
             "station":    station.station_id,
             "init_time":  init_time,

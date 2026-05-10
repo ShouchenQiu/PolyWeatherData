@@ -8,6 +8,7 @@ env/
 data_store/
 model/store/v*/
 model/store/active_version.txt
+logs/
 *.ckpt
 *.parquet
 *.db

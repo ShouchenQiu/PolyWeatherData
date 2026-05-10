@@ -1,38 +1,65 @@
 """SniperLoop: event-driven trading triggered by real-time METAR observations.
 
 Consumes the SniperManager queue.  For each new METAR observation it
-re-runs the pipeline with the updated observation as the latest encoder
-point, then issues FOK (fill-or-kill) style orders via the exchange.
+parses the actual observed temperature from the METAR text, identifies
+the true temperature bucket, then places:
+  - BUY YES on the matching bucket token
+  - BUY NO  on every non-matching bucket token
 """
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
-import pandas as pd
+from loguru import logger
+
+# T-group: T(sign_t)(ddd)(sign_d)(ddd)  -- tenths-of-degree Celsius
+_RE_T_GROUP = re.compile(r"\bT([01])(\d{3})([01])(\d{3})\b")
+# Standard METAR temp/dew field, e.g. "20/14" or "M03/M07"
+_RE_TEMP_SLASH = re.compile(r"\b(M?\d{2})/(M?\d{2})\b")
+
+
+def _parse_metar_temp_f(metar_text: str) -> float | None:
+    """Return the observed temperature in degF parsed from a METAR string.
+
+    Tries the precision T-group first (e.g. T02000139 = 20.0 C / 13.9 C).
+    Falls back to the integer temp/dew field (e.g. 20/14 = 20 C).
+    Returns None when no temperature can be found.
+    """
+    m = _RE_T_GROUP.search(metar_text)
+    if m:
+        sign, digits = m.group(1), m.group(2)
+        val_c = int(digits) / 10.0
+        if sign == "1":
+            val_c = -val_c
+        return val_c * 9.0 / 5.0 + 32.0
+
+    m = _RE_TEMP_SLASH.search(metar_text)
+    if m:
+        t_str = m.group(1)
+        sign  = -1 if t_str.startswith("M") else 1
+        val_c = sign * int(t_str.lstrip("M"))
+        return val_c * 9.0 / 5.0 + 32.0
+
+    return None
 
 if TYPE_CHECKING:
     from core.exchange.base import BaseExchange
     from core.positions import PositionTracker
     from core.risk.base import BaseRiskModel
-    from core.strategy.base import BaseStrategy
     from db.schema import DbClient
-    from model.pipeline import ModelPipeline
     from snipers.manager import SniperManager
 
 
 class SniperLoop:
-    """Consume METAR observations and fire rapid pipeline+order cycles.
+    """Consume METAR observations and fire ground-truth BUY order cycles.
 
     Parameters
     ----------
     sniper_mgr:
         SniperManager whose queue yields (metar_text, source, timestamp).
-    pipeline:
-        ModelPipeline to run on each new observation.
     orderbook:
         Duck-typed fetcher with ``get_book(token_id) -> dict``.
-    strategy:
-        BaseStrategy implementation.
     risk:
         BaseRiskModel implementation.
     exchange:
@@ -41,31 +68,23 @@ class SniperLoop:
         PositionTracker backed by the DB.
     db:
         DbClient for querying active events and markets.
-    station:
-        Station configuration for the pipeline.
     """
 
     def __init__(
         self,
         sniper_mgr: "SniperManager",
-        pipeline:   "ModelPipeline",
         orderbook:  Any,
-        strategy:   "BaseStrategy",
         risk:       "BaseRiskModel",
         exchange:   "BaseExchange",
         positions:  "PositionTracker",
         db:         "DbClient",
-        station:    Any,
     ) -> None:
         self.sniper_mgr = sniper_mgr
-        self.pipeline   = pipeline
         self.orderbook  = orderbook
-        self.strategy   = strategy
         self.risk       = risk
         self.exchange   = exchange
         self.positions  = positions
         self.db         = db
-        self.station    = station
 
     # ------------------------------------------------------------------
     # Public API
@@ -74,17 +93,17 @@ class SniperLoop:
     async def run(self) -> None:
         """Consume the sniper queue indefinitely.
 
-        Each item dequeued triggers a rapid pipeline cycle.  The loop
+        Each item dequeued triggers a ground-truth BUY cycle.  The loop
         exits only when the task is cancelled.
         """
-        import asyncio
-
+        logger.info("SniperLoop started")
         while True:
             metar_text, source, timestamp = await self.sniper_mgr.queue.get()
+            logger.debug("SniperLoop: new METAR from {} at {}", source, timestamp)
             try:
                 await self._handle_observation(metar_text, source, timestamp)
             except Exception:
-                pass
+                logger.exception("SniperLoop: error handling METAR from {}", source)
 
     # ------------------------------------------------------------------
     # Internal
@@ -96,10 +115,21 @@ class SniperLoop:
         source:     str,
         timestamp:  Any,
     ) -> None:
-        """Re-run pipeline with the new METAR and place signals."""
-        import asyncio
+        """Parse ground-truth temperature and place BUY orders on true/false buckets."""
+        from core.types import Order, Signal
 
-        init_time    = pd.Timestamp.utcnow().floor("h")
+        actual_temp_f = _parse_metar_temp_f(metar_text)
+        if actual_temp_f is None:
+            logger.warning(
+                "SniperLoop: could not parse temperature from METAR ({}): {}",
+                source, metar_text,
+            )
+            return
+
+        logger.debug(
+            "SniperLoop: actual_temp_f={:.1f} from {}", actual_temp_f, source
+        )
+
         active_events = self.db.get_active_events()
 
         for event in active_events:
@@ -107,51 +137,70 @@ class SniperLoop:
             markets      = self.db.get_markets_for_event(condition_id)
             if not markets:
                 continue
-            buckets = [
-                (m["bucket_lo_f"], m["bucket_hi_f"])
-                for m in markets
-                if m["outcome"] == "YES"
-            ]
-            if not buckets:
-                continue
 
-            try:
-                result = await asyncio.to_thread(
-                    self.pipeline.run, self.station, init_time, buckets
-                )
-            except Exception:
-                continue
-            probs = result.get("probs", {})
-
-            books = {}
-            for m in markets:
-                if m["outcome"] != "YES":
+            # Build per-bucket lookup: {(lo_f, hi_f): {"YES": token_id, "NO": token_id}}
+            bucket_tokens: dict[tuple[float, float], dict[str, str]] = {}
+            for mkt in markets:
+                lo  = float(mkt.get("bucket_lo_f") or float("-inf"))
+                hi  = float(mkt.get("bucket_hi_f") or float("inf"))
+                out = str(mkt.get("outcome", "")).upper()
+                if out not in ("YES", "NO"):
                     continue
-                try:
-                    books[m["token_id"]] = self.orderbook.get_book(
-                        m["token_id"]
-                    )
-                except Exception:
-                    pass
+                key = (lo, hi)
+                bucket_tokens.setdefault(key, {})
+                bucket_tokens[key][out] = str(mkt["token_id"])
 
-            signals  = self.strategy.compute_signals(probs, books, markets)
+            if not bucket_tokens:
+                continue
+
             exposure = self.positions.total_exposure()
-            for sig in signals:
+
+            for (lo_f, hi_f), tokens in bucket_tokens.items():
+                is_true_bucket = lo_f <= actual_temp_f < hi_f
+                outcome_key    = "YES" if is_true_bucket else "NO"
+                token_id       = tokens.get(outcome_key)
+                if token_id is None:
+                    logger.debug(
+                        "SniperLoop: no {} token for bucket ({}, {})",
+                        outcome_key, lo_f, hi_f,
+                    )
+                    continue
+
+                # Fetch best ask from orderbook; fall back to 0.95
+                try:
+                    book  = self.orderbook.get_book(token_id)
+                    price = book.get("best_ask") or book.get("mid_price") or 0.95
+                except Exception:
+                    price = 0.95
+
+                sig = Signal(
+                    token_id     = token_id,
+                    side         = "BUY",
+                    mc_prob      = 1.0,
+                    clob_price   = price,
+                    edge         = 1.0 - price,
+                    bucket_lo_f  = lo_f,
+                    bucket_hi_f  = hi_f,
+                    condition_id = condition_id,
+                )
+
                 if not self.risk.approve_signal(sig, exposure):
                     continue
                 size = self.risk.compute_size(sig, exposure)
                 if size <= 0:
                     continue
-                order_id = self.exchange.place_order(
-                    sig.token_id, sig.side, size, sig.clob_price
+
+                logger.info(
+                    "SniperLoop: placing BUY {} token {} @ {:.3f} size={:.2f}",
+                    outcome_key, token_id, price, size,
                 )
-                from core.types import Order
+                order_id = self.exchange.place_order(token_id, "BUY", size, price)
                 order = Order(
                     order_id = order_id,
-                    token_id = sig.token_id,
-                    side     = sig.side,
+                    token_id = token_id,
+                    side     = "BUY",
                     size_usd = size,
-                    price    = sig.clob_price,
+                    price    = price,
                 )
                 self.positions.open(sig, order)
                 exposure += size

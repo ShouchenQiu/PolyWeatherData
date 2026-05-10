@@ -19,6 +19,7 @@ dependencies = [
     "torch",
     "pytorch-forecasting",
     "python-dotenv",
+    "loguru",
     "streamlit",
     "plotly",
 ]

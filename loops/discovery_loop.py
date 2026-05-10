@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from loguru import logger
+
 if TYPE_CHECKING:
     from events.discovery import EventDiscovery
 
@@ -29,9 +31,12 @@ class DiscoveryLoop:
 
     async def run(self) -> None:
         """Poll Gamma API on a fixed interval until cancelled."""
+        logger.info("DiscoveryLoop started (interval={}s)", self._interval_seconds)
         while True:
+            logger.debug("DiscoveryLoop: running discover()")
             try:
                 await asyncio.to_thread(self._discovery.discover)
+                logger.debug("DiscoveryLoop: discover() completed")
             except Exception:
-                pass
+                logger.exception("DiscoveryLoop: unhandled error in discover()")
             await asyncio.sleep(self._interval_seconds)

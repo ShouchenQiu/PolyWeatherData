@@ -38,7 +38,7 @@ class AwcSniper(BaseSniperSource):
     NORMAL_INTERVAL = 2.0
     SNIPER_INTERVAL = 0.65
     SNIPER_START    = (51, 30)   # (minute, second)
-    SNIPER_END      = (53, 59)   # (minute, second) ¡ª inclusive
+    SNIPER_END      = (53, 59)   # (minute, second) -- inclusive
 
     def __init__(self, station: str = "KLGA") -> None:
         self._station = station

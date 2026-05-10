@@ -33,24 +33,39 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default = None,
         help    = "Override path to the SQLite database file.",
     )
+    parser.add_argument(
+        "--log-level",
+        default = "INFO",
+        choices = ["DEBUG", "INFO", "WARNING", "ERROR"],
+        help    = "Console log level (default: INFO).",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
 
+    from config.log import setup_logging
+    setup_logging(console_level=args.log_level)
+
+    from loguru import logger
+
     from config.settings import Settings
     settings = Settings(trading_mode=args.mode)
+
+    logger.info("PolyWeatherBot starting: mode={} station={}", args.mode, args.station)
 
     from core.bot import BotManager
     bot = BotManager(settings, db_path=args.db)
 
-    print(f"[PolyWeatherBot] mode={args.mode}  station={args.station}")
     try:
         asyncio.run(bot.run())
     except KeyboardInterrupt:
-        print("\n[PolyWeatherBot] Shutdown by user.")
+        logger.info("Shutdown requested by user.")
         sys.exit(0)
+    except Exception:
+        logger.exception("Fatal error in BotManager.run()")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

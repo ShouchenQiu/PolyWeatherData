@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
+from loguru import logger
 
 if TYPE_CHECKING:
     from core.exchange.base import BaseExchange
@@ -85,7 +86,9 @@ class ForecastLoop:
         if init_time is None:
             init_time = pd.Timestamp.utcnow().floor("h")
 
+        logger.info("ForecastLoop tick: init_time={}", init_time)
         active_events = self.db.get_active_events()
+        logger.debug("ForecastLoop: {} active event(s)", len(active_events))
         placed_orders = []
 
         for event in active_events:
@@ -106,8 +109,13 @@ class ForecastLoop:
             try:
                 result = self.pipeline.run(self.station, init_time, buckets)
             except Exception:
+                logger.exception("Pipeline failed for event {}", condition_id)
                 continue
             probs = result.get("probs", {})
+            logger.debug(
+                "Event {} p50_high_f={:.1f}",
+                condition_id, result.get("p50_high_f", float("nan")),
+            )
 
             # 2. Fetch orderbooks for each YES token
             books = {}
@@ -119,21 +127,30 @@ class ForecastLoop:
                         m["token_id"]
                     )
                 except Exception:
-                    pass
+                    logger.warning("Could not fetch book for token {}", m["token_id"])
 
             # 3. Compute signals
             signals = self.strategy.compute_signals(probs, books, markets)
+            logger.debug("Event {}: {} signal(s) generated", condition_id, len(signals))
 
             # 4. Risk-check and place orders
             exposure = self.positions.total_exposure()
             for sig in signals:
                 if not self.risk.approve_signal(sig, exposure):
+                    logger.debug(
+                        "Signal rejected by risk: token={} edge={:.4f} exposure={:.2f}",
+                        sig.token_id, sig.edge, exposure,
+                    )
                     continue
                 size = self.risk.compute_size(sig, exposure)
                 if size <= 0:
                     continue
                 order_id = self.exchange.place_order(
                     sig.token_id, sig.side, size, sig.clob_price
+                )
+                logger.info(
+                    "Order placed: {} {} ${:.2f} @ {:.4f} edge={:.4f} order_id={}",
+                    sig.side, sig.token_id, size, sig.clob_price, sig.edge, order_id,
                 )
                 from core.types import Order
                 order = Order(
@@ -147,4 +164,5 @@ class ForecastLoop:
                 exposure += size
                 placed_orders.append(order)
 
+        logger.info("ForecastLoop tick done: {} order(s) placed", len(placed_orders))
         return placed_orders

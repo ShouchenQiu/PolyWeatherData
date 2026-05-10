@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from loguru import logger
+
 from core.exchange.base import BaseExchange
 
 
@@ -50,13 +52,20 @@ class ClobExchange(BaseExchange):
         )
         signed = self._client.create_order(order_args)
         resp   = self._client.post_order(signed)
-        return resp.get("orderID", "") or resp.get("order_id", "")
+        order_id = resp.get("orderID", "") or resp.get("order_id", "")
+        logger.info(
+            "[CLOB] {} {} ${:.2f} @ {:.4f} order_id={}",
+            side.upper(), token_id, size_usd, price, order_id,
+        )
+        return order_id
 
     def cancel_order(self, order_id: str) -> bool:
         try:
             self._client.cancel(order_id)
+            logger.info("[CLOB] Cancelled order {}", order_id)
             return True
         except Exception:
+            logger.warning("[CLOB] Failed to cancel order {}", order_id)
             return False
 
     def get_positions(self) -> list[dict]:
