@@ -1,9 +1,21 @@
 ---
 name: tdd
-description: Test-driven development with red-green-refactor loop. Use when user wants to build features or fix bugs using TDD, mentions "red-green-refactor", wants integration tests, or asks for test-first development.
+description: Test-driven development with red-green-refactor loop. Use when implementing one PolyWeatherBot slice from docs/issues/proposed-slices.md, when user asks for TDD/test-first development, or when a feature/bug fix should be driven by observable behavior tests.
 ---
 
 # Test-Driven Development
+
+## PolyWeatherBot Scope
+
+For this repository, `docs/issues/implementation-workflow.md` owns the overall
+execution order and skill handoffs. This skill owns only the test-first loop for
+one target slice.
+
+Before coding a slice, follow the pre-read checklist in
+`docs/issues/implementation-workflow.md` §1.
+
+Treat the target slice as the approved scope. Do not re-plan the overhaul, do
+not implement `Out of scope` items, and do not implement Deferred Register work.
 
 ## Philosophy
 
@@ -46,18 +58,21 @@ RIGHT (vertical):
 
 When exploring the codebase, use the project's domain glossary so that test names and interface vocabulary match the project's language, and respect ADRs in the area you're touching.
 
-Before writing any code:
+If the target slice is already defined in `docs/issues/proposed-slices.md`, do
+not ask the user to reconfirm its interface or behavior list. Ask only if:
 
-- [ ] Confirm with user what interface changes are needed
-- [ ] Confirm with user which behaviors to test (prioritize)
-- [ ] Identify opportunities for [deep modules](deep-modules.md) (small interface, deep implementation)
-- [ ] Design interfaces for [testability](interface-design.md)
-- [ ] List the behaviors to test (not implementation steps)
-- [ ] Get user approval on the plan
+- The slice conflicts with current code or tests
+- The acceptance criteria are not testable as written
+- The slice would require live credentials, live network, or human input
+- The implementation would touch `Out of scope` or Deferred Register work
+- A public interface must change in a way the slice does not specify
 
-Ask: "What should the public interface look like? Which behaviors are most important to test?"
+Before writing code:
 
-**You can't test everything.** Confirm with the user exactly which behaviors matter most. Focus testing effort on critical paths and complex logic, not every possible edge case.
+- [ ] Identify the next acceptance criterion or observable behavior to test
+- [ ] Prefer the existing public interface; design for [testability](interface-design.md) only when a new seam is required
+- [ ] Use existing tests and fixtures where they fit
+- [ ] Choose the smallest relevant `pytest` node to run
 
 ### 2. Tracer Bullet
 
@@ -85,6 +100,8 @@ Rules:
 - Only enough code to pass current test
 - Don't anticipate future tests
 - Keep tests focused on observable behavior
+- Extend existing tests when they already cover the same public behavior
+- Default to `pytest`; run the smallest relevant test node during the loop
 
 ### 4. Refactor
 
@@ -98,6 +115,12 @@ After all tests pass, look for [refactor candidates](refactoring.md):
 
 **Never refactor while RED.** Get to GREEN first.
 
+Keep refactors inside the current slice's touched area. If a broader
+architecture concern appears, record it for the next architecture review instead
+of expanding the slice.
+
+If stuck, see `docs/issues/implementation-workflow.md` §3 for handoff conditions.
+
 ## Checklist Per Cycle
 
 ```
@@ -106,4 +129,14 @@ After all tests pass, look for [refactor candidates](refactoring.md):
 [ ] Test would survive internal refactor
 [ ] Code is minimal for this test
 [ ] No speculative features added
+```
+
+## Slice Completion Checklist
+
+```
+[ ] Target slice acceptance criteria are satisfied
+[ ] Slice-specific tests pass
+[ ] Adjacent tests pass when public interfaces changed
+[ ] No Out of scope or Deferred Register work was implemented
+[ ] Residual risk or deferred behavior is noted
 ```

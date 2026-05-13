@@ -1,19 +1,24 @@
 ---
 name: diagnose
-description: Disciplined diagnosis loop for hard bugs and performance regressions. Reproduce → minimise → hypothesise → instrument → fix → regression-test. Use when user says "diagnose this" / "debug this", reports a bug, says something is broken/throwing/failing, or describes a performance regression.
+description: Disciplined diagnosis loop for hard bugs, failing slice tests, and performance regressions. Reproduce -> minimise -> hypothesise -> instrument -> fix -> regression-test. Use when a PolyWeatherBot slice implementation is stuck, a pytest failure is unclear, the user says diagnose/debug, or a bug/performance regression is reported.
 ---
 
 # Diagnose
 
 A discipline for hard bugs. Skip phases only when explicitly justified.
 
-When exploring the codebase, use the project's domain glossary to get a clear mental model of the relevant modules, and check ADRs in the area you're touching.
+For this repository, `docs/issues/implementation-workflow.md` decides when to
+switch from TDD to diagnosis. This skill owns the diagnosis loop only.
+
+When diagnosing a slice failure, read the target slice in
+`docs/issues/proposed-slices.md`, its `Source refs`, and relevant ADRs. Do not
+expand the slice scope.
 
 ## Phase 1 — Build a feedback loop
 
 **This is the skill.** Everything else is mechanical. If you have a fast, deterministic, agent-runnable pass/fail signal for the bug, you will find the cause — bisection, hypothesis-testing, and instrumentation all just consume that signal. If you don't have one, no amount of staring at code will save you.
 
-Spend disproportionate effort here. **Be aggressive. Be creative. Refuse to give up.**
+Spend disproportionate effort here.
 
 ### Ways to construct one — try them in roughly this order
 
@@ -29,6 +34,8 @@ Spend disproportionate effort here. **Be aggressive. Be creative. Refuse to give
 10. **HITL bash script.** Last resort. If a human must click, drive _them_ with `scripts/hitl-loop.template.sh` so the loop is still structured. Captured output feeds back to you.
 
 Build the right feedback loop, and the bug is 90% fixed.
+
+For slice work, prefer a single `pytest` node as the first feedback loop.
 
 ### Iterate on the loop itself
 
@@ -72,7 +79,9 @@ Each hypothesis must be **falsifiable**: state the prediction it makes.
 
 If you cannot state the prediction, the hypothesis is a vibe — discard or sharpen it.
 
-**Show the ranked list to the user before testing.** They often have domain knowledge that re-ranks instantly ("we just deployed a change to #3"), or know hypotheses they've already ruled out. Cheap checkpoint, big time saver. Don't block on it — proceed with your ranking if the user is AFK.
+For routine AFK slice work, proceed with your ranked hypotheses without waiting
+for user approval. Ask the user only when the diagnosis implies a spec conflict,
+credential/live-environment requirement, or change outside the current slice.
 
 ## Phase 4 — Instrument
 
@@ -114,4 +123,8 @@ Required before declaring done:
 - [ ] Throwaway prototypes deleted (or moved to a clearly-marked debug location)
 - [ ] The hypothesis that turned out correct is stated in the commit / PR message — so the next debugger learns
 
-**Then ask: what would have prevented this bug?** If the answer involves architectural change (no good test seam, tangled callers, hidden coupling) hand off to the `/improve-codebase-architecture` skill with the specifics. Make the recommendation **after** the fix is in, not before — you have more information now than when you started.
+**Then ask: what would have prevented this bug?** If the answer involves
+architectural change (no good test seam, tangled callers, hidden coupling), note
+it for the next architecture review using
+`.github/skills/improve-codebase-architecture/SKILL.md`. Do not broaden the
+current fix unless the target slice requires it.

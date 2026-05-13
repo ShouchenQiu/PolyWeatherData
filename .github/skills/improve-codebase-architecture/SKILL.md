@@ -1,11 +1,16 @@
 ---
 name: improve-codebase-architecture
-description: Find deepening opportunities in a codebase, informed by the domain language in CONTEXT.md and the decisions in docs/adr/. Use when the user wants to improve architecture, find refactoring opportunities, consolidate tightly-coupled modules, or make a codebase more testable and AI-navigable.
+description: Review completed PolyWeatherBot slices for architectural friction, module depth, seams, and testability, informed by CONTEXT.md and docs/adr/. Use after every 2-3 slices, or when the user asks for architecture review/refactoring opportunities.
 ---
 
 # Improve Codebase Architecture
 
 Surface architectural friction and propose **deepening opportunities** — refactors that turn shallow modules into deep ones. The aim is testability and AI-navigability.
+
+For this repository, `docs/issues/implementation-workflow.md` owns when this
+review runs. This skill owns only the architecture review method. Routine
+reviews must not modify code, create issues, update `CONTEXT.md`, or write ADRs
+unless the user explicitly asks.
 
 ## Glossary
 
@@ -32,9 +37,17 @@ This skill is _informed_ by the project's domain model. The domain language give
 
 ### 1. Explore
 
-Read the project's domain glossary and any ADRs in the area you're touching first.
+Read:
 
-Then use the Agent tool with `subagent_type=Explore` to walk the codebase. Don't follow rigid heuristics — explore organically and note where you experience friction:
+- The completed slices being reviewed in `docs/issues/proposed-slices.md`
+- Their source refs in `docs/grill-tasks.md`
+- Relevant ADRs
+- Touched code and tests
+- `CONTEXT.md` when domain language matters
+
+Do not reopen ADR decisions during routine reviews.
+
+Walk the codebase and note where you experience friction:
 
 - Where does understanding one concept require bouncing between many small modules?
 - Where are modules **shallow** — interface nearly as complex as the implementation?
@@ -46,24 +59,29 @@ Apply the **deletion test** to anything you suspect is shallow: would deleting i
 
 ### 2. Present candidates
 
-Present a numbered list of deepening opportunities. For each candidate:
+Present architecture review notes. For each candidate:
 
 - **Files** — which files/modules are involved
 - **Problem** — why the current architecture is causing friction
 - **Solution** — plain English description of what would change
 - **Benefits** — explained in terms of locality and leverage, and also in how tests would improve
+- **Slice impact** — whether this affects completed slices, upcoming slices, or Deferred work
 
 **Use CONTEXT.md vocabulary for the domain, and [LANGUAGE.md](LANGUAGE.md) vocabulary for the architecture.** If `CONTEXT.md` defines "Order," talk about "the Order intake module" — not "the FooBarHandler," and not "the Order service."
 
 **ADR conflicts**: if a candidate contradicts an existing ADR, only surface it when the friction is real enough to warrant revisiting the ADR. Mark it clearly (e.g. _"contradicts ADR-0007 — but worth reopening because…"_). Don't list every theoretical refactor an ADR forbids.
 
-Do NOT propose interfaces yet. Ask the user: "Which of these would you like to explore?"
+Do not propose large rewrites by default. Prefer small follow-up adjustments
+that keep current slices stable and make upcoming slices easier.
 
-### 3. Grilling loop
+### 3. Optional design follow-up
 
-Once the user picks a candidate, drop into a grilling conversation. Walk the design tree with them — constraints, dependencies, the shape of the deepened module, what sits behind the seam, what tests survive.
+Only if the user asks to pursue a candidate, walk the design tree with them:
+constraints, dependencies, the shape of the deepened module, what sits behind the
+seam, and what tests survive.
 
-Side effects happen inline as decisions crystallize:
+Do not make side effects inline unless explicitly asked. When asked, use these
+rules:
 
 - **Naming a deepened module after a concept not in `CONTEXT.md`?** Add the term to `CONTEXT.md` — same discipline as `/grill-with-docs` (see [CONTEXT-FORMAT.md](../grill-with-docs/CONTEXT-FORMAT.md)). Create the file lazily if it doesn't exist.
 - **Sharpening a fuzzy term during the conversation?** Update `CONTEXT.md` right there.
