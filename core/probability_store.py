@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
 
 
-@dataclass
+@dataclass(frozen=True)
 class BucketPayload:
     """Probability and quantile data for a single temperature bucket.
+
+    Frozen so field reassignment is prevented.  Callers must not mutate
+    the nested ``quantiles_by_fxx`` dict; ``ProbabilityStore.write()`` and
+    ``read()`` deepcopy payloads on ingress/egress to enforce isolation.
 
     Fields
     ------
@@ -20,7 +24,7 @@ class BucketPayload:
         ``{"p10": float, "p50": float, "p90": float}``.
     last_tick_utc:
         UTC timestamp of the ForecastLoop run that produced this payload.
-        Shared across all buckets for the same (condition_id, day_offset) key.
+        Must be identical for every bucket in the same write() call.
     """
 
     mc_prob:          float
@@ -33,6 +37,18 @@ _BucketKey = tuple[float, float]
 _BucketMap = dict[_BucketKey, BucketPayload]
 
 _VALID_DAY_OFFSETS = frozenset({0, 1, 2})
+
+
+def _validate_last_tick_utc_consistent(buckets: _BucketMap) -> None:
+    """Raise ValueError if buckets carry more than one distinct last_tick_utc."""
+    if len(buckets) <= 1:
+        return
+    ticks = {p.last_tick_utc for p in buckets.values()}
+    if len(ticks) > 1:
+        raise ValueError(
+            "All BucketPayload entries in a single write() call must share the "
+            f"same last_tick_utc, but found {len(ticks)} distinct values: {ticks}"
+        )
 
 
 class ProbabilityStore:
@@ -77,10 +93,14 @@ class ProbabilityStore:
         ------
         ValueError
             If day_offset is not in {0, 1, 2}.
+        ValueError
+            If bucket payloads carry inconsistent last_tick_utc values.
         """
         self._validate_day_offset(day_offset)
+        _validate_last_tick_utc_consistent(buckets)
+        snapshot = {k: copy.deepcopy(v) for k, v in buckets.items()}
         async with self._lock:
-            self._data[(condition_id, day_offset)] = dict(buckets)
+            self._data[(condition_id, day_offset)] = snapshot
 
     async def read(
         self,
@@ -109,4 +129,4 @@ class ProbabilityStore:
         self._validate_day_offset(day_offset)
         async with self._lock:
             entry = self._data.get((condition_id, day_offset))
-            return dict(entry) if entry is not None else None
+            return {k: copy.deepcopy(v) for k, v in entry.items()} if entry is not None else None

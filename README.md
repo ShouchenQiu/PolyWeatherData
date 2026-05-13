@@ -329,35 +329,47 @@ All configuration lives in a single `Settings` dataclass. Paths use `pathlib.Pat
 | `max_position_usd` | `50.0` | Maximum USD per single position |
 | `max_total_usd` | `500.0` | Maximum total USD across all open positions |
 
-#### HRRR Grid (KLGA)
+#### HRRR Source
 
-| Field | Value | Description |
+| Field | Default | Description |
 |---|---|---|
 | `hrrr_zarr_bucket` | `"hrrrzarr"` | S3 bucket name for Zarr source |
 | `hrrr_s3_bucket` | `"noaa-hrrr-bdp-pds"` | S3 bucket name for GRIB2 source |
-| `klga_grid_row` | `698` | Lambert Conformal Conic row index for KLGA |
-| `klga_grid_col` | `1556` | Lambert Conformal Conic column index for KLGA |
-
-The grid indices were derived by projecting KLGA (lat=40.7769, lon=-73.8740) into the
-HRRR Lambert Conformal Conic projection and finding the nearest grid cell (distance ~1.4 km).
+| `hrrr_source_priority` | `["s3", "nomads"]` | Ordered list of HRRR source names to try |
 
 #### Monte Carlo Parameters
 
 | Field | Default | Description |
 |---|---|---|
-| `mc_n_samp` | `5000` | Number of Monte Carlo samples |
+| `mc_n_samp` | `10000` | Number of Monte Carlo samples |
 | `mc_rng_seed` | `42` | RNG seed for reproducibility |
-| `mc_rho` | `0.90` | AR(1) inter-hour correlation coefficient |
-| `mc_bias_corr_c` | `1.5206` | Celsius bias correction constant |
 
-#### Scheduling
+#### Scheduling / TradingLoop
 
 | Field | Default | Description |
 |---|---|---|
-| `forecast_interval_min` | `60` | Minutes between ForecastLoop ticks |
-| `clob_window_min` | `30` | Half-width of CLOB price lookup window (minutes) |
-| `cutoff_hour_utc` | `21` | UTC hour after which no new signals (= 16:00 EST) |
-| `min_hours_before_cutoff` | `8` | Min EST hours of HRRR coverage required |
+| `trading_loop_interval_s` | `300` | Seconds between TradingLoop ticks |
+| `staleness_threshold_min` | `65` | Minutes after last ForecastLoop tick before trading halts |
+| `staleness_edge_bump` | `0.02` | Edge reduction applied to stale-data signals |
+| `cold_start_hours` | `72` | Hours of history required before any order is placed |
+| `max_open_per_token` | `1` | Maximum concurrent open orders per token |
+
+#### Feature Flags
+
+| Field | Default | Env override |
+|---|---|---|
+| `enable_sniper` | `False` | `ENABLE_SNIPER=1` |
+
+#### Model Training Windows
+
+| Field | Default |
+|---|---|
+| `train_start` | `"2024-10-01"` |
+| `train_end` | `"2025-12-31"` |
+| `val_start` | `"2026-01-01"` |
+| `val_end` | `"2026-02-28"` |
+| `test_start` | `"2026-03-01"` |
+| `test_end` | `"2026-04-30"` |
 
 #### API URLs
 
@@ -831,11 +843,10 @@ Persists all positions in SQLite.
 
 | Method | Description |
 |---|---|
-| `open(signal, order)` | Insert signal + order records; link via `signal_id` |
-| `fill(order_id, filled_price)` | Update order status to `"filled"`, set `filled_at` |
-| `close(order_id)` | Update order status to `"closed"` |
-| `get_open()` | Return all orders with `status='pending'` as `list[dict]` |
+| `open(sig, order)` | Insert a pending order row using the lifecycle schema |
 | `total_exposure()` | Sum of `size_usd` for all pending orders |
+
+Full lifecycle methods (record_order, mark_filled, mark_closed, etc.) are added in F03.
 
 ---
 
@@ -1046,11 +1057,18 @@ SQLite database, WAL mode, foreign keys enabled.
 | Column | Type | Constraints | Description |
 |---|---|---|---|
 | `order_id` | TEXT | PRIMARY KEY | Exchange-assigned ID |
-| `signal_id` | INTEGER | FK ¡ú signals | Parent signal |
-| `status` | TEXT | DEFAULT 'pending' | `pending / filled / closed` |
+| `token_id` | TEXT | FK -> markets | Token traded |
+| `condition_id` | TEXT | FK -> events | Parent event |
+| `side` | TEXT | | `"BUY"` or `"SELL"` |
 | `size_usd` | REAL | | Notional size |
 | `price` | REAL | | Submitted limit price |
+| `fill_price` | REAL | | Actual fill price (NULL until filled) |
+| `status` | TEXT | DEFAULT 'pending' | `pending / filled / cancelled / closed / settled` |
+| `created_at` | TEXT | | UTC ISO timestamp of order creation |
 | `filled_at` | TEXT | | UTC ISO timestamp of fill |
+| `closed_at` | TEXT | | UTC ISO timestamp of close |
+| `cancelled_at` | TEXT | | UTC ISO timestamp of cancellation |
+| `settled_payout` | REAL | | Payout received on settlement |
 
 ### Table: `model_versions`
 

@@ -37,7 +37,7 @@ class Settings:
     # HRRR source
     hrrr_s3_bucket: str = "noaa-hrrr-bdp-pds"
     hrrr_zarr_bucket: str = "hrrrzarr"
-    hrrr_source_priority: list = field(
+    hrrr_source_priority: list[str] = field(
         default_factory=lambda: ["s3", "nomads"]
     )
 

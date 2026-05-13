@@ -152,3 +152,82 @@ def test_concurrent_writes_do_not_corrupt_state() -> None:
             assert abs(result[bucket].mc_prob - float(i) / 100) < 1e-9
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Immutability / isolation guarantees
+# ---------------------------------------------------------------------------
+
+
+def test_mutating_read_result_does_not_corrupt_store() -> None:
+    """Modifying a value from read() must not affect the stored payload."""
+    store = ProbabilityStore()
+
+    async def run() -> None:
+        await store.write("cid-001", 0, {(60.0, 70.0): _make_payload(0.55)})
+        result = await store.read("cid-001", 0)
+        assert result is not None
+        # Mutate the nested dict from the read result
+        result[(60.0, 70.0)].quantiles_by_fxx[1]["p50"] = 999.0
+
+        # Re-read; store must be unaffected
+        result2 = await store.read("cid-001", 0)
+        assert result2 is not None
+        assert result2[(60.0, 70.0)].quantiles_by_fxx[1]["p50"] == 63.0
+
+    asyncio.run(run())
+
+
+def test_mutating_written_buckets_does_not_corrupt_store() -> None:
+    """Modifying the dict passed to write() must not affect the stored payload."""
+    store = ProbabilityStore()
+    payload = _make_payload(0.40)
+    original_q = payload.quantiles_by_fxx[1]["p50"]
+    buckets: dict = {(60.0, 70.0): payload}
+
+    async def run() -> None:
+        await store.write("cid-001", 0, buckets)
+        # Mutate the caller-side nested dict after the write
+        buckets[(60.0, 70.0)].quantiles_by_fxx[1]["p50"] = 999.0
+
+        result = await store.read("cid-001", 0)
+        assert result is not None
+        assert result[(60.0, 70.0)].quantiles_by_fxx[1]["p50"] == original_q
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# last_tick_utc consistency
+# ---------------------------------------------------------------------------
+
+
+def test_write_inconsistent_last_tick_utc_raises() -> None:
+    """write() rejects a bucket map with two different last_tick_utc values."""
+    store = ProbabilityStore()
+    ts1 = datetime(2026, 7, 4, 12, 0, 0, tzinfo=timezone.utc)
+    ts2 = datetime(2026, 7, 4, 13, 0, 0, tzinfo=timezone.utc)
+    p1 = BucketPayload(mc_prob=0.50, quantiles_by_fxx={}, last_tick_utc=ts1)
+    p2 = BucketPayload(mc_prob=0.60, quantiles_by_fxx={}, last_tick_utc=ts2)
+
+    async def run() -> None:
+        with pytest.raises(ValueError, match="last_tick_utc"):
+            await store.write("cid-001", 0, {(60.0, 70.0): p1, (70.0, 80.0): p2})
+
+    asyncio.run(run())
+
+
+def test_write_consistent_last_tick_utc_accepted() -> None:
+    """write() accepts a bucket map where all payloads share last_tick_utc."""
+    store = ProbabilityStore()
+    ts = datetime(2026, 7, 4, 12, 0, 0, tzinfo=timezone.utc)
+    p1 = BucketPayload(mc_prob=0.50, quantiles_by_fxx={}, last_tick_utc=ts)
+    p2 = BucketPayload(mc_prob=0.60, quantiles_by_fxx={}, last_tick_utc=ts)
+
+    async def run() -> None:
+        await store.write("cid-001", 0, {(60.0, 70.0): p1, (70.0, 80.0): p2})
+        result = await store.read("cid-001", 0)
+        assert result is not None
+        assert len(result) == 2
+
+    asyncio.run(run())

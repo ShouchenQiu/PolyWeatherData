@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 from datetime import datetime, timezone
 
 import pytest
+from loguru import logger
 
 from core.alerts import AlertBus, AlertEvent
 
@@ -169,3 +171,34 @@ def test_emit_accepted_alert_types() -> None:
 
     asyncio.run(run())
     assert set(received) == {"data_stale", "order_failure", "risk_rejected"}
+
+
+def test_failing_handler_logs_error_with_alert_type() -> None:
+    """When a handler raises, AlertBus logs ERROR containing the alert_type."""
+    bus = AlertBus()
+    captured = io.StringIO()
+    sink_id = logger.add(captured, format="{level} {message}", level="ERROR")
+
+    async def bad(event: AlertEvent) -> None:
+        raise RuntimeError("intentional failure")
+
+    bus.subscribe(bad)
+    evt = AlertEvent(
+        alert_type="order_failure",
+        station=None,
+        message="test error logging",
+        occurred_at=datetime(2026, 7, 4, tzinfo=timezone.utc),
+    )
+
+    async def run() -> None:
+        bus.emit(evt)
+        await asyncio.sleep(0)
+
+    try:
+        asyncio.run(run())
+    finally:
+        logger.remove(sink_id)
+
+    log_text = captured.getvalue()
+    assert "ERROR" in log_text
+    assert "order_failure" in log_text
