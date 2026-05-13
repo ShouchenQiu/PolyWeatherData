@@ -4,26 +4,28 @@ Good interfaces make testing natural:
 
 1. **Accept dependencies, don't create them**
 
-   ```typescript
-   // Testable
-   function processOrder(order, paymentGateway) {}
+   ```python
+   # Testable
+   def __init__(self, probability_store, alert_bus, exchange):
+       self.probability_store = probability_store
+       self.alert_bus = alert_bus
+       self.exchange = exchange
 
-   // Hard to test
-   function processOrder(order) {
-     const gateway = new StripeGateway();
-   }
+   # Hard to test
+   def __init__(self):
+       self.exchange = ClobExchange.from_env()
    ```
 
 2. **Return results, don't produce side effects**
 
-   ```typescript
-   // Testable
-   function calculateDiscount(cart): Discount {}
+   ```python
+   # Testable
+   def bucket_payloads_for_event(event, model_output) -> dict:
+       ...
 
-   // Hard to test
-   function applyDiscount(cart): void {
-     cart.total -= discount;
-   }
+   # Hard to test
+   def write_bucket_payloads_for_event(event, model_output) -> None:
+       ...
    ```
 
 3. **Small surface area**

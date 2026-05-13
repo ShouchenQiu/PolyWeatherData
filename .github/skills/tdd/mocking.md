@@ -6,6 +6,8 @@ Mock at **system boundaries** only:
 - Databases (sometimes - prefer test DB)
 - Time/randomness
 - File system (sometimes)
+- PolyWeatherBot live boundaries: HRRR/IEM network calls, CLOB clients, real
+  order submission, Telegram
 
 Don't mock:
 
@@ -21,35 +23,36 @@ At system boundaries, design interfaces that are easy to mock:
 
 Pass external dependencies in rather than creating them internally:
 
-```typescript
-// Easy to mock
-function processPayment(order, paymentClient) {
-  return paymentClient.charge(order.total);
-}
+```python
+# Easy to fake in tests.
+class TradingLoop:
+    def __init__(self, probability_store, alert_bus, exchange):
+        self.probability_store = probability_store
+        self.alert_bus = alert_bus
+        self.exchange = exchange
 
-// Hard to mock
-function processPayment(order) {
-  const client = new StripeClient(process.env.STRIPE_KEY);
-  return client.charge(order.total);
-}
+
+# Hard to test: creates the live boundary internally.
+class TradingLoop:
+    def __init__(self):
+        self.exchange = ClobExchange.from_env()
 ```
 
 **2. Prefer SDK-style interfaces over generic fetchers**
 
 Create specific functions for each external operation instead of one generic function with conditional logic:
 
-```typescript
-// GOOD: Each function is independently mockable
-const api = {
-  getUser: (id) => fetch(`/users/${id}`),
-  getOrders: (userId) => fetch(`/users/${userId}/orders`),
-  createOrder: (data) => fetch('/orders', { method: 'POST', body: data }),
-};
+```python
+# GOOD: each method has one shape.
+class OrderbookFetcher:
+    def get_book(self, token_id: str) -> OrderBook:
+        ...
 
-// BAD: Mocking requires conditional logic inside the mock
-const api = {
-  fetch: (endpoint, options) => fetch(endpoint, options),
-};
+
+# BAD: tests must branch on operation strings.
+class ClobGateway:
+    def call(self, operation: str, payload: dict) -> dict:
+        ...
 ```
 
 The SDK approach means:
