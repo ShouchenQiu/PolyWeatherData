@@ -34,17 +34,16 @@ class Settings:
     max_position_usd: float = 50.0
     max_total_usd: float = 500.0
 
-    # HRRR grid
+    # HRRR source
     hrrr_s3_bucket: str = "noaa-hrrr-bdp-pds"
     hrrr_zarr_bucket: str = "hrrrzarr"
-    klga_grid_row: int = 698    # Zarr row  (S3-idx row: 676)
-    klga_grid_col: int = 1556   # Zarr col  (S3-idx col: 1168)
+    hrrr_source_priority: list = field(
+        default_factory=lambda: ["s3", "nomads"]
+    )
 
     # Monte-Carlo
-    mc_n_samp: int = 5000
+    mc_n_samp: int = 10000
     mc_rng_seed: int = 42
-    mc_rho: float = 0.90
-    mc_bias_corr_c: float = 1.5206
 
     # Data-source API URLs
     iem_api_url: str = (
@@ -68,11 +67,27 @@ class Settings:
         )
     )
 
-    # Scheduling
-    forecast_interval_min: int = 60
-    clob_window_min: int = 30
-    cutoff_hour_utc: int = 21       # 16:00 EST
-    min_hours_before_cutoff: int = 8
+    # Scheduling / TradingLoop
+    trading_loop_interval_s: int = 300
+    staleness_threshold_min: int = 65
+    staleness_edge_bump: float = 0.02
+
+    # Feature flags
+    enable_sniper: bool = field(
+        default_factory=lambda: os.environ.get("ENABLE_SNIPER", "").lower() in ("1", "true", "yes")
+    )
+
+    # Model training windows (ISO dates, inclusive)
+    cold_start_hours: int = 72
+    train_start: str = "2024-10-01"
+    train_end: str = "2025-12-31"
+    val_start: str = "2026-01-01"
+    val_end: str = "2026-02-28"
+    test_start: str = "2026-03-01"
+    test_end: str = "2026-04-30"
+
+    # Risk
+    max_open_per_token: int = 1
 
     # Polymarket credentials (read-only properties)
     @property

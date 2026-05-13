@@ -102,17 +102,51 @@ def test_signal_insert_returns_id(tmp_db: sqlite3.Connection) -> None:
     assert sid >= 1
 
 
-def test_order_status_update(tmp_db: sqlite3.Connection) -> None:
+# ---------------------------------------------------------------------------
+# orders table -- new lifecycle schema (AC4 + AC5)
+# ---------------------------------------------------------------------------
+
+
+def test_orders_table_has_lifecycle_columns() -> None:
+    db = DbClient(":memory:")
+    cur = db._conn.execute("PRAGMA table_info(orders)")
+    cols = {row["name"] for row in cur.fetchall()}
+    required = {
+        "order_id", "token_id", "condition_id", "side",
+        "size_usd", "price", "fill_price", "status",
+        "created_at", "filled_at", "closed_at", "cancelled_at", "settled_payout",
+    }
+    assert required <= cols, f"Missing columns: {required - cols}"
+
+
+def test_orders_status_default_pending() -> None:
     db = DbClient(":memory:")
     _seed(db)
-    sid = db.insert_signal("2026-07-01T12:00:00Z", "tok-001", 0.72, 0.65, 0.07, "BUY")
-    db.insert_order("ord-001", sid, 25.0, 0.65)
-    open_orders = db.get_open_orders()
-    assert len(open_orders) == 1
+    db._conn.execute(
+        "INSERT INTO orders (order_id, token_id, condition_id, side, size_usd, price)"
+        " VALUES ('ord-1', 'tok-001', 'cid-001', 'BUY', 10.0, 0.5)"
+    )
+    db._conn.commit()
+    row = db._conn.execute(
+        "SELECT status FROM orders WHERE order_id='ord-1'"
+    ).fetchone()
+    assert row["status"] == "pending"
 
-    db.update_order_status("ord-001", "filled", "2026-07-01T12:05:00Z")
-    open_orders_after = db.get_open_orders()
-    assert len(open_orders_after) == 0
+
+def test_orders_optional_columns_nullable() -> None:
+    db = DbClient(":memory:")
+    _seed(db)
+    db._conn.execute(
+        "INSERT INTO orders (order_id, token_id, condition_id, side, size_usd, price)"
+        " VALUES ('ord-2', 'tok-001', 'cid-001', 'BUY', 10.0, 0.5)"
+    )
+    db._conn.commit()
+    row = db._conn.execute(
+        "SELECT fill_price, filled_at, closed_at, cancelled_at, settled_payout"
+        " FROM orders WHERE order_id='ord-2'"
+    ).fetchone()
+    for col in ("fill_price", "filled_at", "closed_at", "cancelled_at", "settled_payout"):
+        assert row[col] is None, f"Expected {col} to be NULL"
 
 
 # ---------------------------------------------------------------------------

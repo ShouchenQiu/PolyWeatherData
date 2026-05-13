@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from core.types import Order, Signal
     from db.schema import DbClient
 
 
@@ -22,74 +21,34 @@ class PositionTracker:
         self._db = db
 
     # ------------------------------------------------------------------
-    # Lifecycle
+    # Used by ForecastLoop -- kept for compatibility until F03 extends
     # ------------------------------------------------------------------
 
-    def open(self, signal: "Signal", order: "Order") -> None:
-        """Record a newly placed order.
-
-        Parameters
-        ----------
-        signal:
-            The signal that triggered the order (used to store the
-            signal in the DB and link it to the order).
-        order:
-            Order dataclass populated by the exchange adapter.
-        """
+    def open(self, sig: Any, order: Any) -> None:
+        """Record a newly placed order using the lifecycle schema."""
         now = datetime.now(timezone.utc).isoformat()
-
-        signal_id = self._db.insert_signal(
-            timestamp  = now,
-            token_id   = signal.token_id,
-            mc_prob    = signal.mc_prob,
-            clob_price = signal.clob_price,
-            edge       = signal.edge,
-            side       = signal.side,
+        self._db._conn.execute(
+            """
+            INSERT INTO orders
+                (order_id, token_id, condition_id, side, size_usd, price,
+                 status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+            """,
+            (
+                order.order_id,
+                order.token_id,
+                sig.condition_id,
+                order.side,
+                order.size_usd,
+                order.price,
+                now,
+            ),
         )
-
-        self._db.insert_order(
-            order_id  = order.order_id,
-            signal_id = signal_id,
-            size_usd  = order.size_usd,
-            price     = order.price,
-            status    = order.status,
-        )
-
-    def fill(self, order_id: str, filled_price: float) -> None:
-        """Mark an order as filled.
-
-        Parameters
-        ----------
-        order_id:
-            Exchange order identifier.
-        filled_price:
-            Actual fill price (stored for PnL accounting).
-        """
-        filled_at = datetime.now(timezone.utc).isoformat()
-        self._db.update_order_status(
-            order_id  = order_id,
-            status    = "filled",
-            filled_at = filled_at,
-        )
-
-    def close(self, order_id: str) -> None:
-        """Mark an order as closed (unwound / settled)."""
-        self._db.update_order_status(
-            order_id = order_id,
-            status   = "closed",
-        )
-
-    def get_open(self) -> list[dict]:
-        """Return all orders with status ``'pending'``.
-
-        Returns
-        -------
-        List of dicts with keys: order_id, signal_id, status,
-        size_usd, price, filled_at.
-        """
-        rows = self._db.get_open_orders()
-        return [dict(r) for r in rows]
+        self._db._conn.commit()
 
     def total_exposure(self) -> float:
-        """Sum of size_usd across all open (pending) positions."""
-        return sum(pos["size_usd"] for pos in self.get_open())
+        """Sum of size_usd across all pending positions."""
+        cur = self._db._conn.execute(
+            "SELECT COALESCE(SUM(size_usd), 0.0) FROM orders WHERE status='pending'"
+        )
+        return float(cur.fetchone()[0])

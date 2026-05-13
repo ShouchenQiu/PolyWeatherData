@@ -49,10 +49,8 @@ class McSampler:
     @classmethod
     def from_settings(cls, settings: "Settings") -> "McSampler":
         return cls(
-            n_samp      = settings.mc_n_samp,
-            rng_seed    = settings.mc_rng_seed,
-            rho         = settings.mc_rho,
-            bias_corr_c = settings.mc_bias_corr_c,
+            n_samp   = settings.mc_n_samp,
+            rng_seed = settings.mc_rng_seed,
         )
 
     # ------------------------------------------------------------------

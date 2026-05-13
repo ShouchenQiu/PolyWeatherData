@@ -63,12 +63,20 @@ class DbClient:
             );
 
             CREATE TABLE IF NOT EXISTS orders (
-                order_id   TEXT PRIMARY KEY,
-                signal_id  INTEGER REFERENCES signals(signal_id),
-                status     TEXT DEFAULT 'pending',
-                size_usd   REAL,
-                price      REAL,
-                filled_at  TEXT
+                order_id       TEXT PRIMARY KEY,
+                token_id       TEXT REFERENCES markets(token_id),
+                condition_id   TEXT REFERENCES events(condition_id),
+                side           TEXT,
+                size_usd       REAL,
+                price          REAL,
+                fill_price     REAL,
+                status         TEXT DEFAULT 'pending',
+                -- status domain: pending | filled | cancelled | closed | settled
+                created_at     TEXT,
+                filled_at      TEXT,
+                closed_at      TEXT,
+                cancelled_at   TEXT,
+                settled_payout REAL
             );
 
             CREATE TABLE IF NOT EXISTS model_versions (
@@ -204,42 +212,6 @@ class DbClient:
         )
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
-
-    # ------------------------------------------------------------------
-    # Orders
-    # ------------------------------------------------------------------
-
-    def insert_order(
-        self,
-        order_id: str,
-        signal_id: int,
-        size_usd: float,
-        price: float,
-        status: str = "pending",
-    ) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO orders (order_id, signal_id, status, size_usd, price)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (order_id, signal_id, status, size_usd, price),
-        )
-        self._conn.commit()
-
-    def update_order_status(
-        self, order_id: str, status: str, filled_at: str | None = None
-    ) -> None:
-        self._conn.execute(
-            "UPDATE orders SET status=?, filled_at=? WHERE order_id=?",
-            (status, filled_at, order_id),
-        )
-        self._conn.commit()
-
-    def get_open_orders(self) -> list[dict]:
-        cur = self._conn.execute(
-            "SELECT * FROM orders WHERE status='pending'"
-        )
-        return [dict(r) for r in cur.fetchall()]
 
     # ------------------------------------------------------------------
     # Model versions
