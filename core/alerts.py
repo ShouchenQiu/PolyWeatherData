@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 
 from loguru import logger
 
@@ -28,7 +28,7 @@ class AlertEvent:
         Consumed by downstream subscribers such as Telegram or dashboard.
     """
 
-    alert_type:  str
+    alert_type:  Literal["data_stale", "order_failure", "risk_rejected"]
     station:     str | None
     message:     str
     occurred_at: datetime
