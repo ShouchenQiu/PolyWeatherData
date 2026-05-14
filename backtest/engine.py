@@ -99,21 +99,29 @@ class BacktestEngine:
     min_edge:
         Minimum absolute edge required to record a signal row.  Set to
         0.0 to record all (init, bucket) pairs regardless of edge.
+    cold_start_hours:
+        Number of hours from the start of the date range to skip.
+        The encoder window requires ``cold_start_hours`` hours of
+        historical data before each init time; inits that fall inside
+        this window cannot produce a valid encoder frame and are skipped
+        (default 72, matching ``MAX_ENCODER_LENGTH`` [ADR-0001]).
     """
 
     def __init__(
         self,
-        pipeline:      "ModelPipeline",
-        strategy:      "BaseStrategy",
-        clob_df:       pd.DataFrame,
-        actual_highs:  dict[str, float],
-        min_edge:      float = 0.0,
+        pipeline:          "ModelPipeline",
+        strategy:          "BaseStrategy",
+        clob_df:           pd.DataFrame,
+        actual_highs:      dict[str, float],
+        min_edge:          float = 0.0,
+        cold_start_hours:  int   = 72,
     ) -> None:
-        self.pipeline     = pipeline
-        self.strategy     = strategy
-        self.actual_highs = actual_highs
-        self.min_edge     = min_edge
-        self._clob_index  = self._build_clob_index(clob_df)
+        self.pipeline          = pipeline
+        self.strategy          = strategy
+        self.actual_highs      = actual_highs
+        self.min_edge          = min_edge
+        self._cold_start_hours = cold_start_hours
+        self._clob_index       = self._build_clob_index(clob_df)
 
     # ------------------------------------------------------------------
     # Public API
@@ -150,16 +158,22 @@ class BacktestEngine:
             init_hours = [0, 6, 12, 18]
 
         dates = pd.date_range(start_date, end_date, freq="D", tz="UTC")
+        cold_start_cutoff = pd.Timestamp(start_date, tz="UTC") + pd.Timedelta(
+            hours=self._cold_start_hours
+        )
         records: list[dict] = []
         total_inits = len(dates) * len(init_hours)
         logger.info(
-            "Backtest starting: {} to {} ({} inits)",
-            start_date, end_date, total_inits,
+            "Backtest starting: {} to {} ({} inits, cold-start cutoff {})",
+            start_date, end_date, total_inits, cold_start_cutoff,
         )
 
         for day in dates:
             for hour in init_hours:
                 init_utc = day + pd.Timedelta(hours=hour)
+                if init_utc < cold_start_cutoff:
+                    logger.debug("cold-start skip: {}", init_utc)
+                    continue
                 self._process_init(init_utc, station, records)
 
         df = pd.DataFrame(records)

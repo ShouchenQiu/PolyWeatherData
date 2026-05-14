@@ -155,7 +155,8 @@ class TestBacktestEnginePnL:
                       65.0, 75.0, clob_mid)
         ]
         clob_df = _make_clob_df(clob_rows)
-        engine = BacktestEngine(pipeline, strategy, clob_df, actual_highs, min_edge=0.0)
+        engine = BacktestEngine(pipeline, strategy, clob_df, actual_highs,
+                                min_edge=0.0, cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01", types.SimpleNamespace(), init_hours=[6])
         return df
 
@@ -213,7 +214,8 @@ class TestClobWindowSelection:
                       65.0, 75.0, 0.55, is_filled=0),
         ]
         engine = BacktestEngine(pipeline, _make_strategy(),
-                                _make_clob_df(rows), actual_highs)
+                                _make_clob_df(rows), actual_highs,
+                                cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
                         types.SimpleNamespace(), init_hours=[6])
         assert not df.empty
@@ -228,7 +230,8 @@ class TestClobWindowSelection:
                       65.0, 75.0, 0.60, is_filled=1),
         ]
         engine = BacktestEngine(pipeline, _make_strategy(),
-                                _make_clob_df(rows), actual_highs)
+                                _make_clob_df(rows), actual_highs,
+                                cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
                         types.SimpleNamespace(), init_hours=[6])
         assert not df.empty
@@ -243,7 +246,8 @@ class TestClobWindowSelection:
                       65.0, 75.0, 0.60, is_filled=0),
         ]
         engine = BacktestEngine(pipeline, _make_strategy(),
-                                _make_clob_df(rows), actual_highs)
+                                _make_clob_df(rows), actual_highs,
+                                cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
                         types.SimpleNamespace(), init_hours=[6])
         assert df.empty
@@ -264,7 +268,8 @@ class TestCutoffAndCoverage:
                       65.0, 75.0, 0.55),
         ]
         engine = BacktestEngine(pipeline, _make_strategy(),
-                                _make_clob_df(rows), actual_highs)
+                                _make_clob_df(rows), actual_highs,
+                                cold_start_hours=0)
         # init at 21:00 UTC on same target day -> cutoff hit
         df = engine.run("2024-01-01", "2024-01-01",
                         types.SimpleNamespace(), init_hours=[21])
@@ -281,7 +286,8 @@ class TestCutoffAndCoverage:
                       65.0, 75.0, 0.55),
         ]
         engine = BacktestEngine(pipeline, _make_strategy(),
-                                _make_clob_df(rows), actual_highs)
+                                _make_clob_df(rows), actual_highs,
+                                cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
                         types.SimpleNamespace(), init_hours=[18])
         if not df.empty:
@@ -305,7 +311,8 @@ class TestMinEdge:
                       65.0, 75.0, 0.68),
         ]
         engine = BacktestEngine(pipeline, _make_strategy(),
-                                _make_clob_df(rows), actual_highs, min_edge=0.05)
+                                _make_clob_df(rows), actual_highs,
+                                min_edge=0.05, cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
                         types.SimpleNamespace(), init_hours=[6])
         assert df.empty
@@ -318,7 +325,8 @@ class TestMinEdge:
                       65.0, 75.0, 0.55),
         ]
         engine = BacktestEngine(pipeline, _make_strategy(),
-                                _make_clob_df(rows), actual_highs, min_edge=0.05)
+                                _make_clob_df(rows), actual_highs,
+                                min_edge=0.05, cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
                         types.SimpleNamespace(), init_hours=[6])
         assert not df.empty
@@ -334,7 +342,8 @@ class TestEmptyClob:
         pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
         actual_highs = {"2024-01-02": 70.0}
         engine = BacktestEngine(pipeline, _make_strategy(),
-                                _make_clob_df([]), actual_highs)
+                                _make_clob_df([]), actual_highs,
+                                cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
                         types.SimpleNamespace(), init_hours=[6])
         assert df.empty
@@ -354,10 +363,103 @@ class TestMissingActualHighs:
         ]
         # actual_highs is empty -> no data for 2024-01-02
         engine = BacktestEngine(pipeline, _make_strategy(),
-                                _make_clob_df(rows), {})
+                                _make_clob_df(rows), {},
+                                cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
                         types.SimpleNamespace(), init_hours=[6])
         assert df.empty
+
+
+# ---------------------------------------------------------------------------
+# BacktestEngine -- cold-start guard
+# ---------------------------------------------------------------------------
+
+class TestColdStartGuard:
+
+    def _build_clob_multi_day(self) -> pd.DataFrame:
+        """CLOB with rows on day+1 through day+4 for bucket [65, 75]."""
+        rows = []
+        for day_offset in range(1, 5):
+            event_date = f"2024-01-0{day_offset + 1}"
+            ts_utc     = f"2024-01-0{day_offset} 06:00:00"
+            rows.append(_clob_row(event_date, ts_utc, "slug", 65.0, 75.0, 0.55))
+        return _make_clob_df(rows)
+
+    def test_inits_inside_cold_start_skipped(self):
+        """Inits within cold_start_hours of start_date must not produce records."""
+        pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
+        actual_highs = {
+            "2024-01-02": 70.0,
+            "2024-01-03": 70.0,
+            "2024-01-04": 70.0,
+            "2024-01-05": 70.0,
+        }
+        clob_df = self._build_clob_multi_day()
+        # cold_start_hours=72 means inits on day 0,1,2 (first 72h) skipped
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), clob_df, actual_highs,
+            cold_start_hours=72,
+        )
+        df = engine.run("2024-01-01", "2024-01-04",
+                        types.SimpleNamespace(), init_hours=[6])
+
+        if not df.empty:
+            # All recorded init_utc must be >= start_date + 72h
+            cutoff = pd.Timestamp("2024-01-04 00:00:00", tz="UTC")  # day1 + 72h
+            for row_init in df["init_utc"].unique():
+                ts = pd.Timestamp(row_init, tz="UTC")
+                assert ts >= cutoff, (
+                    f"init {ts} is before cold-start cutoff {cutoff}"
+                )
+
+    def test_zero_cold_start_hours_allows_all_inits(self):
+        """With cold_start_hours=0 no inits are skipped."""
+        pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
+        actual_highs = {"2024-01-02": 70.0}
+        rows = [
+            _clob_row("2024-01-02", "2024-01-01 06:00:00", "slug", 65.0, 75.0, 0.55),
+        ]
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), _make_clob_df(rows), actual_highs,
+            cold_start_hours=0,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        types.SimpleNamespace(), init_hours=[6])
+        assert not df.empty
+
+    def test_default_cold_start_is_72(self):
+        """Default cold_start_hours must be 72 (matching MAX_ENCODER_LENGTH)."""
+        engine = BacktestEngine(
+            _make_pipeline({}), _make_strategy(), _make_clob_df([]), {},
+        )
+        assert engine._cold_start_hours == 72
+
+    def test_process_init_call_site_matches_pipeline_signature(self):
+        """pipeline.run() receives (station, init_utc, buckets) -- no TypeError."""
+        received: list = []
+
+        def capturing_run(station, init_utc, buckets):
+            received.append((station, init_utc, buckets))
+            return {"probs": {(65.0, 75.0): 0.70}}
+
+        pipeline      = types.SimpleNamespace()
+        pipeline.run  = capturing_run
+        actual_highs  = {"2024-01-02": 70.0}
+        rows = [
+            _clob_row("2024-01-02", "2024-01-01 06:00:00", "slug", 65.0, 75.0, 0.55),
+        ]
+        station = types.SimpleNamespace()
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), _make_clob_df(rows), actual_highs,
+            cold_start_hours=0,
+        )
+        engine.run("2024-01-01", "2024-01-01", station, init_hours=[6])
+
+        assert len(received) == 1
+        called_station, called_init, called_buckets = received[0]
+        assert called_station is station
+        assert called_init == pd.Timestamp("2024-01-01 06:00:00", tz="UTC")
+        assert (65.0, 75.0) in called_buckets
 
 
 # ---------------------------------------------------------------------------
