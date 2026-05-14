@@ -5,6 +5,7 @@ produce per-bucket probabilities for a given station and init time.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -14,6 +15,7 @@ from loguru import logger
 if TYPE_CHECKING:
     from config.stations import StationConfig
     from model.mc import McSampler
+    from model.store.registry import ModelRegistry
     from model.tft import TftModel
 
 
@@ -31,6 +33,11 @@ class ModelPipeline:
           - fetch_hrrr(init_time, station) -> pd.DataFrame
           - fetch_latest_iem_tick(station, now_utc) -> pd.DataFrame
           - build_encoder_obs_window(station, init_time) -> pd.DataFrame
+    registry:
+        Optional ModelRegistry instance.  When provided, per-station
+        max_bias is loaded from the registry and injected into the
+        McSampler before each run.  When None the McSampler's existing
+        _max_bias value (default 0.0) is used unchanged.
     """
 
     _N_ENC: int = 72  # encoder lookback window in hours
@@ -40,10 +47,12 @@ class ModelPipeline:
         tft: "TftModel",
         mc: "McSampler",
         data_mgr: Any,
+        registry: "ModelRegistry | None" = None,
     ) -> None:
         self.tft      = tft
         self.mc       = mc
         self.data_mgr = data_mgr
+        self.registry = registry
 
     # ------------------------------------------------------------------
     # Public API
@@ -138,7 +147,12 @@ class ModelPipeline:
             dtype=float,
         )
 
-        # 7. Monte Carlo -> (n_samp,) daily high in degF
+        # 7. Load per-station max_bias from registry (if available) then
+        #    run MC -> (n_samp,) daily high in degF
+        if self.registry is not None:
+            self.mc.set_max_bias(
+                self.registry.load_max_bias(station.station_id)
+            )
         daily_highs = self.mc.sample_daily_high(mu_vec, sigma_vec)
 
         # 8. Convert to bucket probabilities + extract sample quantiles
@@ -157,7 +171,7 @@ class ModelPipeline:
             "probs":         probs,
             "p50_high_f":    p50_high_f,
             "quantiles":     quantiles,
-            "last_tick_utc": init_utc,
+            "last_tick_utc": datetime.now(timezone.utc),
         }
 
     # ------------------------------------------------------------------

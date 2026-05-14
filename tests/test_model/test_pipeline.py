@@ -245,17 +245,25 @@ def test_run_encoder_df_has_seasonal_columns():
 
 
 def test_run_last_tick_utc_is_utc_timestamp():
-    """result['last_tick_utc'] must be a UTC-aware Timestamp equal to init_time."""
+    """result['last_tick_utc'] must be a UTC-aware datetime close to now."""
+    from datetime import datetime, timezone
+
     mc       = McSampler(n_samp=200, rng_seed=0)
     tft      = _make_tft_mock()
     dm       = _make_data_mgr(_INIT_TIME)
     pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
-    result   = pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+    before = datetime.now(timezone.utc)
+    result = pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+    after  = datetime.now(timezone.utc)
 
     ts = result["last_tick_utc"]
-    assert isinstance(ts, pd.Timestamp)
-    assert ts.tzinfo is not None
-    assert ts == _INIT_TIME
+    assert ts.tzinfo is not None, "last_tick_utc must be timezone-aware"
+    # Normalise to datetime for comparison
+    ts_dt = ts if isinstance(ts, datetime) else ts.to_pydatetime()
+    assert before <= ts_dt <= after, (
+        f"last_tick_utc {ts_dt} outside [{before}, {after}]"
+    )
 
 
 def test_tft_max_encoder_length_is_72():
@@ -268,4 +276,67 @@ def test_tft_prep_removed():
     import model.tft as tft_module
     assert not hasattr(tft_module, "_prep"), "_prep must be removed from model.tft"
 
+
+# -----------------------------------------------------------------------
+# McSampler.set_max_bias
+# -----------------------------------------------------------------------
+
+def test_mc_set_max_bias_updates_internal_bias():
+    """set_max_bias() must update _max_bias used during sampling."""
+    mc = McSampler(n_samp=200, rng_seed=0)
+    assert mc._max_bias == 0.0
+    mc.set_max_bias(5.0)
+    assert mc._max_bias == 5.0
+
+
+def test_mc_set_max_bias_shifts_daily_highs():
+    """A positive max_bias lowers the returned daily high distribution."""
+    rng = np.random.default_rng(7)
+    mu    = np.full(48, 20.0)
+    sigma = np.full(48, 1.0)
+
+    mc_base = McSampler(n_samp=5000, rng_seed=7)
+    mc_base.set_max_bias(0.0)
+    highs_base = mc_base.sample_daily_high(mu, sigma)
+
+    mc_biased = McSampler(n_samp=5000, rng_seed=7)
+    mc_biased.set_max_bias(2.0)
+    highs_biased = mc_biased.sample_daily_high(mu, sigma)
+
+    # biased mean should be ~2 degF lower than base mean
+    diff = highs_base.mean() - highs_biased.mean()
+    assert abs(diff - 2.0) < 0.5, f"Expected ~2 F shift, got {diff:.3f}"
+
+
+# -----------------------------------------------------------------------
+# ModelPipeline -- registry wiring
+# -----------------------------------------------------------------------
+
+def test_pipeline_loads_max_bias_from_registry():
+    """When registry is provided, mc.set_max_bias is called with registry value."""
+    mc       = McSampler(n_samp=200, rng_seed=0)
+    tft      = _make_tft_mock()
+    dm       = _make_data_mgr(_INIT_TIME)
+
+    registry = MagicMock()
+    registry.load_max_bias.return_value = 3.7
+
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm, registry=registry)
+    pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+    registry.load_max_bias.assert_called_once_with("KLGA")
+    assert mc._max_bias == 3.7
+
+
+def test_pipeline_without_registry_preserves_existing_max_bias():
+    """When registry=None, mc._max_bias is not overwritten by the pipeline."""
+    mc       = McSampler(n_samp=200, rng_seed=0)
+    mc.set_max_bias(1.5)
+    tft      = _make_tft_mock()
+    dm       = _make_data_mgr(_INIT_TIME)
+
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)  # no registry
+    pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+    assert mc._max_bias == 1.5  # unchanged
 

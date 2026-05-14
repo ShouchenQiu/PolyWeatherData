@@ -49,6 +49,15 @@ class McSampler:
             rng_seed = settings.mc_rng_seed,
         )
 
+    def set_max_bias(self, max_bias: float) -> None:
+        """Set the per-station max-temperature bias correction.
+
+        Loaded from ModelRegistry.load_max_bias() at the pipeline assembly
+        point before each station's MC run.  Defaults to 0.0 (no correction)
+        until calibrated.
+        """
+        self._max_bias = float(max_bias)
+
     # ------------------------------------------------------------------
     # Covariance fitting
     # ------------------------------------------------------------------

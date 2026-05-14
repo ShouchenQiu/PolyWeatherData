@@ -246,7 +246,11 @@ class DataManager:
             Target station.
         init_time:
             Model initialisation time (UTC).  The window covers
-            [init_time - n_hours, init_time).
+            [init_time - n_hours, init_time - 1h], i.e. hours -n_hours..-1
+            relative to init.  For the default n_hours=72 this is hours
+            -72..-1 (72 hourly rows).  The IEM observation at init_time
+            itself is not included because it has not yet been fully
+            quality-controlled when the model runs.
         n_hours:
             Length of the lookback window in hours (default 72).
 
