@@ -32,7 +32,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from data.forecast.base import BaseForecastSource
-from data.forecast.hrrr_fill import HrrrFill
+from data.forecast.hrrr_fill import HrrrFill, _MAJOR_HOURS, _nearest_prior_major
 from data.forecast.vars import GRIB_TO_COL, HRRR_SEARCHES
 
 if TYPE_CHECKING:
@@ -49,7 +49,6 @@ _RANGE_THREADS = 24
 _CONNECT_THREADS = 32
 _RETRY_TOTAL = 4
 _RETRY_BACKOFF = 1.5
-_MAJOR_HOURS = frozenset({0, 6, 12, 18})
 _NON_MAJOR_FXX = range(0, 19)   # non-MAJOR runs have fxx 0-18 only
 
 
@@ -77,15 +76,6 @@ def _is_major(init_time: pd.Timestamp) -> bool:
         else init_time.tz_convert("UTC")
     )
     return utc.hour in _MAJOR_HOURS
-
-
-def _prior_major(init_time: pd.Timestamp) -> pd.Timestamp:
-    """Return the nearest prior MAJOR-hour init at or before init_time."""
-    utc = (
-        init_time.tz_localize("UTC") if init_time.tzinfo is None
-        else init_time.tz_convert("UTC")
-    )
-    return utc - pd.Timedelta(hours=utc.hour % 6)
 
 
 class BaseGribSource(BaseForecastSource):
@@ -253,6 +243,28 @@ class BaseGribSource(BaseForecastSource):
     # Public fetch  -- returns dict[station_id -> DataFrame]
     # ------------------------------------------------------------------
 
+    def fetch_raw(
+        self,
+        init_time: pd.Timestamp,
+        fxx_range: range,
+        station: "StationConfig | None" = None,
+    ) -> "dict[str, pd.DataFrame]":
+        """Fetch fxx_range rows for init_time without any MAJOR-hour splice.
+
+        This is a lower-level entry point for callers (e.g. DataManager) that
+        coordinate the HrrrFill splice themselves.  Use ``fetch`` when you
+        want the full MAJOR/non-MAJOR logic handled automatically.
+        """
+        from config.stations import STATIONS
+
+        station_list = [station] if station is not None else list(STATIONS.values())
+
+        init_utc = (
+            init_time.tz_localize("UTC") if init_time.tzinfo is None
+            else init_time.tz_convert("UTC")
+        )
+        return self._fetch_all_stations(init_utc, fxx_range, station_list)
+
     def fetch(
         self,
         init_time: pd.Timestamp,
@@ -298,7 +310,7 @@ class BaseGribSource(BaseForecastSource):
         )
         non_major_dict = self._fetch_all_stations(init_utc, _NON_MAJOR_FXX, station_list)
 
-        nearest_major_init = _prior_major(init_utc)
+        nearest_major_init = _nearest_prior_major(init_utc)
         prior_major_init   = nearest_major_init - pd.Timedelta(hours=6)
 
         try:

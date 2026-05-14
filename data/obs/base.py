@@ -18,6 +18,7 @@ class BaseObsSource(ABC):
         station: "StationConfig",
         start: pd.Timestamp,
         end: pd.Timestamp,
+        now_utc: "pd.Timestamp | None" = None,
     ) -> pd.DataFrame:
         """Fetch surface observations for a station over a time window.
 

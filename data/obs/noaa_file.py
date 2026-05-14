@@ -106,6 +106,7 @@ class NoaaFileSource(BaseObsSource):
         station: "StationConfig",
         start: pd.Timestamp,
         end: pd.Timestamp,
+        now_utc: "pd.Timestamp | None" = None,
     ) -> pd.DataFrame:
         url = _TGFTP_URL_TPL.format(station=station.station_id)
         try:
