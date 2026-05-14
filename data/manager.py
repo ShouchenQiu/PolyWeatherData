@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 import pandas as pd
 from loguru import logger
 
+from config.settings import Settings as _Settings
+
 if TYPE_CHECKING:
     from config.stations import StationConfig
     from data.forecast.base import BaseForecastSource
@@ -192,3 +194,88 @@ class DataManager:
         if "raw_tmpc_tenths" not in df.columns:
             return False
         return bool(df["raw_tmpc_tenths"].notna().any())
+
+    # ------------------------------------------------------------------
+    # Encoder window builder
+    # ------------------------------------------------------------------
+
+    def build_encoder_obs_window(
+        self,
+        station: "StationConfig",
+        init_time: pd.Timestamp,
+        n_hours: int = 72,
+    ) -> pd.DataFrame:
+        """Read the last n_hours of f01 HRRR and IEM obs; merge on valid_time.
+
+        Reads directly from the ParquetStores -- no network fetch.
+
+        Parameters
+        ----------
+        station:
+            Target station.
+        init_time:
+            Model initialisation time (UTC).  The window covers
+            [init_time - n_hours, init_time).
+        n_hours:
+            Length of the lookback window in hours (default 72).
+
+        Returns
+        -------
+        Merged DataFrame with at least valid_time, TMP_2m, and raw_tmpc_tenths
+        columns.  Rows are sorted by valid_time.
+
+        Raises
+        ------
+        RuntimeError
+            When fewer than n_hours rows are available in either the HRRR
+            or obs store after the merge.
+        """
+        settings = _Settings()
+        cold_start = settings.cold_start_hours
+
+        init_utc = (
+            init_time.tz_localize("UTC") if init_time.tzinfo is None
+            else init_time.tz_convert("UTC")
+        )
+        window_start = init_utc - pd.Timedelta(hours=n_hours)
+        window_end   = init_utc - pd.Timedelta(hours=1)
+
+        hrrr_raw = self._forecast_store.read(
+            station.station_id, window_start, window_end
+        )
+        obs_raw = self._obs_store.read(
+            station.station_id, window_start, window_end
+        )
+
+        # Filter to fxx=1 only (ADR-0003 stores fxx 0 and 1; we want f01)
+        if not hrrr_raw.empty and "fxx" in hrrr_raw.columns:
+            hrrr_raw = hrrr_raw[hrrr_raw["fxx"] == 1].reset_index(drop=True)
+
+        if len(hrrr_raw) < cold_start:
+            raise RuntimeError(
+                f"build_encoder_obs_window: insufficient HRRR rows for "
+                f"station={station.station_id} "
+                f"(have {len(hrrr_raw)}, need {cold_start})"
+            )
+        if len(obs_raw) < cold_start:
+            raise RuntimeError(
+                f"build_encoder_obs_window: insufficient obs rows for "
+                f"station={station.station_id} "
+                f"(have {len(obs_raw)}, need {cold_start})"
+            )
+
+        hrrr_raw["valid_time"] = pd.to_datetime(hrrr_raw["valid_time"], utc=True)
+        obs_raw["valid_time"]  = pd.to_datetime(obs_raw["valid_time"],  utc=True)
+
+        merged = pd.merge(hrrr_raw, obs_raw, on="valid_time", how="inner", suffixes=("_hrrr", "_obs"))
+        merged = merged.sort_values("valid_time").reset_index(drop=True)
+
+        if len(merged) < cold_start:
+            raise RuntimeError(
+                f"build_encoder_obs_window: merged window too short for "
+                f"station={station.station_id} "
+                f"(have {len(merged)}, need {cold_start})"
+            )
+
+        return merged
+

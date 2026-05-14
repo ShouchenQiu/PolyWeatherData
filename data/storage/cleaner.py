@@ -36,8 +36,15 @@ _HRRR_CLIP_BOUNDS: dict[str, tuple[float, float]] = {
 # IEM numeric columns that should be zero-filled when missing
 _IEM_ZERO_FILL = ["is_rain", "is_snow", "p01i"]
 
+# Non-negative HRRR columns to smooth with log1p
+_LOG1P_COLS = [
+    "PRATE", "APCP", "DSWRF", "DLWRF", "USWRF", "ULWRF",
+]
+
 _KT_PER_MS = 1.94384
 _KELVIN_OFFSET = 273.15
+# IEM temperatures arrive as Celsius tenths (raw_tmpc_tenths) in tenths of a degree
+# No unit conversion is needed -- the value is already Celsius.
 
 
 class Cleaner:
@@ -113,3 +120,96 @@ class Cleaner:
             df = df.sort_values("valid_time").reset_index(drop=True)
 
         return df
+
+    @staticmethod
+    def build_features_hrrr(df: pd.DataFrame) -> pd.DataFrame:
+        """Add derived feature columns to a cleaned HRRR DataFrame.
+
+        Steps applied in order (requires clean_hrrr to have been called first):
+        1. Wind vector decomposition: u_wind / v_wind from UGRD_10m/VGRD_10m
+           (already in knots after clean_hrrr).
+        2. log1p smoothing of non-negative radiation/precip columns.
+
+        The original columns are preserved alongside the new ones.
+        """
+        df = df.copy()
+
+        # 1. Wind decomposition
+        if "UGRD_10m" in df.columns and "VGRD_10m" in df.columns:
+            df["u_wind"] = df["UGRD_10m"]
+            df["v_wind"] = df["VGRD_10m"]
+
+        # 2. log1p on non-negative columns
+        for col in _LOG1P_COLS:
+            if col in df.columns:
+                df[f"{col}_log1p"] = np.log1p(df[col].clip(lower=0.0))
+
+        return df
+
+    @staticmethod
+    def build_features_iem(df: pd.DataFrame) -> pd.DataFrame:
+        """Add derived feature columns to a cleaned IEM observation DataFrame.
+
+        Renames raw_tmpc_tenths -> tmpc and raw_dwpc_tenths -> dwpc for
+        downstream compatibility.  The raw columns are retained.
+        """
+        df = df.copy()
+        if "raw_tmpc_tenths" in df.columns:
+            df["tmpc"] = df["raw_tmpc_tenths"]
+        if "raw_dwpc_tenths" in df.columns:
+            df["dwpc"] = df["raw_dwpc_tenths"]
+        return df
+
+    @staticmethod
+    def compute_temp_error(
+        hrrr_df: pd.DataFrame,
+        iem_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Compute temp_error = IEM_obs - f01_HRRR aligned by valid_time.
+
+        Parameters
+        ----------
+        hrrr_df:
+            Cleaned HRRR DataFrame with fxx=1 rows and TMP_2m in Celsius.
+        iem_df:
+            Feature-engineered IEM DataFrame with tmpc column.
+
+        Returns
+        -------
+        DataFrame with columns: valid_time, TMP_2m, tmpc, temp_error.
+        Rows where either side is NaN are excluded.
+        """
+        hrrr_f01 = hrrr_df[hrrr_df["fxx"] == 1].copy() if "fxx" in hrrr_df.columns else hrrr_df.copy()
+        hrrr_f01["valid_time"] = pd.to_datetime(hrrr_f01["valid_time"], utc=True)
+
+        iem = iem_df.copy()
+        iem["valid_time"] = pd.to_datetime(iem["valid_time"], utc=True)
+
+        merged = pd.merge(
+            hrrr_f01[["valid_time", "TMP_2m"]],
+            iem[["valid_time", "tmpc"]],
+            on="valid_time",
+            how="inner",
+        )
+        merged["temp_error"] = merged["tmpc"] - merged["TMP_2m"]
+        merged = merged.dropna(subset=["temp_error"]).reset_index(drop=True)
+        return merged
+
+    @staticmethod
+    def drop_cold_start(df: pd.DataFrame, n: int) -> pd.DataFrame:
+        """Drop the first n rows per dataset (cold-start period).
+
+        Parameters
+        ----------
+        df:
+            Input DataFrame sorted by its primary time column.
+        n:
+            Number of leading rows to discard.
+
+        Returns
+        -------
+        DataFrame with the first n rows removed, index reset.
+        """
+        if n <= 0 or df.empty:
+            return df.reset_index(drop=True)
+        return df.iloc[n:].reset_index(drop=True)

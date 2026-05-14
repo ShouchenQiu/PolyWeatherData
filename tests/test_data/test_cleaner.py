@@ -150,3 +150,133 @@ def test_iem_sorted_by_valid_time():
     })
     result = Cleaner.clean_iem(df)
     assert result["valid_time"].iloc[0] < result["valid_time"].iloc[1]
+
+
+# ---------------------------------------------------------------------------
+# V03: build_features_hrrr -- wind decomposition + log1p
+# ---------------------------------------------------------------------------
+
+
+def test_build_features_hrrr_wind_decomp():
+    df = Cleaner.clean_hrrr(pd.DataFrame({
+        "UGRD_10m": [5.0],
+        "VGRD_10m": [3.0],
+    }))
+    result = Cleaner.build_features_hrrr(df)
+    assert "u_wind" in result.columns
+    assert "v_wind" in result.columns
+    assert result["u_wind"].iloc[0] == pytest.approx(5.0 * _KT_PER_MS, rel=1e-5)
+    assert result["v_wind"].iloc[0] == pytest.approx(3.0 * _KT_PER_MS, rel=1e-5)
+
+
+def test_build_features_hrrr_log1p_created():
+    df = Cleaner.clean_hrrr(pd.DataFrame({"DSWRF": [100.0], "PRATE": [0.002]}))
+    result = Cleaner.build_features_hrrr(df)
+    assert "DSWRF_log1p" in result.columns
+    assert "PRATE_log1p" in result.columns
+    assert result["DSWRF_log1p"].iloc[0] == pytest.approx(np.log1p(100.0), rel=1e-6)
+
+
+def test_build_features_hrrr_original_cols_preserved():
+    df = Cleaner.clean_hrrr(pd.DataFrame({"UGRD_10m": [5.0], "VGRD_10m": [3.0], "DSWRF": [50.0]}))
+    result = Cleaner.build_features_hrrr(df)
+    assert "UGRD_10m" in result.columns
+    assert "DSWRF" in result.columns
+
+
+def test_build_features_hrrr_no_wind_cols_no_crash():
+    df = Cleaner.clean_hrrr(pd.DataFrame({"TMP_2m": [290.0]}))
+    result = Cleaner.build_features_hrrr(df)
+    assert "u_wind" not in result.columns
+    assert "v_wind" not in result.columns
+
+
+# ---------------------------------------------------------------------------
+# V03: build_features_iem -- tmpc/dwpc alias
+# ---------------------------------------------------------------------------
+
+
+def test_build_features_iem_adds_tmpc():
+    df = Cleaner.clean_iem(pd.DataFrame({
+        "valid_time": ["2026-01-01 00:00:00"],
+        "raw_tmpc_tenths": [5.5],
+        "raw_dwpc_tenths": [2.0],
+    }))
+    result = Cleaner.build_features_iem(df)
+    assert "tmpc" in result.columns
+    assert result["tmpc"].iloc[0] == pytest.approx(5.5)
+    assert "dwpc" in result.columns
+    assert result["dwpc"].iloc[0] == pytest.approx(2.0)
+
+
+def test_build_features_iem_raw_cols_still_present():
+    df = Cleaner.clean_iem(pd.DataFrame({
+        "valid_time": ["2026-01-01 00:00:00"],
+        "raw_tmpc_tenths": [5.5],
+    }))
+    result = Cleaner.build_features_iem(df)
+    assert "raw_tmpc_tenths" in result.columns
+
+
+# ---------------------------------------------------------------------------
+# V03: compute_temp_error
+# ---------------------------------------------------------------------------
+
+
+def _make_hrrr_f01(valid_times, tmp2m_vals_k):
+    return pd.DataFrame({
+        "valid_time": [str(vt) for vt in valid_times],
+        "fxx": [1] * len(valid_times),
+        "TMP_2m": [v - _KELVIN_OFFSET for v in tmp2m_vals_k],
+    })
+
+
+def _make_iem(valid_times, tmpc_vals):
+    df = pd.DataFrame({
+        "valid_time": [str(vt) for vt in valid_times],
+        "raw_tmpc_tenths": tmpc_vals,
+    })
+    df = Cleaner.clean_iem(df)
+    return Cleaner.build_features_iem(df)
+
+
+def test_compute_temp_error_correct_value():
+    vt = pd.Timestamp("2026-01-01 01:00:00", tz="UTC")
+    hrrr = _make_hrrr_f01([vt], [273.15 + 5.0])  # TMP_2m = 5.0 C
+    iem  = _make_iem([vt], [7.5])                 # tmpc = 7.5 C
+    result = Cleaner.compute_temp_error(hrrr, iem)
+    assert len(result) == 1
+    assert result["temp_error"].iloc[0] == pytest.approx(7.5 - 5.0, abs=1e-4)
+
+
+def test_compute_temp_error_no_overlap_returns_empty():
+    vt1 = pd.Timestamp("2026-01-01 01:00:00", tz="UTC")
+    vt2 = pd.Timestamp("2026-01-01 02:00:00", tz="UTC")
+    hrrr = _make_hrrr_f01([vt1], [280.0])
+    iem  = _make_iem([vt2], [5.0])
+    result = Cleaner.compute_temp_error(hrrr, iem)
+    assert result.empty
+
+
+# ---------------------------------------------------------------------------
+# V03: drop_cold_start
+# ---------------------------------------------------------------------------
+
+
+def test_drop_cold_start_removes_first_n():
+    df = pd.DataFrame({"x": list(range(10))})
+    result = Cleaner.drop_cold_start(df, 3)
+    assert len(result) == 7
+    assert result["x"].iloc[0] == 3
+
+
+def test_drop_cold_start_zero_is_noop():
+    df = pd.DataFrame({"x": list(range(5))})
+    result = Cleaner.drop_cold_start(df, 0)
+    assert len(result) == 5
+
+
+def test_drop_cold_start_empty_df():
+    result = Cleaner.drop_cold_start(pd.DataFrame(), 10)
+    assert result.empty
+
