@@ -47,8 +47,35 @@ def _make_hrrr_df():
         "init_time":  [pd.Timestamp("2026-03-25 12:00:00+00:00")],
         "fxx":        [1],
         "valid_time": [pd.Timestamp("2026-03-25 13:00:00+00:00")],
-        "tmp2m":      [280.0],
+        "TMP_2m":     [280.0],
     })
+
+
+def test_data_manager_hrrr_fallback_on_incomplete_data(tmp_path, station):
+    """fetch_hrrr falls back when first source returns non-empty but all-NaN TMP_2m."""
+    import numpy as np
+    incomplete_src = MagicMock()
+    incomplete_src.fetch.return_value = {station.station_id: pd.DataFrame({
+        "init_time":  [pd.Timestamp("2026-03-25 12:00:00+00:00")] * 3,
+        "fxx":        [0, 1, 2],
+        "valid_time": [
+            pd.Timestamp("2026-03-25 12:00:00+00:00"),
+            pd.Timestamp("2026-03-25 13:00:00+00:00"),
+            pd.Timestamp("2026-03-25 14:00:00+00:00"),
+        ],
+        "TMP_2m":     [np.nan, np.nan, np.nan],
+    })}
+    good_src = MagicMock()
+    good_src.fetch.return_value = {station.station_id: _make_hrrr_df()}
+
+    store = MagicMock()
+    store.append.return_value = 1
+    mgr = DataManager([incomplete_src, good_src], [], store, store)
+    df = mgr.fetch_hrrr(pd.Timestamp("2026-03-25 12:00:00+00:00"), station)
+
+    incomplete_src.fetch.assert_called_once()
+    good_src.fetch.assert_called_once()
+    assert df["TMP_2m"].iloc[0] == pytest.approx(280.0)
 
 
 def test_data_manager_uses_first_successful_source(tmp_path, station):

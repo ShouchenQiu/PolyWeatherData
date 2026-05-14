@@ -92,6 +92,13 @@ class DataManager:
                 # Sources return dict[station_id -> DataFrame]
                 df = result.get(station.station_id, pd.DataFrame())
                 if df is not None and not df.empty:
+                    if not self._hrrr_is_complete(df):
+                        logger.warning(
+                            "HRRR source {} returned incomplete data for "
+                            "init={}, trying next source",
+                            src_name, init_time,
+                        )
+                        continue
                     logger.debug(
                         "HRRR fetch: source={} init={} rows={}",
                         src_name, init_time, len(df),
@@ -108,6 +115,13 @@ class DataManager:
             f"All HRRR sources failed for init={init_time}. "
             f"Last error: {last_exc}"
         )
+
+    @staticmethod
+    def _hrrr_is_complete(df: pd.DataFrame) -> bool:
+        """Return True if the DataFrame has at least one valid TMP_2m reading."""
+        if "TMP_2m" not in df.columns:
+            return False
+        return bool(df["TMP_2m"].notna().any())
 
     # ------------------------------------------------------------------
     # Surface observations
