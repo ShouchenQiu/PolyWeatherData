@@ -242,7 +242,9 @@ class DataManager:
             init_time.tz_localize("UTC") if init_time.tzinfo is None
             else init_time.tz_convert("UTC")
         )
-        window_start = init_utc - pd.Timedelta(hours=n_hours)
+        # Read cold_start_hours extra so that after dropping the cold-start
+        # period the remaining window is at least n_hours deep.
+        window_start = init_utc - pd.Timedelta(hours=n_hours + cold_start)
         window_end   = init_utc - pd.Timedelta(hours=1)
 
         hrrr_raw = self._forecast_store.read(
@@ -255,6 +257,11 @@ class DataManager:
         # Filter to fxx=1 only (ADR-0003 stores fxx 0 and 1; we want f01)
         if not hrrr_raw.empty and "fxx" in hrrr_raw.columns:
             hrrr_raw = hrrr_raw[hrrr_raw["fxx"] == 1].reset_index(drop=True)
+
+        # Drop cold-start rows: the first cold_start_hours rows of the
+        # station's history are unreliable and must not reach the model.
+        hrrr_raw = Cleaner.drop_cold_start(hrrr_raw, cold_start)
+        obs_raw  = Cleaner.drop_cold_start(obs_raw,  cold_start)
 
         if len(hrrr_raw) < cold_start:
             raise RuntimeError(

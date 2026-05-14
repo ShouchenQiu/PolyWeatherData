@@ -53,8 +53,10 @@ def test_build_encoder_obs_window_returns_merged_72_rows():
     init = pd.Timestamp("2026-01-04 12:00:00", tz="UTC")
     window_start = init - pd.Timedelta(hours=72)
 
-    hrrr_df = _make_hrrr_rows(72, window_start)
-    obs_df  = _make_obs_rows(72, window_start)
+    # Provide cold_start(72) + n_hours(72) = 144 rows so that after
+    # drop_cold_start(72) exactly 72 rows remain for the merge.
+    hrrr_df = _make_hrrr_rows(144, window_start - pd.Timedelta(hours=72))
+    obs_df  = _make_obs_rows(144, window_start - pd.Timedelta(hours=72))
 
     forecast_store = MagicMock()
     obs_store = MagicMock()
@@ -86,8 +88,9 @@ def test_build_encoder_obs_window_raises_on_insufficient_hrrr():
     init = pd.Timestamp("2026-01-04 12:00:00", tz="UTC")
     window_start = init - pd.Timedelta(hours=72)
 
+    # 10 rows -> after drop_cold_start(72) -> 0 rows < 72 threshold
     short_hrrr = _make_hrrr_rows(10, window_start)
-    obs_df     = _make_obs_rows(72, window_start)
+    obs_df     = _make_obs_rows(144, window_start - pd.Timedelta(hours=72))
 
     forecast_store = MagicMock()
     obs_store = MagicMock()
@@ -111,7 +114,8 @@ def test_build_encoder_obs_window_raises_on_insufficient_obs():
     init = pd.Timestamp("2026-01-04 12:00:00", tz="UTC")
     window_start = init - pd.Timedelta(hours=72)
 
-    hrrr_df   = _make_hrrr_rows(72, window_start)
+    hrrr_df   = _make_hrrr_rows(144, window_start - pd.Timedelta(hours=72))
+    # 5 rows -> after drop_cold_start(72) -> 0 rows < 72 threshold
     short_obs = _make_obs_rows(5, window_start)
 
     forecast_store = MagicMock()
@@ -134,11 +138,16 @@ def test_build_encoder_obs_window_raises_on_insufficient_obs():
 
 def test_build_encoder_obs_window_raises_on_insufficient_merged():
     init = pd.Timestamp("2026-01-04 12:00:00", tz="UTC")
-    window_start = init - pd.Timedelta(hours=72)
-    obs_start = init - pd.Timedelta(hours=10)  # only 10 hours overlap
+    base_start = init - pd.Timedelta(hours=144)
+    # HRRR: 144 rows starting at base_start (valid_times base+0h .. base+143h)
+    # After drop_cold_start(72): rows base+72h .. base+143h
+    # Obs: 144 rows starting 80 hours after base_start
+    # After drop_cold_start(72): rows base+80+72=base+152h .. base+80+143h
+    # -> no temporal overlap with HRRR post-drop range -> merged is empty
+    obs_start = base_start + pd.Timedelta(hours=80)
 
-    hrrr_df   = _make_hrrr_rows(72, window_start)
-    offset_obs = _make_obs_rows(72, obs_start)
+    hrrr_df    = _make_hrrr_rows(144, base_start)
+    offset_obs = _make_obs_rows(144, obs_start)
 
     forecast_store = MagicMock()
     obs_store = MagicMock()
@@ -160,15 +169,15 @@ def test_build_encoder_obs_window_raises_on_insufficient_merged():
 
 def test_build_encoder_obs_window_uses_only_fxx1():
     init = pd.Timestamp("2026-01-04 12:00:00", tz="UTC")
-    window_start = init - pd.Timedelta(hours=72)
+    base_start = init - pd.Timedelta(hours=144)
 
-    hrrr_df = _make_hrrr_rows(72, window_start)
+    hrrr_df = _make_hrrr_rows(144, base_start)
     # Inject fxx=0 rows that should be excluded
     fxx0 = hrrr_df.copy()
     fxx0["fxx"] = 0
     mixed = pd.concat([hrrr_df, fxx0], ignore_index=True)
 
-    obs_df = _make_obs_rows(72, window_start)
+    obs_df = _make_obs_rows(144, base_start)
 
     forecast_store = MagicMock()
     obs_store = MagicMock()
@@ -186,3 +195,36 @@ def test_build_encoder_obs_window_uses_only_fxx1():
     assert len(result) == 72
     if "fxx" in result.columns:
         assert (result["fxx"] == 1).all()
+
+
+# ---------------------------------------------------------------------------
+# Cold-start rows are dropped before merge
+# ---------------------------------------------------------------------------
+
+def test_build_encoder_obs_window_drops_cold_start_rows():
+    """The first cold_start_hours rows of the wider read are never in the result."""
+    init = pd.Timestamp("2026-01-10 12:00:00", tz="UTC")
+    base_start = init - pd.Timedelta(hours=144)   # 144 rows each
+
+    # Mark cold-start HRRR rows with a sentinel: TMP_2m = -999.0
+    hrrr_df = _make_hrrr_rows(144, base_start)
+    hrrr_df.loc[:71, "TMP_2m"] = -999.0           # first 72 = cold-start
+
+    obs_df = _make_obs_rows(144, base_start)
+
+    forecast_store = MagicMock()
+    obs_store = MagicMock()
+    forecast_store.read.return_value = hrrr_df
+    obs_store.read.return_value = obs_df
+
+    station = _make_station()
+    mgr = DataManager([], [], forecast_store, obs_store)
+
+    with patch("config.settings.Settings") as MockSettings:
+        MockSettings.return_value.cold_start_hours = 72
+        result = mgr.build_encoder_obs_window(station, init, n_hours=72)
+
+    assert len(result) == 72
+    assert (-999.0 not in result["TMP_2m"].values), (
+        "Cold-start sentinel rows must not appear in the encoder window"
+    )
