@@ -15,31 +15,51 @@ from events.discovery import EventDiscovery, parse_slug
 # -----------------------------------------------------------------------
 
 @pytest.mark.parametrize("slug, expected", [
-    # open high end
+    # open high end -- or-higher variants
     ("highest-temperature-in-nyc-70f-or-higher", (70.0, float("inf"))),
     ("klga-high-75forhigher", (75.0, float("inf"))),
     ("be-80f-or-higher-daily-high", (80.0, float("inf"))),
-    # open low end
+    # open high end -- or-above variants
+    ("klga-high-70f-or-above", (70.0, float("inf"))),
+    ("klga-high-70forabove", (70.0, float("inf"))),
+    ("be-70f-or-above-daily-high", (70.0, float("inf"))),
+    # open low end -- or-below variants
     ("klga-high-55forbelow", (float("-inf"), 55.0)),
+    ("klga-high-55f-or-below", (float("-inf"), 55.0)),
+    ("be-55f-or-below", (float("-inf"), 55.0)),
     # range
     ("high-temperature-60-70f-nyc", (60.0, 70.0)),
     ("klga-daily-high-46-47f", (46.0, 47.0)),
-    # no match
-    ("something-unrelated", (float("nan"), float("nan"))),
 ])
 def test_parse_slug(slug, expected):
-    lo, hi = parse_slug(slug)
+    result = parse_slug(slug)
+    assert result is not None
+    lo, hi = result
     exp_lo, exp_hi = expected
-    if exp_lo != exp_lo:   # nan
-        assert lo != lo
-        assert hi != hi
-    else:
-        assert lo == exp_lo
-        assert hi == exp_hi
+    assert lo == exp_lo
+    assert hi == exp_hi
+
+
+def test_parse_slug_no_match_returns_none():
+    assert parse_slug("something-unrelated") is None
+
+
+def test_parse_slug_no_match_logs_warning(capfd):
+    import io
+    from loguru import logger
+    sink = io.StringIO()
+    sink_id = logger.add(sink, level="WARNING", format="{message}")
+    try:
+        parse_slug("something-unrelated")
+    finally:
+        logger.remove(sink_id)
+    assert "parse_slug" in sink.getvalue() or "no pattern" in sink.getvalue().lower()
 
 
 def test_parse_slug_case_insensitive():
-    lo, hi = parse_slug("KLGA-HIGH-50-60F")
+    result = parse_slug("KLGA-HIGH-50-60F")
+    assert result is not None
+    lo, hi = result
     assert lo == 50.0
     assert hi == 60.0
 

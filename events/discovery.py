@@ -22,42 +22,60 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Slug parser  ->  (lo_f, hi_f) in degrees F
+# Slug parser registry  ->  (lo_f, hi_f) in degrees F
 # ---------------------------------------------------------------------------
 
-def parse_slug(slug: str) -> tuple[float, float]:
+def _hi_bound(m: re.Match) -> tuple[float, float]:
+    return (float(m.group(1)), float("inf"))
+
+
+def _lo_bound(m: re.Match) -> tuple[float, float]:
+    return (float("-inf"), float(m.group(1)))
+
+
+def _range_bound(m: re.Match) -> tuple[float, float]:
+    return (float(m.group(1)), float(m.group(2)))
+
+
+# Each entry: (compiled pattern, handler).  First match wins.
+# To add a new slug format, append one tuple here -- no other change needed.
+_SLUG_REGISTRY = [
+    # Xf-or-higher / Xforhigher / be-Xf-or-higher / Xf-or-above / be-Xf-or-above
+    (
+        re.compile(r"(?:be-)?(?:\d+-)?(\d+)f(?:-or-higher|-or-above|orhigher|orabove)"),
+        _hi_bound,
+    ),
+    # Xf-or-below / Xforbelow / be-Xf-or-below
+    (
+        re.compile(r"(?:be-)?(\d+)f(?:-or-below|orbelow)"),
+        _lo_bound,
+    ),
+    # X-Yf  (range)
+    (
+        re.compile(r"(\d+)-(\d+)f"),
+        _range_bound,
+    ),
+]
+
+
+def parse_slug(slug: str) -> tuple[float, float] | None:
     """Parse a Polymarket market slug into a temperature bucket (lo_f, hi_f).
 
     Patterns handled (case-insensitive):
-    - ``70f-or-higher``  / ``70forhigher``  -> (70, +inf)
-    - ``be-70f-or-higher``                  -> (70, +inf)
-    - ``60forbelow``                        -> (-inf, 60)
-    - ``60-70f``  (range)                   -> (60, 70)
+    - ``70f-or-higher`` / ``70forhigher`` / ``be-70f-or-higher`` -> (70, +inf)
+    - ``70f-or-above``  / ``70forabove``  / ``be-70f-or-above``  -> (70, +inf)
+    - ``55f-or-below``  / ``55forbelow``  / ``be-55f-or-below``  -> (-inf, 55)
+    - ``60-70f``  (range)                                        -> (60, 70)
 
-    Returns (nan, nan) if no pattern matches.
+    Returns None and logs a WARNING if no pattern matches.
     """
     s = slug.lower()
-
-    # "X-or-higher" / "Xforhigher"
-    m = re.search(r"(\d+)f(?:orhigher|or-higher)", s)
-    if not m:
-        m = re.search(r"(\d+)f-or-higher", s)
-    if not m:
-        m = re.search(r"be-(\d+)f-or-higher", s)
-    if m:
-        return (float(m.group(1)), float("inf"))
-
-    # "Xforbelow"
-    m = re.search(r"(\d+)forbelow", s)
-    if m:
-        return (float("-inf"), float(m.group(1)))
-
-    # "X-Yf"  (range)
-    m = re.search(r"(\d+)-(\d+)f", s)
-    if m:
-        return (float(m.group(1)), float(m.group(2)))
-
-    return (float("nan"), float("nan"))
+    for pattern, handler in _SLUG_REGISTRY:
+        m = pattern.search(s)
+        if m:
+            return handler(m)
+    logger.warning("parse_slug: no pattern matched slug {!r}", slug)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +200,8 @@ class EventDiscovery:
         parsed: list[dict] = []
         for mkt in markets:
             market_slug = mkt.get("slug") or mkt.get("market_slug") or ""
-            lo_f, hi_f  = parse_slug(market_slug)
+            result       = parse_slug(market_slug)
+            lo_f, hi_f   = result if result is not None else (None, None)
 
             # clobTokenIds is typically a JSON-encoded list: '["tok1","tok2"]'
             token_ids_raw = mkt.get("clobTokenIds") or "[]"
@@ -208,8 +227,8 @@ class EventDiscovery:
                     token_id     = str(tok),
                     condition_id = condition_id,
                     market_slug  = market_slug,
-                    bucket_lo_f  = None if (lo_f != lo_f) else lo_f,
-                    bucket_hi_f  = None if (hi_f != hi_f) else hi_f,
+                    bucket_lo_f  = lo_f,
+                    bucket_hi_f  = hi_f,
                     outcome      = str(outcome),
                 )
 
