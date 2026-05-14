@@ -1,11 +1,14 @@
 """Monte Carlo sampler for daily high temperature estimation.
 
-Implements an AR(1) correlated sampling scheme that converts per-hour
+Implements empirical-covariance sampling [ADR-0002] that converts per-hour
 TFT quantile outputs into a distribution over the daily high temperature,
 then maps that distribution onto Polymarket bucket probabilities.
 
-Reference: Herbie-main/mc_helpers.py  (ar1_mc_sample)
-           Herbie-main/mc_stage2_clob.py  (bias correction, C->F, bucket_probs)
+The AR(1) covariance and bias_corr_c correction present in earlier versions
+have been removed per ADR-0002.  Temporal correlation is now captured via a
+48x48 empirical covariance matrix estimated from training residuals using
+fit_cov().  Until fit_cov() is called the sampler falls back to a diagonal
+covariance built from the per-hour sigma_vec supplied by the caller.
 """
 from __future__ import annotations
 
@@ -18,33 +21,26 @@ if TYPE_CHECKING:
 
 
 class McSampler:
-    """AR(1) Monte Carlo sampler.
+    """Empirical-covariance Monte Carlo sampler.
 
     Parameters
     ----------
     n_samp:
-        Number of Monte Carlo draws per evaluation (default 5000).
+        Number of Monte Carlo draws per evaluation (default 10000).
     rng_seed:
         Seed for the random number generator (default 42).
-    rho:
-        AR(1) correlation coefficient across forecast hours (default 0.90).
-    bias_corr_c:
-        Celsius bias correction subtracted from mu before sampling.
-        Derived from training residuals (default 1.5206 C = 2.737 F / 1.8).
     """
 
     def __init__(
         self,
-        n_samp: int = 5000,
+        n_samp: int = 10000,
         rng_seed: int = 42,
-        rho: float = 0.90,
-        bias_corr_c: float = 1.5206,
     ) -> None:
-        self.n_samp      = n_samp
-        self.rng_seed    = rng_seed
-        self.rho         = rho
-        self.bias_corr_c = bias_corr_c
-        self._rng        = np.random.default_rng(rng_seed)
+        self.n_samp    = n_samp
+        self.rng_seed  = rng_seed
+        self._rng      = np.random.default_rng(rng_seed)
+        self._cov: np.ndarray | None = None
+        self._max_bias: float = 0.0
 
     @classmethod
     def from_settings(cls, settings: "Settings") -> "McSampler":
@@ -54,44 +50,57 @@ class McSampler:
         )
 
     # ------------------------------------------------------------------
+    # Covariance fitting
+    # ------------------------------------------------------------------
+
+    def fit_cov(self, residuals: np.ndarray) -> None:
+        """Estimate empirical covariance from historical forecast residuals.
+
+        Parameters
+        ----------
+        residuals:
+            (n_obs, n_hours) array of forecast error residuals from training.
+            Rows are individual cycles; columns are decoder hours.
+        """
+        self._cov = np.cov(residuals.T)  # (n_hours, n_hours)
+
+    # ------------------------------------------------------------------
     # Core sampler
     # ------------------------------------------------------------------
 
-    def ar1_mc_sample(
+    def _mc_sample(
         self,
         mu_vec: np.ndarray,
         sigma_vec: np.ndarray,
     ) -> np.ndarray:
-        """Draw correlated temperature samples using an AR(1) covariance.
+        """Draw correlated temperature samples.
+
+        Uses the empirical covariance stored by fit_cov() when available.
+        Falls back to a diagonal covariance built from sigma_vec otherwise.
 
         Parameters
         ----------
         mu_vec:
             (n_hours,) mean temperature in degC for each forecast hour.
         sigma_vec:
-            (n_hours,) per-hour standard deviation in degC.
-            Typically computed as (p90 - p10) / (2 * 1.282).
+            (n_hours,) per-hour standard deviation in degC (already clipped).
 
         Returns
         -------
-        (n_samp, n_hours) array of correlated temperature samples in degC.
+        (n_samp, n_hours) array of temperature samples in degC.
         """
         n = len(mu_vec)
-        # Build AR(1) correlation matrix  R[i,j] = rho^|i-j|
-        ii, jj = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
-        R = self.rho ** np.abs(ii - jj).astype(float)
+        if self._cov is not None and self._cov.shape == (n, n):
+            Sigma = self._cov.copy()
+        else:
+            Sigma = np.diag(sigma_vec ** 2)
 
-        # Scale to covariance: Sigma = D @ R @ D
-        D     = np.diag(sigma_vec)
-        Sigma = D @ R @ D
+        Sigma += 1e-8 * np.eye(n)
+        L = np.linalg.cholesky(Sigma)
 
-        # Cholesky decomposition (add small jitter for numerical stability)
-        L = np.linalg.cholesky(Sigma + 1e-8 * np.eye(n))
-
-        # Draw standard normal and transform
         z       = self._rng.standard_normal((n, self.n_samp))
-        samples = mu_vec[:, None] + L @ z   # (n, n_samp)
-        return samples.T                     # (n_samp, n)
+        samples = mu_vec[:, None] + L @ z  # (n, n_samp)
+        return samples.T                   # (n_samp, n)
 
     # ------------------------------------------------------------------
     # Daily high estimation
@@ -102,10 +111,7 @@ class McSampler:
         mu_vec: np.ndarray,
         sigma_vec: np.ndarray,
     ) -> np.ndarray:
-        """Sample daily high temperatures (Fahrenheit).
-
-        Applies bias correction to mu_vec, draws AR(1) correlated samples,
-        takes the per-sample maximum across hours, and converts to Fahrenheit.
+        """Sample daily high temperatures (degF) with max_bias correction.
 
         Parameters
         ----------
@@ -116,13 +122,13 @@ class McSampler:
 
         Returns
         -------
-        (n_samp,) daily high temperature samples in degF.
+        (n_samp,) daily high temperature samples in degF, bias-corrected.
         """
-        mu_corr = mu_vec - self.bias_corr_c
-        sigma_safe = np.clip(sigma_vec, 0.01, None)
-        samples_c = self.ar1_mc_sample(mu_corr, sigma_safe)  # (n_samp, n_hours)
-        daily_high_c = samples_c.max(axis=1)                  # (n_samp,)
-        return daily_high_c * 1.8 + 32.0                      # -> degF
+        sigma_safe  = np.clip(sigma_vec, 0.01, None)
+        samples_c   = self._mc_sample(mu_vec, sigma_safe)  # (n_samp, n_hours)
+        daily_high_c = samples_c.max(axis=1)               # (n_samp,)
+        daily_high_f = daily_high_c * 1.8 + 32.0          # -> degF
+        return daily_high_f - self._max_bias
 
     # ------------------------------------------------------------------
     # Bucket probability
@@ -132,8 +138,8 @@ class McSampler:
         self,
         daily_highs: np.ndarray,
         buckets: list[tuple[float, float]],
-    ) -> dict[tuple[float, float], float]:
-        """Compute probability for each temperature bucket.
+    ) -> dict:
+        """Compute per-bucket probabilities and overall sample quantiles.
 
         Parameters
         ----------
@@ -145,12 +151,19 @@ class McSampler:
 
         Returns
         -------
-        {(lo_f, hi_f): probability}  probabilities sum to ~1.0 over all
-        buckets that collectively cover the full range.
+        dict with:
+          - (lo_f, hi_f) tuple keys -> float probability (sums to ~1.0)
+          - "p10_f" -> 10th percentile of daily_highs
+          - "p50_f" -> 50th percentile of daily_highs
+          - "p90_f" -> 90th percentile of daily_highs
         """
-        probs: dict[tuple[float, float], float] = {}
+        probs: dict = {}
         n = len(daily_highs)
         for lo, hi in buckets:
             mask = (daily_highs >= lo) & (daily_highs < hi)
             probs[(lo, hi)] = float(mask.sum()) / n
+        probs["p10_f"] = float(np.percentile(daily_highs, 10))
+        probs["p50_f"] = float(np.percentile(daily_highs, 50))
+        probs["p90_f"] = float(np.percentile(daily_highs, 90))
         return probs
+

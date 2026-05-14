@@ -122,10 +122,10 @@ class ModelPipeline:
         # 7. Monte Carlo -> (n_samp,) daily high in degF
         daily_highs = self.mc.sample_daily_high(mu_vec, sigma_vec)
 
-        # 8. Convert to bucket probabilities
-        probs = self.mc.bucket_probs(daily_highs, buckets)
-
-        p50_high_f = float(np.median(daily_highs))
+        # 8. Convert to bucket probabilities + extract sample quantiles
+        raw       = self.mc.bucket_probs(daily_highs, buckets)
+        probs     = {k: v for k, v in raw.items() if isinstance(k, tuple)}
+        p50_high_f = raw["p50_f"]
 
         logger.info(
             "Pipeline result: station={} init={} p50_high_f={:.1f}F buckets={}",

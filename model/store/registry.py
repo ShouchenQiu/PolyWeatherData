@@ -179,10 +179,10 @@ class ModelRegistry:
         return None
 
     def _db_latest_row(self):
-        cur = self.db._conn.execute(
+        rows = self.db.query(
             "SELECT * FROM model_versions ORDER BY created_at DESC LIMIT 1"
         )
-        return cur.fetchone()
+        return rows[0] if rows else None
 
     def _load_meta(self, version: str) -> dict:
         meta_path = self.store_dir / version / "meta.json"
@@ -193,3 +193,58 @@ class ModelRegistry:
             )
         with open(meta_path, encoding="ascii") as fh:
             return json.load(fh)
+
+    # ------------------------------------------------------------------
+    # Max-bias calibration
+    # ------------------------------------------------------------------
+
+    def store_max_bias(self, station_id: str, max_bias: float) -> None:
+        """Persist per-station max_bias correction."""
+        self.db.execute(
+            """
+            INSERT INTO station_max_bias (station_id, max_bias)
+            VALUES (?, ?)
+            ON CONFLICT(station_id) DO UPDATE SET max_bias=excluded.max_bias
+            """,
+            (station_id, max_bias),
+        )
+
+    def load_max_bias(self, station_id: str) -> float:
+        """Return stored max_bias for station, or 0.0 if not yet calibrated."""
+        rows = self.db.query(
+            "SELECT max_bias FROM station_max_bias WHERE station_id=?",
+            (station_id,),
+        )
+        if not rows:
+            return 0.0
+        return float(rows[0]["max_bias"])
+
+    def calibrate_max_bias(
+        self,
+        station_id: str,
+        val_residuals: np.ndarray,
+    ) -> float:
+        """Estimate and store max_bias from validation-set residuals.
+
+        max_bias = E[max(samples)] - mean(observed daily max)
+
+        Here val_residuals is a (n_val_cycles, n_hours) array of
+        (predicted - observed) residuals per decoder hour.  The mean of each
+        row maximum approximates the systematic over-prediction of the daily
+        high.
+
+        Parameters
+        ----------
+        station_id:
+            Station to calibrate.
+        val_residuals:
+            (n_val_cycles, n_hours) residual array from the validation set.
+
+        Returns
+        -------
+        Stored max_bias value.
+        """
+        import numpy as _np
+        max_bias = float(_np.mean(val_residuals.max(axis=1)))
+        self.store_max_bias(station_id, max_bias)
+        return max_bias

@@ -86,6 +86,11 @@ class DbClient:
                 test_mae        REAL,
                 created_at      TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS station_max_bias (
+                station_id  TEXT PRIMARY KEY,
+                max_bias    REAL NOT NULL
+            );
             """
         )
         self._conn.commit()
