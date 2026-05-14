@@ -207,6 +207,18 @@ class DataManager:
             f"{start}..{end}. Last error: {last_exc}"
         )
 
+    def fetch_latest_iem_tick(
+        self,
+        station: "StationConfig",
+        now_utc: pd.Timestamp,
+    ) -> pd.DataFrame:
+        """Append the single H-1 :51 obs reading for a live tick cycle.
+
+        Delegates to fetch_iem with now_utc set so that IemSource uses the
+        narrow tick window instead of pulling the full historical range.
+        """
+        return self.fetch_iem(station, now_utc, now_utc, now_utc=now_utc)
+
     @staticmethod
     def _obs_is_complete(df: pd.DataFrame) -> bool:
         """Return True if the DataFrame has at least one valid temperature reading."""
@@ -303,5 +315,12 @@ class DataManager:
             merged["temp_error"] = merged["tmpc"] - merged["TMP_2m"]
             merged = merged.dropna(subset=["temp_error"]).reset_index(drop=True)
 
-        return merged
+        if len(merged) < n_hours:
+            raise RuntimeError(
+                f"build_encoder_obs_window: temp_error NaN removal left too few rows for "
+                f"station={station.station_id} "
+                f"(have {len(merged)}, need {n_hours})"
+            )
+
+        return merged.tail(n_hours).reset_index(drop=True)
 

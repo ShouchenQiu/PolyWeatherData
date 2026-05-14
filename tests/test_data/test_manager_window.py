@@ -224,3 +224,33 @@ def test_build_encoder_obs_window_drops_cold_start_rows():
     assert (-999.0 not in result["TMP_2m"].values), (
         "Cold-start sentinel rows must not appear in the encoder window"
     )
+
+
+# ---------------------------------------------------------------------------
+# Raises when dropna(temp_error) shrinks merged below n_hours
+# ---------------------------------------------------------------------------
+
+def test_build_encoder_obs_window_raises_when_temp_error_nan_leaves_too_few():
+    """72 merged rows with one NaN TMP_2m -> dropna leaves 71 -> RuntimeError."""
+    init = pd.Timestamp("2026-01-04 12:00:00", tz="UTC")
+    base_start = init - pd.Timedelta(hours=144)
+
+    hrrr_df = _make_hrrr_rows(144, base_start)
+    obs_df  = _make_obs_rows(144, base_start)
+
+    # Inject NaN into TMP_2m at one row that will survive into the merged window
+    # (row 72 is the first post-cold-start row in the 144-row set)
+    hrrr_df.loc[72, "TMP_2m"] = float("nan")
+
+    forecast_store = MagicMock()
+    obs_store = MagicMock()
+    forecast_store.read.return_value = hrrr_df
+    obs_store.read.return_value = obs_df
+
+    station = _make_station()
+    mgr = DataManager([], [], forecast_store, obs_store)
+
+    with patch("config.settings.Settings") as MockSettings:
+        MockSettings.return_value.cold_start_hours = 72
+        with pytest.raises(RuntimeError, match="temp_error NaN removal left too few rows"):
+            mgr.build_encoder_obs_window(station, init, n_hours=72)

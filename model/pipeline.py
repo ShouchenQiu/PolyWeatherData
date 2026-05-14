@@ -11,8 +11,6 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from config.settings import Settings as _Settings
-
 if TYPE_CHECKING:
     from config.stations import StationConfig
     from model.mc import McSampler
@@ -31,7 +29,7 @@ class ModelPipeline:
     data_mgr:
         Duck-typed data manager that must implement:
           - fetch_hrrr(init_time, station) -> pd.DataFrame
-          - fetch_iem(station, start, end) -> pd.DataFrame
+          - fetch_latest_iem_tick(station, now_utc) -> pd.DataFrame
           - build_encoder_obs_window(station, init_time) -> pd.DataFrame
     """
 
@@ -77,7 +75,6 @@ class ModelPipeline:
             "p50_high_f": float,
         }
         """
-        settings = _Settings()
         init_utc = (
             init_time.tz_localize("UTC") if init_time.tzinfo is None
             else init_time.tz_convert("UTC")
@@ -88,11 +85,9 @@ class ModelPipeline:
                      init_utc, station.station_id)
         hrrr_df = self.data_mgr.fetch_hrrr(init_utc, station)
 
-        # 2. Populate obs store for encoder window
-        obs_end   = init_utc - pd.Timedelta(hours=1)
-        obs_start = init_utc - pd.Timedelta(hours=self._N_ENC + settings.cold_start_hours)
-        logger.debug("Pipeline: fetching IEM obs {}..{}", obs_start, obs_end)
-        self.data_mgr.fetch_iem(station, obs_start, obs_end)
+        # 2. Append the H-1 :51 obs tick (narrow window; backfill done separately)
+        logger.debug("Pipeline: fetching latest IEM tick for {}", station.station_id)
+        self.data_mgr.fetch_latest_iem_tick(station, init_utc)
 
         # 3. Build encoder window from store (merged HRRR f01 + obs)
         encoder_df = self.data_mgr.build_encoder_obs_window(

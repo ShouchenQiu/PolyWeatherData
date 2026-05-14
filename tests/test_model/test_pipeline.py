@@ -179,7 +179,7 @@ def test_run_calls_tft_predict():
 
 
 def test_run_calls_data_mgr():
-    """fetch_hrrr (with station), fetch_iem, and build_encoder_obs_window must be called."""
+    """fetch_hrrr, fetch_latest_iem_tick, and build_encoder_obs_window must be called."""
     mc       = McSampler(n_samp=200, rng_seed=0)
     tft      = _make_tft_mock()
     dm       = _make_data_mgr(_INIT_TIME)
@@ -187,7 +187,18 @@ def test_run_calls_data_mgr():
     pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
 
     dm.fetch_hrrr.assert_called_once_with(_INIT_TIME, KLGA)
-    dm.fetch_iem.assert_called_once()
+    dm.fetch_latest_iem_tick.assert_called_once()
     dm.build_encoder_obs_window.assert_called_once()
+
+
+def test_run_does_not_repull_obs_window():
+    """ModelPipeline.run() must NOT call the range-based fetch_iem during a tick."""
+    mc       = McSampler(n_samp=200, rng_seed=0)
+    tft      = _make_tft_mock()
+    dm       = _make_data_mgr(_INIT_TIME)
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+    dm.fetch_iem.assert_not_called()
 
 
