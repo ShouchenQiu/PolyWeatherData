@@ -161,41 +161,6 @@ class Cleaner:
         return df
 
     @staticmethod
-    def compute_temp_error(
-        hrrr_df: pd.DataFrame,
-        iem_df: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """Compute temp_error = IEM_obs - f01_HRRR aligned by valid_time.
-
-        Parameters
-        ----------
-        hrrr_df:
-            Cleaned HRRR DataFrame with fxx=1 rows and TMP_2m in Celsius.
-        iem_df:
-            Feature-engineered IEM DataFrame with tmpc column.
-
-        Returns
-        -------
-        DataFrame with columns: valid_time, TMP_2m, tmpc, temp_error.
-        Rows where either side is NaN are excluded.
-        """
-        hrrr_f01 = hrrr_df[hrrr_df["fxx"] == 1].copy() if "fxx" in hrrr_df.columns else hrrr_df.copy()
-        hrrr_f01["valid_time"] = pd.to_datetime(hrrr_f01["valid_time"], utc=True)
-
-        iem = iem_df.copy()
-        iem["valid_time"] = pd.to_datetime(iem["valid_time"], utc=True)
-
-        merged = pd.merge(
-            hrrr_f01[["valid_time", "TMP_2m"]],
-            iem[["valid_time", "tmpc"]],
-            on="valid_time",
-            how="inner",
-        )
-        merged["temp_error"] = merged["tmpc"] - merged["TMP_2m"]
-        merged = merged.dropna(subset=["temp_error"]).reset_index(drop=True)
-        return merged
-
-    @staticmethod
     def drop_cold_start(df: pd.DataFrame, n: int) -> pd.DataFrame:
         """Drop the first n rows per dataset (cold-start period).
 

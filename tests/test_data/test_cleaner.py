@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from data.storage.cleaner import Cleaner, _KELVIN_OFFSET, _KT_PER_MS
+from data.storage.cleaner import Cleaner, _KT_PER_MS
 
 
 # ---------------------------------------------------------------------------
@@ -216,46 +216,6 @@ def test_build_features_iem_raw_cols_still_present():
     }))
     result = Cleaner.build_features_iem(df)
     assert "raw_tmpc_tenths" in result.columns
-
-
-# ---------------------------------------------------------------------------
-# V03: compute_temp_error
-# ---------------------------------------------------------------------------
-
-
-def _make_hrrr_f01(valid_times, tmp2m_vals_k):
-    return pd.DataFrame({
-        "valid_time": [str(vt) for vt in valid_times],
-        "fxx": [1] * len(valid_times),
-        "TMP_2m": [v - _KELVIN_OFFSET for v in tmp2m_vals_k],
-    })
-
-
-def _make_iem(valid_times, tmpc_vals):
-    df = pd.DataFrame({
-        "valid_time": [str(vt) for vt in valid_times],
-        "raw_tmpc_tenths": tmpc_vals,
-    })
-    df = Cleaner.clean_iem(df)
-    return Cleaner.build_features_iem(df)
-
-
-def test_compute_temp_error_correct_value():
-    vt = pd.Timestamp("2026-01-01 01:00:00", tz="UTC")
-    hrrr = _make_hrrr_f01([vt], [273.15 + 5.0])  # TMP_2m = 5.0 C
-    iem  = _make_iem([vt], [7.5])                 # tmpc = 7.5 C
-    result = Cleaner.compute_temp_error(hrrr, iem)
-    assert len(result) == 1
-    assert result["temp_error"].iloc[0] == pytest.approx(7.5 - 5.0, abs=1e-4)
-
-
-def test_compute_temp_error_no_overlap_returns_empty():
-    vt1 = pd.Timestamp("2026-01-01 01:00:00", tz="UTC")
-    vt2 = pd.Timestamp("2026-01-01 02:00:00", tz="UTC")
-    hrrr = _make_hrrr_f01([vt1], [280.0])
-    iem  = _make_iem([vt2], [5.0])
-    result = Cleaner.compute_temp_error(hrrr, iem)
-    assert result.empty
 
 
 # ---------------------------------------------------------------------------

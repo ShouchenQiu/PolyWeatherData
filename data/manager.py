@@ -263,17 +263,17 @@ class DataManager:
         hrrr_raw = Cleaner.drop_cold_start(hrrr_raw, cold_start)
         obs_raw  = Cleaner.drop_cold_start(obs_raw,  cold_start)
 
-        if len(hrrr_raw) < cold_start:
+        if len(hrrr_raw) < n_hours:
             raise RuntimeError(
                 f"build_encoder_obs_window: insufficient HRRR rows for "
                 f"station={station.station_id} "
-                f"(have {len(hrrr_raw)}, need {cold_start})"
+                f"(have {len(hrrr_raw)}, need {n_hours})"
             )
-        if len(obs_raw) < cold_start:
+        if len(obs_raw) < n_hours:
             raise RuntimeError(
                 f"build_encoder_obs_window: insufficient obs rows for "
                 f"station={station.station_id} "
-                f"(have {len(obs_raw)}, need {cold_start})"
+                f"(have {len(obs_raw)}, need {n_hours})"
             )
 
         hrrr_raw["valid_time"] = pd.to_datetime(hrrr_raw["valid_time"], utc=True)
@@ -282,15 +282,16 @@ class DataManager:
         merged = pd.merge(hrrr_raw, obs_raw, on="valid_time", how="inner", suffixes=("_hrrr", "_obs"))
         merged = merged.sort_values("valid_time").reset_index(drop=True)
 
-        if len(merged) < cold_start:
+        if len(merged) < n_hours:
             raise RuntimeError(
                 f"build_encoder_obs_window: merged window too short for "
                 f"station={station.station_id} "
-                f"(have {len(merged)}, need {cold_start})"
+                f"(have {len(merged)}, need {n_hours})"
             )
 
         if "TMP_2m" in merged.columns and "tmpc" in merged.columns:
             merged["temp_error"] = merged["tmpc"] - merged["TMP_2m"]
+            merged = merged.dropna(subset=["temp_error"]).reset_index(drop=True)
 
         return merged
 

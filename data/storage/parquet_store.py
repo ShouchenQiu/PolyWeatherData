@@ -90,7 +90,8 @@ class ParquetStore:
         combined = pd.concat(parts, ignore_index=True)
         ts_col = self._pick_dedup_key(combined)[0]
         ts = pd.to_datetime(combined[ts_col], utc=True)
-        return combined[(ts >= start) & (ts <= end)].reset_index(drop=True)
+        filtered = combined[(ts >= start) & (ts <= end)]
+        return filtered.sort_values(ts_col).reset_index(drop=True)
 
     # ------------------------------------------------------------------
     # Internal helpers
