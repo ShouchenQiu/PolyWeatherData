@@ -138,10 +138,11 @@ class ModelPipeline:
             {f"{lo:.0f}-{hi:.0f}": f"{p:.3f}" for (lo, hi), p in probs.items()},
         )
         return {
-            "station":    station.station_id,
-            "init_time":  init_time,
-            "probs":      probs,
-            "p50_high_f": p50_high_f,
+            "station":         station.station_id,
+            "init_time":       init_time,
+            "probs":           probs,
+            "p50_high_f":      p50_high_f,
+            "quantiles":       quantiles,
         }
 
     # ------------------------------------------------------------------

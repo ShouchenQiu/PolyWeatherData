@@ -40,9 +40,11 @@ class BotManager:
         from pathlib import Path
 
         from config.stations import STATIONS
+        from core.alerts import AlertBus
         from core.exchange.paper import PaperExchange
         from core.exchange.settlement import Settler
         from core.positions import PositionTracker
+        from core.probability_store import ProbabilityStore
         from core.risk.fixed_fraction import FixedFraction
         from core.strategy.edge import EdgeStrategy
         from data.manager import DataManager
@@ -53,6 +55,7 @@ class BotManager:
         from loops.discovery_loop import DiscoveryLoop
         from loops.forecast_loop import ForecastLoop
         from loops.settlement_loop import SettlementLoop
+        from loops.trading_loop import TradingLoop
         from model.mc import McSampler
         from model.pipeline import ModelPipeline
         from snipers.awc import AwcSniper
@@ -81,7 +84,11 @@ class BotManager:
         # Station (default KLGA)
         self.station    = next(iter(STATIONS.values()))
 
-        # Exchange + risk + positions
+        # Shared ADR-0004 objects
+        self.prob_store = ProbabilityStore()
+        self.alert_bus  = AlertBus()
+
+        # Exchange + risk + positions (owned by TradingLoop in V11)
         self.exchange   = PaperExchange()
         self.risk       = FixedFraction.from_settings(settings)
         self.positions  = PositionTracker(self.db)
@@ -106,16 +113,17 @@ class BotManager:
             AwcSniper(first_station),
         ])
 
-        # Loops
-        self.forecast_loop   = ForecastLoop(
-            pipeline  = self.pipeline,
-            orderbook = self.orderbook,
-            strategy  = self.strategy,
-            risk      = self.risk,
-            exchange  = self.exchange,
-            positions = self.positions,
-            db        = self.db,
-            station   = self.station,
+        # Loops (ADR-0004: ForecastLoop writes ProbabilityStore; TradingLoop reads it)
+        self.forecast_loop = ForecastLoop(
+            pipeline   = self.pipeline,
+            prob_store = self.prob_store,
+            db         = self.db,
+            station    = self.station,
+        )
+        self.trading_loop  = TradingLoop(
+            prob_store = self.prob_store,
+            alert_bus  = self.alert_bus,
+            settings   = settings,
         )
         self.discovery_loop  = DiscoveryLoop(self.discovery)
         self.settlement_loop = SettlementLoop(
@@ -144,15 +152,20 @@ class BotManager:
 
         async def _forecast_hourly():
             """Wrapper: call tick() every hour."""
-            import asyncio
-            import pandas as pd
-
             while True:
                 await self.forecast_loop.tick()
                 await asyncio.sleep(3_600)
 
+        async def _trading_cadence():
+            """Wrapper: drive TradingLoop at its configured interval."""
+            while True:
+                # V11 will supply active condition_ids from the DB.
+                # For now the loop idles between ticks without processing events.
+                await asyncio.sleep(self.trading_loop.interval_s)
+
         await asyncio.gather(
             _forecast_hourly(),
+            _trading_cadence(),
             sniper_loop.run(),
             self.snipers.start_all(),
             self.discovery_loop.run(),

@@ -112,6 +112,7 @@ def test_run_result_keys():
     assert "init_time"  in result
     assert "probs"      in result
     assert "p50_high_f" in result
+    assert "quantiles"  in result
 
 
 def test_run_station_id():

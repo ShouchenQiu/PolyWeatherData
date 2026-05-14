@@ -311,12 +311,14 @@ def test_forecast_loop_tick_pipeline_failure_is_swallowed(db, station):
 
 
 def test_forecast_loop_tick_writes_prob_store(db, station):
-    """tick() writes bucket probs to ProbabilityStore; returns condition_id."""
+    """tick() writes bucket probs and quantiles_by_fxx to ProbabilityStore."""
     _seed_event_and_market(db)
     pipeline = MagicMock()
     pipeline.run.return_value = {
-        "probs": {(60.0, 70.0): 0.70},
+        "probs":     {(60.0, 70.0): 0.70},
         "p50_high_f": 65.0,
+        "quantiles": {fxx: {"p10": 1.0, "p50": 5.0, "p90": 9.0}
+                      for fxx in range(1, 49)},
     }
     prob_store = ProbabilityStore()
     loop = ForecastLoop(
@@ -329,7 +331,9 @@ def test_forecast_loop_tick_writes_prob_store(db, station):
     assert written == ["cid1"]
     buckets = asyncio.run(prob_store.read("cid1", 0))
     assert (60.0, 70.0) in buckets
-    assert abs(buckets[(60.0, 70.0)].mc_prob - 0.70) < 1e-9
+    payload = buckets[(60.0, 70.0)]
+    assert abs(payload.mc_prob - 0.70) < 1e-9
+    assert payload.quantiles_by_fxx[1]["p50"] == pytest.approx(5.0)
 
 
 def test_forecast_loop_tick_skips_event_outside_day_offset(db, station):

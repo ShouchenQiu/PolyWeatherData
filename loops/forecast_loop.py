@@ -117,7 +117,8 @@ class ForecastLoop:
             except Exception:
                 logger.exception("Pipeline failed for event {}", condition_id)
                 continue
-            probs = result.get("probs", {})
+            probs    = result.get("probs", {})
+            quantiles = result.get("quantiles", {})
             logger.debug(
                 "Event {} p50_high_f={:.1f}",
                 condition_id, result.get("p50_high_f", float("nan")),
@@ -127,7 +128,7 @@ class ForecastLoop:
             bucket_map = {
                 (lo, hi): BucketPayload(
                     mc_prob=prob,
-                    quantiles_by_fxx={},
+                    quantiles_by_fxx=dict(quantiles),
                     last_tick_utc=last_tick,
                 )
                 for (lo, hi), prob in probs.items()
