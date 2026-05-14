@@ -51,8 +51,15 @@ class FixedFraction(BaseRiskModel):
         self,
         signal:           "Signal",
         current_exposure: float,
+        open_positions:   dict[str, int] | None = None,
     ) -> bool:
-        """Return False unless there is headroom for a full position_usd trade."""
+        """Return False unless there is headroom for a full position_usd trade.
+
+        When ``open_positions`` is provided, the duplicate-position check
+        (per-token cap via ``settings.max_open_per_token``) will be enforced
+        in V06.  The parameter is accepted now to keep all call sites stable
+        across the V06 signature change.
+        """
         if self.position_usd <= 0:
             return False
         if current_exposure + self.position_usd > self.max_total_usd:
@@ -63,6 +70,7 @@ class FixedFraction(BaseRiskModel):
         self,
         signal:           "Signal",
         current_exposure: float,
+        open_positions:   dict[str, int] | None = None,
     ) -> float:
         """Return the actual USDC amount to allocate.
 

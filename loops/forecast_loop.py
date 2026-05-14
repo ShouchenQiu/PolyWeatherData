@@ -160,7 +160,10 @@ class ForecastLoop:
                     size_usd = size,
                     price    = sig.clob_price,
                 )
-                self.positions.open(sig, order)
+                self.positions.record_order(
+                    order.order_id, order.token_id, sig.condition_id,
+                    order.side, order.size_usd, order.price,
+                )
                 exposure += size
                 placed_orders.append(order)
 

@@ -236,6 +236,29 @@ class DbClient:
         self._conn.commit()
 
     # ------------------------------------------------------------------
+    # General write seam
+    # ------------------------------------------------------------------
+
+    def execute(self, sql: str, params: tuple = ()) -> None:
+        """Execute a write statement and commit.
+
+        Provides a stable public seam for modules in core/ that need to
+        issue arbitrary SQL writes without bypassing the connection lifecycle.
+        Callers must not use ``_conn`` directly.
+        """
+        self._conn.execute(sql, params)
+        self._conn.commit()
+
+    def query(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
+        """Execute a read-only SQL statement and return all rows.
+
+        Provides a stable public seam for modules in core/ that need to
+        issue arbitrary SQL reads without bypassing the connection lifecycle.
+        Callers must not use ``_conn`` directly.
+        """
+        return self._conn.execute(sql, params).fetchall()
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
