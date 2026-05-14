@@ -15,6 +15,7 @@ import pandas as pd
 from loguru import logger
 
 from config.settings import Settings as _Settings
+from data.storage.cleaner import Cleaner
 
 if TYPE_CHECKING:
     from config.stations import StationConfig
@@ -101,6 +102,8 @@ class DataManager:
                             src_name, init_time,
                         )
                         continue
+                    df = Cleaner.clean_hrrr(df)
+                    df = Cleaner.build_features_hrrr(df)
                     logger.debug(
                         "HRRR fetch: source={} init={} rows={}",
                         src_name, init_time, len(df),
@@ -170,6 +173,8 @@ class DataManager:
                             src_name, station.station_id,
                         )
                         continue
+                    df = Cleaner.clean_iem(df)
+                    df = Cleaner.build_features_iem(df)
                     logger.debug(
                         "Obs fetch: source={} station={} rows={}",
                         src_name, station.station_id, len(df),
@@ -276,6 +281,9 @@ class DataManager:
                 f"station={station.station_id} "
                 f"(have {len(merged)}, need {cold_start})"
             )
+
+        if "TMP_2m" in merged.columns and "tmpc" in merged.columns:
+            merged["temp_error"] = merged["tmpc"] - merged["TMP_2m"]
 
         return merged
 

@@ -39,6 +39,7 @@ def _make_obs_rows(n: int, start: pd.Timestamp) -> pd.DataFrame:
         rows.append({
             "valid_time":      str(vt),
             "raw_tmpc_tenths": 6.0 + i * 0.1,
+            "tmpc":            6.0 + i * 0.1,  # added by build_features_iem in real flow
         })
     return pd.DataFrame(rows)
 
@@ -70,6 +71,10 @@ def test_build_encoder_obs_window_returns_merged_72_rows():
     assert len(result) == 72
     assert "TMP_2m" in result.columns
     assert "raw_tmpc_tenths" in result.columns
+    assert "tmpc" in result.columns
+    assert "temp_error" in result.columns
+    # temp_error = tmpc - TMP_2m; first row: 6.0 - 5.0 = 1.0
+    assert result["temp_error"].iloc[0] == pytest.approx(1.0, abs=0.01)
     assert result["valid_time"].is_monotonic_increasing
 
 

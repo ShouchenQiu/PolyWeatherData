@@ -75,7 +75,8 @@ def test_data_manager_hrrr_fallback_on_incomplete_data(tmp_path, station):
 
     incomplete_src.fetch.assert_called_once()
     good_src.fetch.assert_called_once()
-    assert df["TMP_2m"].iloc[0] == pytest.approx(280.0)
+    # After Cleaner.clean_hrrr, TMP_2m is converted from Kelvin to Celsius
+    assert df["TMP_2m"].iloc[0] == pytest.approx(280.0 - 273.15, abs=0.01)
 
 
 def test_data_manager_uses_first_successful_source(tmp_path, station):
@@ -155,6 +156,54 @@ def test_data_manager_obs_fallback_on_incomplete_data(station):
     incomplete.fetch.assert_called_once()
     good.fetch.assert_called_once()
     assert df["raw_tmpc_tenths"].iloc[0] == pytest.approx(5.0)
+
+
+def test_data_manager_fetch_hrrr_stores_cleaned_data(station):
+    """fetch_hrrr applies Cleaner before storing: TMP_2m in Celsius, u_wind added."""
+    raw_src = MagicMock()
+    raw_src.fetch.return_value = {station.station_id: pd.DataFrame({
+        "init_time":  [pd.Timestamp("2026-03-25 12:00:00+00:00")],
+        "fxx":        [1],
+        "valid_time": [pd.Timestamp("2026-03-25 13:00:00+00:00")],
+        "TMP_2m":     [280.0],   # Kelvin from source
+        "UGRD_10m":   [10.0],    # m/s from source
+        "VGRD_10m":   [5.0],     # m/s from source
+    })}
+    store = MagicMock()
+    store.append.return_value = 1
+    mgr = DataManager([raw_src], [], store, store)
+    df = mgr.fetch_hrrr(pd.Timestamp("2026-03-25 12:00:00+00:00"), station)
+
+    assert df["TMP_2m"].iloc[0] == pytest.approx(280.0 - 273.15, abs=0.01)
+    assert "u_wind" in df.columns
+    assert "v_wind" in df.columns
+    appended_df = store.append.call_args[0][1]
+    assert appended_df["TMP_2m"].iloc[0] == pytest.approx(280.0 - 273.15, abs=0.01)
+    assert "u_wind" in appended_df.columns
+
+
+def test_data_manager_fetch_iem_stores_cleaned_data(station):
+    """fetch_iem applies Cleaner before storing: tmpc alias and raw cols both present."""
+    raw_src = MagicMock()
+    raw_src.fetch.return_value = pd.DataFrame({
+        "valid_time":      [pd.Timestamp("2026-03-25 12:51:00+00:00")],
+        "raw_tmpc_tenths": [8.5],
+        "raw_dwpc_tenths": [3.2],
+    })
+    store = MagicMock()
+    store.append.return_value = 1
+    mgr = DataManager([], [raw_src], store, store)
+    df = mgr.fetch_iem(
+        station,
+        pd.Timestamp("2026-03-25 12:50:00+00:00"),
+        pd.Timestamp("2026-03-25 12:52:00+00:00"),
+    )
+
+    assert "tmpc" in df.columns
+    assert df["tmpc"].iloc[0] == pytest.approx(8.5)
+    assert "raw_tmpc_tenths" in df.columns
+    appended_df = store.append.call_args[0][1]
+    assert "tmpc" in appended_df.columns
 
 
 def test_data_manager_fetch_iem_fallback(station):
