@@ -1,45 +1,37 @@
-"""ForecastLoop: hourly trading cycle driven by the model pipeline.
+"""ForecastLoop: hourly model-pipeline cycle that populates ProbabilityStore.
 
 On each tick:
   1. Query active events from the DB.
   2. For each active event + station: run pipeline.run() -> probs.
-  3. Fetch CLOB mid-prices for all relevant token_ids.
-  4. strategy.compute_signals(probs, books, markets) -> signals.
-  5. For each signal: risk.approve_signal() -> place order -> tracker.open().
+  3. Wrap probs in BucketPayload and write to ProbabilityStore.
+
+Trading decisions (orderbook, strategy, risk, exchange, PositionTracker)
+are the sole responsibility of TradingLoop (ADR-0004).
 """
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 from loguru import logger
 
+from core.probability_store import BucketPayload, ProbabilityStore
+
 if TYPE_CHECKING:
-    from core.exchange.base import BaseExchange
-    from core.positions import PositionTracker
-    from core.risk.base import BaseRiskModel
-    from core.strategy.base import BaseStrategy
     from db.schema import DbClient
     from model.pipeline import ModelPipeline
 
 
 class ForecastLoop:
-    """Run one model-pipeline trading cycle per active event.
+    """Run one model-pipeline cycle per active event and write to ProbabilityStore.
 
     Parameters
     ----------
     pipeline:
         ModelPipeline that returns per-bucket probabilities.
-    orderbook:
-        Duck-typed fetcher with ``get_book(token_id) -> dict``.
-    strategy:
-        BaseStrategy implementation (e.g. EdgeStrategy).
-    risk:
-        BaseRiskModel implementation (e.g. FixedFraction).
-    exchange:
-        BaseExchange implementation (paper or live CLOB).
-    positions:
-        PositionTracker backed by the DB.
+    prob_store:
+        Shared ProbabilityStore written here; read by TradingLoop.
     db:
         DbClient for querying active events and markets.
     station:
@@ -48,55 +40,70 @@ class ForecastLoop:
 
     def __init__(
         self,
-        pipeline:  "ModelPipeline",
-        orderbook: Any,
-        strategy:  "BaseStrategy",
-        risk:      "BaseRiskModel",
-        exchange:  "BaseExchange",
-        positions: "PositionTracker",
-        db:        "DbClient",
-        station:   Any,
+        pipeline:   "ModelPipeline",
+        prob_store: ProbabilityStore,
+        db:         "DbClient",
+        station:    Any,
     ) -> None:
-        self.pipeline  = pipeline
-        self.orderbook = orderbook
-        self.strategy  = strategy
-        self.risk      = risk
-        self.exchange  = exchange
-        self.positions = positions
-        self.db        = db
-        self.station   = station
+        self.pipeline   = pipeline
+        self.prob_store = prob_store
+        self.db         = db
+        self.station    = station
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    async def tick(self, init_time: pd.Timestamp | None = None) -> list:
-        """Execute one forecast-and-trade cycle.
+    async def tick(self, init_time: pd.Timestamp | None = None) -> list[str]:
+        """Execute one forecast cycle.
 
         Parameters
         ----------
         init_time:
-            Override the HRRR init time.  Defaults to the current UTC
-            hour (floor to hour).
+            Override the HRRR init time.  Defaults to the current UTC hour.
 
         Returns
         -------
-        List of Order objects placed during this tick.
+        List of condition_ids successfully written to ProbabilityStore.
         """
         if init_time is None:
             init_time = pd.Timestamp.utcnow().floor("h")
 
-        logger.info("ForecastLoop tick: init_time={}", init_time)
+        init_utc = (
+            init_time.tz_localize("UTC") if init_time.tzinfo is None
+            else init_time.tz_convert("UTC")
+        )
+
+        logger.info("ForecastLoop tick: init_time={}", init_utc)
         active_events = self.db.get_active_events()
         logger.debug("ForecastLoop: {} active event(s)", len(active_events))
-        placed_orders = []
+        written: list[str] = []
 
         for event in active_events:
             condition_id = event["condition_id"]
-            markets      = self.db.get_markets_for_event(condition_id)
+
+            # day_offset: days from init_utc.date() to event_end_date, restricted to {0,1,2}
+            try:
+                delta = (
+                    date.fromisoformat(event["event_end_date"]) - init_utc.date()
+                ).days
+            except (KeyError, ValueError, TypeError):
+                logger.warning(
+                    "ForecastLoop: event {} has invalid event_end_date, skipping",
+                    condition_id,
+                )
+                continue
+            if delta not in (0, 1, 2):
+                logger.debug(
+                    "ForecastLoop: event {} day_offset={} outside 0..2, skipping",
+                    condition_id, delta,
+                )
+                continue
+            day_offset = delta
+
+            markets = self.db.get_markets_for_event(condition_id)
             if not markets:
                 continue
-
             buckets = [
                 (m["bucket_lo_f"], m["bucket_hi_f"])
                 for m in markets
@@ -105,9 +112,8 @@ class ForecastLoop:
             if not buckets:
                 continue
 
-            # 1. Run pipeline
             try:
-                result = self.pipeline.run(self.station, init_time, buckets)
+                result = self.pipeline.run(self.station, init_utc, buckets)
             except Exception:
                 logger.exception("Pipeline failed for event {}", condition_id)
                 continue
@@ -117,55 +123,28 @@ class ForecastLoop:
                 condition_id, result.get("p50_high_f", float("nan")),
             )
 
-            # 2. Fetch orderbooks for each YES token
-            books = {}
-            for m in markets:
-                if m["outcome"] != "YES":
-                    continue
-                try:
-                    books[m["token_id"]] = self.orderbook.get_book(
-                        m["token_id"]
-                    )
-                except Exception:
-                    logger.warning("Could not fetch book for token {}", m["token_id"])
+            last_tick = datetime.now(timezone.utc)
+            bucket_map = {
+                (lo, hi): BucketPayload(
+                    mc_prob=prob,
+                    quantiles_by_fxx={},
+                    last_tick_utc=last_tick,
+                )
+                for (lo, hi), prob in probs.items()
+            }
+            try:
+                await self.prob_store.write(condition_id, day_offset, bucket_map)
+            except Exception:
+                logger.exception(
+                    "ForecastLoop: prob_store.write failed for event {}", condition_id
+                )
+                continue
 
-            # 3. Compute signals
-            signals = self.strategy.compute_signals(probs, books, markets)
-            logger.debug("Event {}: {} signal(s) generated", condition_id, len(signals))
+            logger.info(
+                "ForecastLoop: wrote {} bucket(s) for event {}",
+                len(bucket_map), condition_id,
+            )
+            written.append(condition_id)
 
-            # 4. Risk-check and place orders
-            exposure = self.positions.total_exposure()
-            for sig in signals:
-                if not self.risk.approve_signal(sig, exposure):
-                    logger.debug(
-                        "Signal rejected by risk: token={} edge={:.4f} exposure={:.2f}",
-                        sig.token_id, sig.edge, exposure,
-                    )
-                    continue
-                size = self.risk.compute_size(sig, exposure)
-                if size <= 0:
-                    continue
-                order_id = self.exchange.place_order(
-                    sig.token_id, sig.side, size, sig.clob_price
-                )
-                logger.info(
-                    "Order placed: {} {} ${:.2f} @ {:.4f} edge={:.4f} order_id={}",
-                    sig.side, sig.token_id, size, sig.clob_price, sig.edge, order_id,
-                )
-                from core.types import Order
-                order = Order(
-                    order_id = order_id,
-                    token_id = sig.token_id,
-                    side     = sig.side,
-                    size_usd = size,
-                    price    = sig.clob_price,
-                )
-                self.positions.record_order(
-                    order.order_id, order.token_id, sig.condition_id,
-                    order.side, order.size_usd, order.price,
-                )
-                exposure += size
-                placed_orders.append(order)
-
-        logger.info("ForecastLoop tick done: {} order(s) placed", len(placed_orders))
-        return placed_orders
+        logger.info("ForecastLoop tick done: {} event(s) written", len(written))
+        return written

@@ -8,11 +8,7 @@ import pandas as pd
 import pytest
 
 from config.stations import STATIONS
-from core.exchange.paper import PaperExchange
-from core.positions import PositionTracker
-from core.risk.fixed_fraction import FixedFraction
-from core.strategy.edge import EdgeStrategy
-from core.types import Signal
+from core.probability_store import ProbabilityStore
 from data.manager import DataManager
 from db.schema import DbClient
 from loops.forecast_loop import ForecastLoop
@@ -276,9 +272,13 @@ def test_update_event_status(db):
 # -----------------------------------------------------------------------
 
 def _seed_event_and_market(db):
-    """Pre-populate DB with one active event and one YES market."""
+    """Pre-populate DB with one active event and one YES market.
+
+    event_end_date is set to the same day as the test init_time (2026-03-25)
+    so day_offset == 0 and the event is processed by ForecastLoop.tick().
+    """
     station_id = next(iter(STATIONS))
-    db.upsert_event("cid1", "q", "slug", "2026-04-01", station_id,
+    db.upsert_event("cid1", "q", "slug", "2026-03-25", station_id,
                     status="active")
     db.upsert_market("tok1", "cid1", "slug-60-70", 60.0, 70.0, "YES")
 
@@ -286,14 +286,10 @@ def _seed_event_and_market(db):
 def test_forecast_loop_tick_no_events(db, station):
     """tick() with no active events returns empty list."""
     loop = ForecastLoop(
-        pipeline  = MagicMock(),
-        orderbook = MagicMock(),
-        strategy  = EdgeStrategy(min_edge=0.04),
-        risk      = FixedFraction(position_usd=20.0),
-        exchange  = PaperExchange(),
-        positions = PositionTracker(db),
-        db        = db,
-        station   = station,
+        pipeline   = MagicMock(),
+        prob_store = ProbabilityStore(),
+        db         = db,
+        station    = station,
     )
     result = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
     assert result == []
@@ -305,102 +301,48 @@ def test_forecast_loop_tick_pipeline_failure_is_swallowed(db, station):
     broken_pipeline = MagicMock()
     broken_pipeline.run.side_effect = RuntimeError("model unavailable")
     loop = ForecastLoop(
-        pipeline  = broken_pipeline,
-        orderbook = MagicMock(),
-        strategy  = EdgeStrategy(min_edge=0.04),
-        risk      = FixedFraction(position_usd=20.0),
-        exchange  = PaperExchange(),
-        positions = PositionTracker(db),
-        db        = db,
-        station   = station,
+        pipeline   = broken_pipeline,
+        prob_store = ProbabilityStore(),
+        db         = db,
+        station    = station,
     )
     result = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
     assert result == []
 
 
-def test_forecast_loop_tick_places_order_when_signal_approved(db, station):
-    """tick() places an order when the strategy returns a signal above threshold."""
+def test_forecast_loop_tick_writes_prob_store(db, station):
+    """tick() writes bucket probs to ProbabilityStore; returns condition_id."""
     _seed_event_and_market(db)
-
-    # Pipeline returns probs that lead to a BUY signal: mc=0.70, clob=0.50 -> edge=0.2
-    pipeline   = MagicMock()
-    pipeline.run.return_value = {
-        "probs": {(60.0, 70.0): 0.70},
-        "p50_high_f": 65.0,
-    }
-
-    # Orderbook returns mid_price=0.50
-    orderbook  = MagicMock()
-    orderbook.get_book.return_value = {"mid_price": 0.50, "bids": [], "asks": []}
-
-    exchange   = PaperExchange()
-    positions  = PositionTracker(db)
-
-    loop = ForecastLoop(
-        pipeline  = pipeline,
-        orderbook = orderbook,
-        strategy  = EdgeStrategy(min_edge=0.04),
-        risk      = FixedFraction(position_usd=20.0, max_total_usd=500.0),
-        exchange  = exchange,
-        positions = positions,
-        db        = db,
-        station   = station,
-    )
-    orders = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
-    assert len(orders) == 1
-    assert orders[0].side     == "BUY"
-    assert orders[0].token_id == "tok1"
-
-
-def test_forecast_loop_tick_no_order_below_edge_threshold(db, station):
-    """tick() produces no orders when edge < min_edge."""
-    _seed_event_and_market(db)
-
-    pipeline = MagicMock()
-    # edge = 0.53 - 0.50 = 0.03 < min_edge=0.04
-    pipeline.run.return_value = {
-        "probs": {(60.0, 70.0): 0.53},
-        "p50_high_f": 65.0,
-    }
-    orderbook = MagicMock()
-    orderbook.get_book.return_value = {"mid_price": 0.50, "bids": [], "asks": []}
-
-    loop = ForecastLoop(
-        pipeline  = pipeline,
-        orderbook = orderbook,
-        strategy  = EdgeStrategy(min_edge=0.04),
-        risk      = FixedFraction(position_usd=20.0, max_total_usd=500.0),
-        exchange  = PaperExchange(),
-        positions = PositionTracker(db),
-        db        = db,
-        station   = station,
-    )
-    orders = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
-    assert orders == []
-
-
-def test_forecast_loop_tick_risk_rejection_blocks_order(db, station):
-    """tick() respects risk cap: no order when total exposure is already at cap."""
-    _seed_event_and_market(db)
-
     pipeline = MagicMock()
     pipeline.run.return_value = {
         "probs": {(60.0, 70.0): 0.70},
         "p50_high_f": 65.0,
     }
-    orderbook = MagicMock()
-    orderbook.get_book.return_value = {"mid_price": 0.50, "bids": [], "asks": []}
-
-    # position_usd=20, max_total_usd=10: first trade exceeds cap
+    prob_store = ProbabilityStore()
     loop = ForecastLoop(
-        pipeline  = pipeline,
-        orderbook = orderbook,
-        strategy  = EdgeStrategy(min_edge=0.04),
-        risk      = FixedFraction(position_usd=20.0, max_total_usd=10.0),
-        exchange  = PaperExchange(),
-        positions = PositionTracker(db),
-        db        = db,
-        station   = station,
+        pipeline   = pipeline,
+        prob_store = prob_store,
+        db         = db,
+        station    = station,
     )
-    orders = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
-    assert orders == []
+    written = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
+    assert written == ["cid1"]
+    buckets = asyncio.run(prob_store.read("cid1", 0))
+    assert (60.0, 70.0) in buckets
+    assert abs(buckets[(60.0, 70.0)].mc_prob - 0.70) < 1e-9
+
+
+def test_forecast_loop_tick_skips_event_outside_day_offset(db, station):
+    """Events whose end date is > 2 days from init_time are silently skipped."""
+    station_id = next(iter(STATIONS))
+    db.upsert_event("far_cid", "q", "slug", "2026-05-01", station_id,
+                    status="active")
+    db.upsert_market("far_tok", "far_cid", "slug-60-70", 60.0, 70.0, "YES")
+    loop = ForecastLoop(
+        pipeline   = MagicMock(),
+        prob_store = ProbabilityStore(),
+        db         = db,
+        station    = station,
+    )
+    written = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
+    assert written == []

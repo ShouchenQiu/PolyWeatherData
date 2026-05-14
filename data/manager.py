@@ -62,12 +62,11 @@ class DataManager:
         self,
         init_time: pd.Timestamp,
         station:   "StationConfig",
-        fxx_range: range = _DEFAULT_FXX_RANGE,
     ) -> pd.DataFrame:
         """Fetch HRRR data, trying each source in priority order.
 
         On success the result is appended to forecast_store for future
-        offline replay.
+        offline replay.  Always fetches fxx 0..48 (the full decoder window).
 
         Parameters
         ----------
@@ -75,8 +74,6 @@ class DataManager:
             HRRR model initialisation time (UTC).
         station:
             Target station configuration.
-        fxx_range:
-            Forecast hours to retrieve (default 0..48 inclusive).
 
         Returns
         -------
@@ -96,7 +93,7 @@ class DataManager:
         for src in self._forecast_sources:
             src_name = type(src).__name__
             try:
-                result = src.fetch(init_utc, fxx_range, station)
+                result = src.fetch(init_utc, _DEFAULT_FXX_RANGE, station)
                 # Sources return dict[station_id -> DataFrame]
                 df = result.get(station.station_id, pd.DataFrame())
                 if df is not None and not df.empty:
@@ -140,7 +137,7 @@ class DataManager:
         missing_steps = set(range(1, 49)) - set(decoder_rows["fxx"].unique())
         if missing_steps:
             return False
-        return bool(decoder_rows["TMP_2m"].notna().any())
+        return bool(decoder_rows["TMP_2m"].notna().all())
 
     # ------------------------------------------------------------------
     # Surface observations
