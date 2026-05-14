@@ -62,6 +62,34 @@ class TradingLoop:
             )
         )
 
+    async def _is_fresh(
+        self,
+        condition_id: str,
+        day_offset: int,
+        station: str | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        """Return True when ProbabilityStore data for this key is fresh.
+
+        Emits a data_stale alert and returns False when data is absent or
+        older than settings.staleness_threshold_min.
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        buckets = await self._prob_store.read(condition_id, day_offset)
+        if not buckets:  # None or empty dict -> treat as missing data
+            self._on_data_stale(station, float("inf"))
+            return False
+
+        sample = next(iter(buckets.values()))
+        age_min = (now - sample.last_tick_utc).total_seconds() / 60.0
+        if age_min > self._settings.staleness_threshold_min:
+            self._on_data_stale(station, age_min)
+            return False
+
+        return True
+
     async def tick(
         self,
         condition_id: str,
@@ -87,19 +115,11 @@ class TradingLoop:
         bool
             True when data is fresh and order submission may proceed.
             False when data is absent or stale; a data_stale alert is emitted.
+
+        Note
+        ----
+        V11 will expand this method to iterate active events and drive
+        strategy / risk / exchange.  The staleness check is delegated to
+        _is_fresh() so that expansion does not bloat this method.
         """
-        if now is None:
-            now = datetime.now(timezone.utc)
-
-        buckets = await self._prob_store.read(condition_id, day_offset)
-        if not buckets:  # None or empty dict -> treat as missing data
-            self._on_data_stale(station, float("inf"))
-            return False
-
-        sample = next(iter(buckets.values()))
-        age_min = (now - sample.last_tick_utc).total_seconds() / 60.0
-        if age_min > self._settings.staleness_threshold_min:
-            self._on_data_stale(station, age_min)
-            return False
-
-        return True
+        return await self._is_fresh(condition_id, day_offset, station, now)

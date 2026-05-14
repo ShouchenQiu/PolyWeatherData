@@ -116,7 +116,7 @@ class SniperLoop:
         timestamp:  Any,
     ) -> None:
         """Parse ground-truth temperature and place BUY orders on true/false buckets."""
-        from core.types import Order, Signal
+        from core.types import Signal
 
         actual_temp_f = _parse_metar_temp_f(metar_text)
         if actual_temp_f is None:
@@ -195,12 +195,7 @@ class SniperLoop:
                     outcome_key, token_id, price, size,
                 )
                 order_id = self.exchange.place_order(token_id, "BUY", size, price)
-                order = Order(
-                    order_id = order_id,
-                    token_id = token_id,
-                    side     = "BUY",
-                    size_usd = size,
-                    price    = price,
+                self.positions.record_order(
+                    order_id, token_id, condition_id, "BUY", size, price
                 )
-                self.positions.open(sig, order)
                 exposure += size

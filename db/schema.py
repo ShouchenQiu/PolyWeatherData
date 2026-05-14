@@ -236,25 +236,29 @@ class DbClient:
         self._conn.commit()
 
     # ------------------------------------------------------------------
-    # General write seam
+    # Low-level escape hatches -- prefer domain methods above
+    # ------------------------------------------------------------------
+    # Use execute() / query() only when no domain method exists yet.
+    # New modules needing DB access should get their own domain methods
+    # here rather than accumulating raw SQL across the codebase.
     # ------------------------------------------------------------------
 
     def execute(self, sql: str, params: tuple = ()) -> None:
-        """Execute a write statement and commit.
+        """Low-level escape hatch: execute a write statement and commit.
 
-        Provides a stable public seam for modules in core/ that need to
-        issue arbitrary SQL writes without bypassing the connection lifecycle.
-        Callers must not use ``_conn`` directly.
+        Prefer adding a domain-level method to DbClient over calling this
+        directly.  Only use when no suitable domain method exists.
+        Callers must not access ``_conn`` directly.
         """
         self._conn.execute(sql, params)
         self._conn.commit()
 
     def query(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
-        """Execute a read-only SQL statement and return all rows.
+        """Low-level escape hatch: execute a read query and return all rows.
 
-        Provides a stable public seam for modules in core/ that need to
-        issue arbitrary SQL reads without bypassing the connection lifecycle.
-        Callers must not use ``_conn`` directly.
+        Prefer adding a domain-level method to DbClient over calling this
+        directly.  Only use when no suitable domain method exists.
+        Callers must not access ``_conn`` directly.
         """
         return self._conn.execute(sql, params).fetchall()
 
