@@ -218,6 +218,32 @@ def test_exactly_at_threshold_is_not_stale() -> None:
     assert len(received) == 0
 
 
+def test_tick_returns_false_and_emits_alert_when_empty_bucket_map() -> None:
+    """Empty bucket map (key exists, value is {}) treated as missing data."""
+    prob_store = ProbabilityStore()
+    bus = AlertBus()
+    received: list[AlertEvent] = []
+
+    async def handler(e: AlertEvent) -> None:
+        received.append(e)
+
+    bus.subscribe(handler)
+    loop = TradingLoop(prob_store=prob_store, alert_bus=bus, settings=Settings())
+
+    async def run() -> bool:
+        # Write an empty bucket map directly via internal API to simulate the edge case
+        async with prob_store._lock:
+            prob_store._data[("cid-empty", 0)] = {}
+        result = await loop.tick("cid-empty", 0, station="KLGA")
+        await asyncio.sleep(0)
+        return result
+
+    result = asyncio.run(run())
+    assert result is False
+    assert len(received) == 1
+    assert received[0].alert_type == "data_stale"
+
+
 def test_no_order_submission_method_exists() -> None:
     """TradingLoop skeleton must not expose submit_order or place_order."""
     loop = _make_loop()

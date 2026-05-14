@@ -92,7 +92,7 @@ class TradingLoop:
             now = datetime.now(timezone.utc)
 
         buckets = await self._prob_store.read(condition_id, day_offset)
-        if buckets is None:
+        if not buckets:  # None or empty dict -> treat as missing data
             self._on_data_stale(station, float("inf"))
             return False
 

@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from core.positions import PositionTracker
     from core.risk.base import BaseRiskModel
     from db.schema import DbClient
-    from snipers.manager import SniperManager
+    from snipers.sniper_manager import SniperManager
 
 
 class SniperLoop:

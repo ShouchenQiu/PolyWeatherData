@@ -56,7 +56,7 @@ class BotManager:
         from model.mc import McSampler
         from model.pipeline import ModelPipeline
         from snipers.awc import AwcSniper
-        from snipers.manager import SniperManager
+        from snipers.sniper_manager import SniperManager
         from snipers.noaa import NoaaSniper
 
         # DB

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from snipers.awc import AwcSniper
-from snipers.manager import SniperManager
+from snipers.sniper_manager import SniperManager
 from snipers.noaa import NoaaSniper
 
 
