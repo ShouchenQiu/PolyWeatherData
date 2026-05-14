@@ -15,7 +15,6 @@ import pandas as pd
 from loguru import logger
 
 from config.settings import Settings as _Settings
-from data.forecast.hrrr_fill import HrrrFill, _MAJOR_HOURS, _nearest_prior_major
 from data.storage.cleaner import Cleaner
 
 if TYPE_CHECKING:
@@ -92,8 +91,6 @@ class DataManager:
             init_time.tz_localize("UTC") if init_time.tzinfo is None
             else init_time.tz_convert("UTC")
         )
-        if init_utc.hour not in _MAJOR_HOURS:
-            return self._fetch_hrrr_non_major(init_utc, station)
 
         last_exc: Exception | None = None
         for src in self._forecast_sources:
@@ -127,99 +124,6 @@ class DataManager:
             f"All HRRR sources failed for init={init_utc}. "
             f"Last error: {last_exc}"
         )
-
-    def _fetch_hrrr_non_major(
-        self,
-        init_utc: pd.Timestamp,
-        station: "StationConfig",
-    ) -> pd.DataFrame:
-        """Fetch a non-MAJOR HRRR init, reading MAJOR runs from store first.
-
-        Fetches fxx 0-18 for init_utc from the source chain, then supplies
-        the nearest and prior MAJOR run DataFrames to HrrrFill -- reading
-        from forecast_store when available, only downloading when missing.
-        This avoids the redundant network fetches that would occur if the
-        source's internal splice path were used.
-        """
-        from data.forecast._grib_source import BaseGribSource, _NON_MAJOR_FXX
-
-        nearest_major_init = _nearest_prior_major(init_utc)
-        prior_major_init   = nearest_major_init - pd.Timedelta(hours=6)
-
-        # --- fxx 0-18 for the non-MAJOR init ---
-        non_major_df: pd.DataFrame = pd.DataFrame()
-        last_exc: Exception | None = None
-        for src in self._forecast_sources:
-            src_name = type(src).__name__
-            try:
-                if isinstance(src, BaseGribSource):
-                    raw = src.fetch_raw(init_utc, _NON_MAJOR_FXX, station)
-                else:
-                    raw = src.fetch(init_utc, _NON_MAJOR_FXX, station)
-                df = raw.get(station.station_id, pd.DataFrame())
-                if df is not None and not df.empty and self._hrrr_is_complete(df):
-                    df = Cleaner.process_hrrr(df)
-                    non_major_df = df
-                    break
-            except Exception as exc:
-                logger.warning(
-                    "HRRR source {} failed for non-MAJOR init={}: {}",
-                    src_name, init_utc, exc,
-                )
-                last_exc = exc
-        if non_major_df.empty:
-            raise RuntimeError(
-                f"All HRRR sources failed for non-MAJOR init={init_utc}. "
-                f"Last error: {last_exc}"
-            )
-
-        nearest_major_df = self._read_major_from_store_or_source(
-            nearest_major_init, station
-        )
-        prior_major_df = self._read_major_from_store_or_source(
-            prior_major_init, station, required=False
-        )
-
-        fill = HrrrFill()
-        spliced = fill.fill(non_major_df, nearest_major_df, prior_major_df)
-        if not spliced.empty:
-            self._forecast_store.append(station.station_id, spliced)
-        return spliced
-
-    def _read_major_from_store_or_source(
-        self,
-        major_init: pd.Timestamp,
-        station: "StationConfig",
-        required: bool = True,
-    ) -> pd.DataFrame:
-        """Return MAJOR-init data from store when present, else download it.
-
-        Parameters
-        ----------
-        required:
-            When False, return an empty DataFrame instead of raising on failure.
-        """
-        window_end = major_init + pd.Timedelta(hours=48)
-        cached = self._forecast_store.read(
-            station.station_id, major_init, window_end
-        )
-        if not cached.empty and self._hrrr_is_complete(cached):
-            logger.debug(
-                "DataManager: MAJOR init={} served from store ({} rows)",
-                major_init, len(cached),
-            )
-            return cached
-
-        try:
-            return self.fetch_hrrr(major_init, station)
-        except RuntimeError:
-            if required:
-                raise
-            logger.warning(
-                "DataManager: MAJOR init={} unavailable; tail-gap fallback disabled",
-                major_init,
-            )
-            return pd.DataFrame()
 
     @staticmethod
     def _hrrr_is_complete(df: pd.DataFrame) -> bool:

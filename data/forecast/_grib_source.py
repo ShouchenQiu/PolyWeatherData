@@ -243,28 +243,6 @@ class BaseGribSource(BaseForecastSource):
     # Public fetch  -- returns dict[station_id -> DataFrame]
     # ------------------------------------------------------------------
 
-    def fetch_raw(
-        self,
-        init_time: pd.Timestamp,
-        fxx_range: range,
-        station: "StationConfig | None" = None,
-    ) -> "dict[str, pd.DataFrame]":
-        """Fetch fxx_range rows for init_time without any MAJOR-hour splice.
-
-        This is a lower-level entry point for callers (e.g. DataManager) that
-        coordinate the HrrrFill splice themselves.  Use ``fetch`` when you
-        want the full MAJOR/non-MAJOR logic handled automatically.
-        """
-        from config.stations import STATIONS
-
-        station_list = [station] if station is not None else list(STATIONS.values())
-
-        init_utc = (
-            init_time.tz_localize("UTC") if init_time.tzinfo is None
-            else init_time.tz_convert("UTC")
-        )
-        return self._fetch_all_stations(init_utc, fxx_range, station_list)
-
     def fetch(
         self,
         init_time: pd.Timestamp,
