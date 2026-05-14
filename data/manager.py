@@ -301,7 +301,19 @@ class DataManager:
         hrrr_raw["valid_time"] = pd.to_datetime(hrrr_raw["valid_time"], utc=True)
         obs_raw["valid_time"]  = pd.to_datetime(obs_raw["valid_time"],  utc=True)
 
-        merged = pd.merge(hrrr_raw, obs_raw, on="valid_time", how="inner", suffixes=("_hrrr", "_obs"))
+        hrrr_sorted = hrrr_raw.sort_values("valid_time").reset_index(drop=True)
+        obs_sorted  = obs_raw.sort_values("valid_time").reset_index(drop=True)
+
+        # Asof join with 20-minute tolerance: HRRR rows where no obs lands within
+        # 20 min get NaN obs columns; temp_error dropna below discards those rows.
+        merged = pd.merge_asof(
+            hrrr_sorted,
+            obs_sorted,
+            on="valid_time",
+            tolerance=pd.Timedelta(minutes=20),
+            direction="nearest",
+            suffixes=("_hrrr", "_obs"),
+        )
         merged = merged.sort_values("valid_time").reset_index(drop=True)
 
         if len(merged) < n_hours:

@@ -113,6 +113,7 @@ def test_run_result_keys():
     assert "probs"      in result
     assert "p50_high_f" in result
     assert "quantiles"  in result
+    assert "last_tick_utc" in result
 
 
 def test_run_station_id():
@@ -200,5 +201,71 @@ def test_run_does_not_repull_obs_window():
     pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
 
     dm.fetch_iem.assert_not_called()
+
+
+def test_run_encoder_window_is_72_rows():
+    """build_encoder_obs_window must be called with n_hours=72."""
+    mc       = McSampler(n_samp=200, rng_seed=0)
+    tft      = _make_tft_mock()
+    dm       = _make_data_mgr(_INIT_TIME)
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+    dm.build_encoder_obs_window.assert_called_once()
+    _, kwargs = dm.build_encoder_obs_window.call_args
+    assert kwargs.get("n_hours") == 72
+
+
+def test_run_encoder_df_has_time_idx_column():
+    """encoder_df passed to tft.predict must have a 'time_idx' column."""
+    mc       = McSampler(n_samp=200, rng_seed=0)
+    tft      = _make_tft_mock()
+    dm       = _make_data_mgr(_INIT_TIME)
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+    enc_df_arg = tft.predict.call_args[0][0]
+    assert "time_idx" in enc_df_arg.columns, "encoder_df must have time_idx column"
+
+
+def test_run_encoder_df_has_seasonal_columns():
+    """encoder_df passed to tft.predict must have month, day_of_year, hour_of_day."""
+    mc       = McSampler(n_samp=200, rng_seed=0)
+    tft      = _make_tft_mock()
+    dm       = _make_data_mgr(_INIT_TIME)
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+    enc_df_arg = tft.predict.call_args[0][0]
+    assert "month"       in enc_df_arg.columns
+    assert "day_of_year" in enc_df_arg.columns
+    assert "hour_of_day" in enc_df_arg.columns
+    assert "sin_hour"    in enc_df_arg.columns
+    assert "cos_hour"    in enc_df_arg.columns
+
+
+def test_run_last_tick_utc_is_utc_timestamp():
+    """result['last_tick_utc'] must be a UTC-aware Timestamp equal to init_time."""
+    mc       = McSampler(n_samp=200, rng_seed=0)
+    tft      = _make_tft_mock()
+    dm       = _make_data_mgr(_INIT_TIME)
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    result   = pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+    ts = result["last_tick_utc"]
+    assert isinstance(ts, pd.Timestamp)
+    assert ts.tzinfo is not None
+    assert ts == _INIT_TIME
+
+
+def test_tft_max_encoder_length_is_72():
+    from model.tft import MAX_ENCODER_LENGTH
+    assert MAX_ENCODER_LENGTH == 72
+
+
+def test_tft_prep_removed():
+    """_prep() must no longer exist as a module-level function in model.tft."""
+    import model.tft as tft_module
+    assert not hasattr(tft_module, "_prep"), "_prep must be removed from model.tft"
 
 

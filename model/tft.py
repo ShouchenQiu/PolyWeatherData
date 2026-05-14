@@ -34,8 +34,6 @@ if TYPE_CHECKING:
 # Column definitions (must match the training dataset exactly)
 # ---------------------------------------------------------------------------
 
-_TEMP_K_COLS = ["TMP_2m", "DPT_2m", "TMP_sfc", "TMP_850mb", "TMP_500mb"]
-
 KNOWN_REALS = [
     "local_idx",
     "sin_hour", "cos_hour", "sin_doy", "cos_doy",
@@ -65,115 +63,13 @@ UNKNOWN_REALS = [
 
 TARGET = "temp_error"
 
-MAX_ENCODER_LENGTH    = 24
+MAX_ENCODER_LENGTH    = 72
 MAX_PREDICTION_LENGTH = 48
 
 
 # ---------------------------------------------------------------------------
 # Feature engineering helpers
 # ---------------------------------------------------------------------------
-
-def _wind_components(
-    u: np.ndarray, v: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    ws    = np.sqrt(u ** 2 + v ** 2).astype("float32")
-    wd    = np.arctan2(-u, -v)
-    calm  = ws == 0.0
-    sin_wd = np.where(calm, 0.0, np.sin(wd)).astype("float32")
-    cos_wd = np.where(calm, 0.0, np.cos(wd)).astype("float32")
-    return ws, sin_wd, cos_wd
-
-
-def _prep(df: pd.DataFrame) -> pd.DataFrame:
-    """Feature-engineer a 72-row encoder+decoder DataFrame.
-
-    Steps
-    -----
-    1. Convert Kelvin temperature columns to Celsius where value > 200.
-    2. Decompose HRRR and obs wind U/V into speed + sin/cos direction.
-    3. Log-transform GUST and PRATE.
-    4. Compute temp_error = raw_tmpc_tenths - TMP_2m  (residual target).
-    5. Compute local_idx = fxx + 71  (matches training window).
-    6. Add calendar cyclical features from valid_time.
-    7. Ensure all model columns exist and are float32.
-    """
-    df = df.copy()
-    df = df.loc[:, ~df.columns.duplicated()]
-
-    # 1. Kelvin -> Celsius
-    for col in _TEMP_K_COLS:
-        if col in df.columns:
-            mask = df[col] > 200.0
-            df.loc[mask, col] = (df.loc[mask, col] - 273.15).astype("float32")
-
-    # 2. HRRR wind decomposition
-    for u_col, v_col, tag in [
-        ("UGRD_10m",   "VGRD_10m",   "10m"),
-        ("UGRD_80m",   "VGRD_80m",   "80m"),
-        ("UGRD_500mb", "VGRD_500mb", "500mb"),
-    ]:
-        u = df.get(u_col, pd.Series(0.0, index=df.index)).fillna(0).values
-        v = df.get(v_col, pd.Series(0.0, index=df.index)).fillna(0).values
-        ws, wds, wdc = _wind_components(u, v)
-        df[f"WS_{tag}"]      = ws
-        df[f"WD_sin_{tag}"]  = wds
-        df[f"WD_cos_{tag}"]  = wdc
-
-    # Obs wind decomposition
-    ou = df.get("obs_U", pd.Series(0.0, index=df.index)).fillna(0).values
-    ov = df.get("obs_V", pd.Series(0.0, index=df.index)).fillna(0).values
-    ws, wds, wdc = _wind_components(ou, ov)
-    df["obs_WS"]     = ws
-    df["obs_WD_sin"] = wds
-    df["obs_WD_cos"] = wdc
-
-    # 3. Log transforms
-    df["log1p_GUST_sfc"] = np.log1p(
-        df.get("GUST_sfc", pd.Series(0.0, index=df.index)).clip(lower=0)
-    ).astype("float32")
-    df["log1p_PRATE"] = np.log1p(
-        df.get("PRATE", pd.Series(0.0, index=df.index)).clip(lower=0)
-    ).astype("float32")
-
-    # 4. temp_error residual
-    tmp2m = df.get("TMP_2m", pd.Series(0.0, index=df.index)).fillna(0)
-    tmpc  = df.get("raw_tmpc_tenths", pd.Series(0.0, index=df.index)).fillna(0)
-    df[TARGET] = (tmpc - tmp2m).astype("float32")
-
-    # 5. local_idx
-    df["local_idx"] = (df["fxx"] + 71).astype(int)
-
-    # 6. Calendar cyclical features from valid_time
-    if "valid_time" in df.columns:
-        vt = pd.to_datetime(df["valid_time"], utc=True)
-        hour = vt.dt.hour.values
-        doy  = vt.dt.day_of_year.values
-        df["sin_hour"] = np.sin(2 * np.pi * hour / 24).astype("float32")
-        df["cos_hour"] = np.cos(2 * np.pi * hour / 24).astype("float32")
-        df["sin_doy"]  = np.sin(2 * np.pi * doy  / 365).astype("float32")
-        df["cos_doy"]  = np.cos(2 * np.pi * doy  / 365).astype("float32")
-    else:
-        for col in ("sin_hour", "cos_hour", "sin_doy", "cos_doy"):
-            df[col] = 0.0
-
-    # 7. Ensure all model columns are float32
-    for col in KNOWN_REALS + UNKNOWN_REALS + [TARGET]:
-        if col in df.columns and col != "local_idx":
-            df[col] = df[col].astype("float32")
-        elif col not in df.columns and col != "local_idx":
-            df[col] = np.float32(0.0)
-
-    # Required group / metadata columns
-    if "init_time_str" not in df.columns:
-        df["init_time_str"] = (
-            df["init_time"].astype(str) if "init_time" in df.columns
-            else "unknown"
-        )
-    if "Node_ID" not in df.columns:
-        df["Node_ID"] = "KLGA"
-
-    return df
-
 
 # ---------------------------------------------------------------------------
 # TftModel
@@ -234,23 +130,24 @@ class TftModel:
         Parameters
         ----------
         encoder_df:
-            24 rows, fxx = -23..0  (contains IEM observations + HRRR zeroed)
+            72 rows, covering the 72-hour lookback window ending at init_time.
+            Must already contain all model columns (time_idx, sin_hour, etc.)
+            added by ModelPipeline._add_model_features().
         decoder_df:
-            48 rows, fxx = 1..48   (contains HRRR forecast values)
+            48 rows, fxx = 1..48 (contains HRRR forecast values + model features).
 
         Returns
         -------
         {fxx: {"p10": float, "p50": float, "p90": float}}
-            Quantile predictions in degC (post-processed, before MC).
-            TFT output is temp_error (residual); caller should add TMP_2m
-            if absolute temperature is needed.
+            Quantile predictions in degC (absolute temperature).
+            TFT output (temp_error residuals) is un-residualised by adding
+            TMP_2m from decoder_df before returning.
         """
         self._ensure_loaded()
 
         combined = pd.concat(
             [encoder_df, decoder_df], ignore_index=True
         )
-        combined = _prep(combined)
 
         testing = TimeSeriesDataSet.from_dataset(
             self._training_ds,
@@ -265,7 +162,16 @@ class TftModel:
         preds_q = self._tft.predict(loader, mode="quantiles")
         # preds_q shape: (1, 48, 3)  -> quantiles [p10, p50, p90]
         arr = preds_q[0].cpu().numpy() if hasattr(preds_q[0], "cpu") else preds_q[0]
-        # arr shape: (48, 3)
+        # arr shape: (48, 3) -- temp_error residuals in degC
+
+        # Un-residualise: add TMP_2m (HRRR forecast) back to get absolute temperature.
+        # decoder_df is sorted by fxx 1..48; index 0 corresponds to fxx=1.
+        decoder_sorted = decoder_df.sort_values("fxx").reset_index(drop=True)
+        if "TMP_2m" in decoder_sorted.columns:
+            tmp2m_vec = decoder_sorted["TMP_2m"].fillna(0.0).values.astype(float)
+        else:
+            tmp2m_vec = np.zeros(48, dtype=float)
+        arr = arr + tmp2m_vec[:, None]  # broadcast: (48, 3)
 
         result: dict[int, dict[str, float]] = {}
         for i, fxx in enumerate(range(1, 49)):

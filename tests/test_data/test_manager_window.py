@@ -159,7 +159,7 @@ def test_build_encoder_obs_window_raises_on_insufficient_merged():
 
     with patch("config.settings.Settings") as MockSettings:
         MockSettings.return_value.cold_start_hours = 72
-        with pytest.raises(RuntimeError, match="merged window too short"):
+        with pytest.raises(RuntimeError, match="too few rows|merged window too short"):
             mgr.build_encoder_obs_window(station, init, n_hours=72)
 
 

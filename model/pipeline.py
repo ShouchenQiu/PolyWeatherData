@@ -69,10 +69,12 @@ class ModelPipeline:
         Returns
         -------
         {
-            "station":    str,
-            "init_time":  pd.Timestamp,
-            "probs":      {(lo_f, hi_f): float},
-            "p50_high_f": float,
+            "station":      str,
+            "init_time":    pd.Timestamp,
+            "probs":        {(lo_f, hi_f): float},
+            "p50_high_f":   float,
+            "quantiles":    {fxx: {p10, p50, p90}},
+            "last_tick_utc": pd.Timestamp (UTC),
         }
         """
         init_utc = (
@@ -107,6 +109,23 @@ class ModelPipeline:
                 for fxx in range(1, 49)
             ])
 
+        # 4a. Add model-specific features (time_idx, calendar, local_idx, etc.)
+        encoder_df = self._add_model_features(
+            encoder_df, start_idx=0, init_utc=init_utc,
+            station_id=station.station_id,
+        )
+        decoder_df = self._add_model_features(
+            decoder_df, start_idx=self._N_ENC, init_utc=init_utc,
+            station_id=station.station_id,
+        )
+
+        # 4b. Superset column alignment: fill any column absent from one frame with 0.0
+        all_cols = set(encoder_df.columns) | set(decoder_df.columns)
+        for col in all_cols - set(encoder_df.columns):
+            encoder_df[col] = 0.0
+        for col in all_cols - set(decoder_df.columns):
+            decoder_df[col] = 0.0
+
         # 5. TFT inference -> {fxx: {p10, p50, p90}}
         quantiles = self.tft.predict(encoder_df, decoder_df)
 
@@ -133,15 +152,72 @@ class ModelPipeline:
             {f"{lo:.0f}-{hi:.0f}": f"{p:.3f}" for (lo, hi), p in probs.items()},
         )
         return {
-            "station":         station.station_id,
-            "init_time":       init_time,
-            "probs":           probs,
-            "p50_high_f":      p50_high_f,
-            "quantiles":       quantiles,
+            "station":       station.station_id,
+            "init_time":     init_time,
+            "probs":         probs,
+            "p50_high_f":    p50_high_f,
+            "quantiles":     quantiles,
+            "last_tick_utc": init_utc,
         }
 
-    # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _add_model_features(
+        self,
+        df: pd.DataFrame,
+        start_idx: int,
+        init_utc: pd.Timestamp,
+        station_id: str,
+    ) -> pd.DataFrame:
+        """Add model-specific index and calendar columns required by TFT.
+
+        Parameters
+        ----------
+        df:
+            Encoder or decoder DataFrame (already cleaned by Cleaner).
+        start_idx:
+            First time_idx value for this DataFrame's rows.
+            Use 0 for encoder (rows 0..71), N_ENC for decoder (rows 72..119).
+        init_utc:
+            Model initialisation timestamp (UTC).
+        station_id:
+            Station identifier used as the TFT group key.
+
+        Columns added
+        -------------
+        time_idx    : monotonically increasing integer from start_idx
+        local_idx   : alias for time_idx (matches training convention)
+        month       : calendar month (1-12)
+        day_of_year : day of year (1-365)
+        hour_of_day : hour of day (0-23)
+        sin_hour, cos_hour, sin_doy, cos_doy : cyclical calendar features
+        init_time_str : string representation of init_utc
+        Node_ID     : station_id (TFT group identifier)
+        """
+        df = df.copy()
+        n = len(df)
+        idx = list(range(start_idx, start_idx + n))
+        df["time_idx"]  = idx
+        df["local_idx"] = idx
+
+        if "valid_time" in df.columns:
+            vt  = pd.to_datetime(df["valid_time"], utc=True)
+            hour = vt.dt.hour.values
+            doy  = vt.dt.day_of_year.values
+            df["month"]       = vt.dt.month.values
+            df["day_of_year"] = doy
+            df["hour_of_day"] = hour
+            df["sin_hour"] = np.sin(2 * np.pi * hour / 24).astype("float32")
+            df["cos_hour"] = np.cos(2 * np.pi * hour / 24).astype("float32")
+            df["sin_doy"]  = np.sin(2 * np.pi * doy  / 365).astype("float32")
+            df["cos_doy"]  = np.cos(2 * np.pi * doy  / 365).astype("float32")
+        else:
+            for col in ("month", "day_of_year", "hour_of_day",
+                        "sin_hour", "cos_hour", "sin_doy", "cos_doy"):
+                df[col] = 0.0
+
+        df["init_time_str"] = str(init_utc)
+        df["Node_ID"]       = station_id
+        return df
