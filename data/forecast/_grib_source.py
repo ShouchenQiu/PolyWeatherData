@@ -340,14 +340,30 @@ class BaseGribSource(BaseForecastSource):
         fxx_range: range,
         stations: "list[StationConfig]",
     ) -> "dict[str, pd.DataFrame]":
-        """Fetch one init cycle for the given list of stations."""
+        """Fetch one init cycle for the given list of stations.
+
+        Raises
+        ------
+        RuntimeError
+            When every fxx step fails to download an idx file.  This signals
+            DataManager to fall back to the next source in the chain.
+        """
         # station_rows[station_id] = list of row dicts
         station_rows: dict[str, list[dict]] = {s.station_id: [] for s in stations}
+        idx_success = 0
 
         for fxx in fxx_range:
-            row_per_station = self._fetch_fxx_multi(init_utc, fxx, stations)
+            row_per_station, idx_ok = self._fetch_fxx_multi(init_utc, fxx, stations)
+            if idx_ok:
+                idx_success += 1
             for sid, row in row_per_station.items():
                 station_rows[sid].append(row)
+
+        if idx_success == 0:
+            raise RuntimeError(
+                f"_grib_source: all idx fetches failed for init={init_utc} "
+                f"source={type(self).__name__}"
+            )
 
         all_cols = list(GRIB_TO_COL.values())
         result: dict[str, pd.DataFrame] = {}
@@ -365,8 +381,12 @@ class BaseGribSource(BaseForecastSource):
         init_utc: pd.Timestamp,
         fxx: int,
         stations: "list[StationConfig]",
-    ) -> "dict[str, dict]":
-        """Fetch one fxx step and return {station_id: row_dict} for all stations."""
+    ) -> "tuple[dict[str, dict], bool]":
+        """Fetch one fxx step and return ({station_id: row_dict}, idx_ok).
+
+        idx_ok is True when the .idx file was successfully downloaded for this
+        fxx step; False means the source was unreachable for this step.
+        """
         date_str = init_utc.strftime("%Y%m%d")
         init_hh  = init_utc.strftime("%H")
         fxx_str  = f"{fxx:02d}"
@@ -389,7 +409,7 @@ class BaseGribSource(BaseForecastSource):
             logger.debug(
                 "_grib_source: idx unavailable init={} fxx={}", init_utc, fxx
             )
-            return nan_rows
+            return nan_rows, False
 
         targets = self._parse_idx(idx_text)
         if not targets:
@@ -397,7 +417,7 @@ class BaseGribSource(BaseForecastSource):
                 "_grib_source: no matching variables in idx init={} fxx={}",
                 init_utc, fxx,
             )
-            return nan_rows
+            return nan_rows, False
 
         # Parallel range downloads
         downloaded: dict[str, bytes | None] = {}
@@ -440,5 +460,5 @@ class BaseGribSource(BaseForecastSource):
                 if col not in station_data[sid]:
                     station_data[sid][col] = float("nan")
 
-        return station_data
+        return station_data, True
 

@@ -161,3 +161,39 @@ def test_fill_empty_non_major_returns_empty():
     fill = HrrrFill()
     result = fill.fill(pd.DataFrame(), _make_df("2026-01-01 00:00", range(0, 49)))
     assert result.empty
+
+
+def test_fill_prior_major_data_appears_in_tail():
+    """Values for tail valid_times genuinely come from prior_major (not NaN)."""
+    fill = HrrrFill()
+    # nearest only covers 00Z fxx 0-3; prior covers much more with col_val=99.0
+    non_major = _make_df("2026-01-01 03:00", range(0, 19), col_val=1.0)
+    nearest   = _make_df("2026-01-01 00:00", range(0, 4),  col_val=2.0)
+    prior     = _make_df("2025-12-31 18:00", range(0, 55), col_val=99.0)
+    result = fill.fill(non_major, nearest, prior)
+    # fxx 19 of 03Z init = valid_time 2026-01-01 22Z
+    # Not in non_major (ends at fxx 18 = 21Z), not in nearest (ends at 03Z).
+    # prior (18Z + 28h = 22Z) should fill it with 99.0 + 28*0.01
+    fxx19_row = result[result["fxx"] == 19].iloc[0]
+    assert fxx19_row["TMP_2m"] == pytest.approx(99.0 + 28 * 0.01, abs=0.05)
+
+
+def test_fill_warning_fires_when_prior_used_not_absent():
+    """WARNING fires because prior fills a valid_time, not because nothing fills it."""
+    from loguru import logger
+    messages: list[str] = []
+    sink_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        fill = HrrrFill()
+        # nearest only covers 00Z fxx 0-3; prior covers the tail with real values
+        non_major = _make_df("2026-01-01 03:00", range(0, 19), col_val=1.0)
+        nearest   = _make_df("2026-01-01 00:00", range(0, 4),  col_val=2.0)
+        prior     = _make_df("2025-12-31 18:00", range(0, 55), col_val=99.0)
+        result = fill.fill(non_major, nearest, prior)
+    finally:
+        logger.remove(sink_id)
+    # prior DID fill some tail rows, so warning must fire
+    assert any("tail gap" in m.lower() for m in messages)
+    # and those rows have actual values (not NaN)
+    fxx19_val = result[result["fxx"] == 19].iloc[0]["TMP_2m"]
+    assert not pd.isna(fxx19_val)

@@ -108,10 +108,19 @@ class HrrrFill:
         for fxx in range(_TARGET_FXX_COUNT):
             vt = init_utc + pd.Timedelta(hours=fxx)
 
-            src_row: dict | None = nm_idx.get(vt) or maj_idx.get(vt) or pri_idx.get(vt)
-
-            if src_row is None and pri_idx:
+            # Explicit priority: non_major > nearest_major > prior_major.
+            # used_prior is set when prior_major is the actual source for a row
+            # so that the WARNING fires if and only if prior data was used.
+            nm_row  = nm_idx.get(vt)
+            if nm_row is not None:
+                src_row: dict | None = nm_row
+            elif maj_idx.get(vt) is not None:
+                src_row = maj_idx[vt]
+            elif pri_idx.get(vt) is not None:
+                src_row = pri_idx[vt]
                 used_prior = True
+            else:
+                src_row = None
 
             row: dict = {"init_time": str(init_utc), "fxx": fxx, "valid_time": vt}
             for col in data_cols:

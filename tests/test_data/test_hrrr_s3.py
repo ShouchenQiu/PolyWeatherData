@@ -184,23 +184,24 @@ def test_fetch_returns_dataframe_with_all_cols():
 
 
 def test_fetch_all_nan_when_idx_unavailable():
+    """When ALL idx fetches fail the source raises RuntimeError so DataManager
+    can fall back to the next source."""
     src = HrrrS3Source()
     with patch.object(src, "_fetch_idx", return_value=None):
-        result = src.fetch(
-            pd.Timestamp("2026-01-01 00:00", tz="UTC"),
-            range(0, 2),
-            _STATION,
-        )
-    df = result["KLGA"]
-    assert len(df) == 2
-    for col in DATA_COLS:
-        assert df[col].isna().all(), f"Expected all NaN for {col}"
+        with pytest.raises(RuntimeError, match="all idx fetches failed"):
+            src.fetch(
+                pd.Timestamp("2026-01-01 00:00", tz="UTC"),
+                range(0, 2),
+                _STATION,
+            )
 
 
 def test_fetch_fxx_values_correct():
+    """fxx column values match the requested range even when range-bytes fail."""
     src = HrrrS3Source()
     with (
-        patch.object(src, "_fetch_idx", return_value=None),
+        patch.object(src, "_fetch_idx", return_value=_SAMPLE_IDX),
+        patch.object(src, "_fetch_range", return_value=None),
     ):
         result = src.fetch(
             pd.Timestamp("2026-01-01 12:00", tz="UTC"),
@@ -219,3 +220,44 @@ def test_hrrr_searches_covers_all_data_cols():
     search_cols = {col for _, col in HRRR_SEARCHES}
     missing = set(DATA_COLS) - search_cols
     assert not missing, f"Columns missing from HRRR_SEARCHES: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Multi-station: fetch(station=None) returns all configured STATIONS
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_station_none_returns_all_configured_stations():
+    """fetch(station=None) keys the result dict by every station in STATIONS."""
+    from unittest.mock import MagicMock
+    import config.stations as _cfg_stations
+
+    klga = _cfg_stations.STATIONS["KLGA"]
+    kord = _cfg_stations.StationConfig(
+        station_id="KORD",
+        lat=41.9742,
+        lon=-87.9073,
+        timezone="America/Chicago",
+        tz_offset=-6,
+        hrrr_grid_row_zarr=700,
+        hrrr_grid_col_zarr=600,
+        iem_network="IL_ASOS",
+        slug_pattern=r"will-the-high.*ord",
+    )
+    two_stations = {"KLGA": klga, "KORD": kord}
+
+    src = HrrrS3Source()
+    with (
+        patch("config.stations.STATIONS", two_stations),
+        patch.object(src, "_fetch_idx", return_value=_SAMPLE_IDX),
+        patch.object(src, "_fetch_range", return_value=None),
+    ):
+        result = src.fetch(
+            pd.Timestamp("2026-01-01 06:00", tz="UTC"),
+            range(0, 2),
+            station=None,
+        )
+
+    assert set(result.keys()) == {"KLGA", "KORD"}
+    assert len(result["KLGA"]) == 2
+    assert len(result["KORD"]) == 2
