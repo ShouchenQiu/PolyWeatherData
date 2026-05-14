@@ -110,8 +110,7 @@ class DataManager:
                             src_name, init_utc,
                         )
                         continue
-                    df = Cleaner.clean_hrrr(df)
-                    df = Cleaner.build_features_hrrr(df)
+                    df = Cleaner.process_hrrr(df)
                     logger.debug(
                         "HRRR fetch: source={} init={} rows={}",
                         src_name, init_utc, len(df),
@@ -159,8 +158,7 @@ class DataManager:
                     raw = src.fetch(init_utc, _NON_MAJOR_FXX, station)
                 df = raw.get(station.station_id, pd.DataFrame())
                 if df is not None and not df.empty and self._hrrr_is_complete(df):
-                    df = Cleaner.clean_hrrr(df)
-                    df = Cleaner.build_features_hrrr(df)
+                    df = Cleaner.process_hrrr(df)
                     non_major_df = df
                     break
             except Exception as exc:
@@ -279,8 +277,7 @@ class DataManager:
                             src_name, station.station_id,
                         )
                         continue
-                    df = Cleaner.clean_iem(df)
-                    df = Cleaner.build_features_iem(df)
+                    df = Cleaner.process_iem(df)
                     logger.debug(
                         "Obs fetch: source={} station={} rows={}",
                         src_name, station.station_id, len(df),
@@ -359,10 +356,6 @@ class DataManager:
         obs_raw = self._obs_store.read(
             station.station_id, window_start, window_end
         )
-
-        # Filter to fxx=1 only (ADR-0003 stores fxx 0 and 1; we want f01)
-        if not hrrr_raw.empty and "fxx" in hrrr_raw.columns:
-            hrrr_raw = hrrr_raw[hrrr_raw["fxx"] == 1].reset_index(drop=True)
 
         # Drop cold-start rows: the first cold_start_hours rows of the
         # station's history are unreliable and must not reach the model.

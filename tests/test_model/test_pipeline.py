@@ -54,18 +54,6 @@ def _make_hrrr_df(init_time: pd.Timestamp) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _make_iem_df(start: pd.Timestamp) -> pd.DataFrame:
-    """24 hourly obs rows."""
-    rows = [
-        {
-            "valid_time":      start + pd.Timedelta(hours=h),
-            "raw_tmpc_tenths": 5.0 + h * 0.1,
-        }
-        for h in range(24)
-    ]
-    return pd.DataFrame(rows)
-
-
 def _make_tft_mock() -> MagicMock:
     """TftModel stub that returns fixed quantiles for fxx 1..48."""
     tft = MagicMock()
@@ -77,13 +65,24 @@ def _make_tft_mock() -> MagicMock:
     return tft
 
 
+def _make_encoder_df(init_time: pd.Timestamp) -> pd.DataFrame:
+    """72 merged encoder rows (HRRR f01 + obs)."""
+    rows = [
+        {
+            "valid_time": init_time - pd.Timedelta(hours=72 - h),
+            "TMP_2m":     5.0 + h * 0.1,
+            "tmpc":       6.0 + h * 0.1,
+        }
+        for h in range(72)
+    ]
+    return pd.DataFrame(rows)
+
+
 def _make_data_mgr(init_time: pd.Timestamp) -> MagicMock:
-    """DataManager stub returning minimal HRRR and IEM DataFrames."""
-    dm          = MagicMock()
+    """DataManager stub returning minimal HRRR and encoder DataFrames."""
+    dm = MagicMock()
     dm.fetch_hrrr.return_value = _make_hrrr_df(init_time)
-    enc_start   = init_time - pd.Timedelta(hours=23)
-    enc_end     = init_time
-    dm.fetch_iem.return_value  = _make_iem_df(enc_start)
+    dm.build_encoder_obs_window.return_value = _make_encoder_df(init_time)
     return dm
 
 
@@ -179,45 +178,15 @@ def test_run_calls_tft_predict():
 
 
 def test_run_calls_data_mgr():
-    """Both fetch_hrrr and fetch_iem must be called."""
+    """fetch_hrrr (with station), fetch_iem, and build_encoder_obs_window must be called."""
     mc       = McSampler(n_samp=200, rng_seed=0)
     tft      = _make_tft_mock()
     dm       = _make_data_mgr(_INIT_TIME)
     pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
     pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
 
-    dm.fetch_hrrr.assert_called_once_with(_INIT_TIME)
+    dm.fetch_hrrr.assert_called_once_with(_INIT_TIME, KLGA)
     dm.fetch_iem.assert_called_once()
+    dm.build_encoder_obs_window.assert_called_once()
 
 
-# -----------------------------------------------------------------------
-# _assemble_frames -- unit tests
-# -----------------------------------------------------------------------
-
-def test_assemble_frames_encoder_rows():
-    hrrr_df  = _make_hrrr_df(_INIT_TIME)
-    iem_df   = _make_iem_df(_INIT_TIME - pd.Timedelta(hours=23))
-    enc, dec = ModelPipeline._assemble_frames(hrrr_df, iem_df, _INIT_TIME)
-
-    assert len(enc) == 24
-    assert enc["fxx"].min() == -23
-    assert enc["fxx"].max() == 0
-
-
-def test_assemble_frames_decoder_rows():
-    hrrr_df  = _make_hrrr_df(_INIT_TIME)
-    iem_df   = pd.DataFrame(columns=["valid_time"])
-    enc, dec = ModelPipeline._assemble_frames(hrrr_df, iem_df, _INIT_TIME)
-
-    assert len(dec) == 48
-    assert dec["fxx"].min() == 1
-    assert dec["fxx"].max() == 48
-
-
-def test_assemble_frames_empty_iem():
-    """Empty IEM DataFrame should not crash."""
-    hrrr_df  = _make_hrrr_df(_INIT_TIME)
-    iem_df   = pd.DataFrame(columns=["valid_time"])
-    enc, dec = ModelPipeline._assemble_frames(hrrr_df, iem_df, _INIT_TIME)
-
-    assert len(enc) == 24

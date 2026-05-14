@@ -35,14 +35,14 @@ def _make_obs(valid_times: list) -> pd.DataFrame:
 
 def test_append_returns_row_count(tmp_dir):
     store = ParquetStore(tmp_dir / "store")
-    df = _make_hrrr(["2026-01-01 00:00"], range(2))   # fxx 0,1 only (ADR-0003)
+    df = _make_hrrr(["2026-01-01 00:00"], range(2))   # fxx 0,1 -- only fxx=1 stored (ADR-0003)
     n = store.append("KLGA", df)
-    assert n == 2
+    assert n == 1
 
 
 def test_append_dedup_no_double_write(tmp_dir):
     store = ParquetStore(tmp_dir / "store")
-    df = _make_hrrr(["2026-01-01 00:00"], range(2))   # fxx 0,1 only
+    df = _make_hrrr(["2026-01-01 00:00"], range(2))   # fxx 0,1 -- fxx=1 written once
     store.append("KLGA", df)
     n2 = store.append("KLGA", df)  # identical data -> 0 new rows
     assert n2 == 0
@@ -73,7 +73,7 @@ def test_quarter_key():
 
 def test_append_creates_quarter_file(tmp_dir):
     store = ParquetStore(tmp_dir / "store")
-    df = _make_hrrr(["2026-02-01 00:00"], range(1))
+    df = _make_hrrr(["2026-02-01 00:00"], range(1, 2))   # fxx=1
     store.append("KLGA", df)
     assert (tmp_dir / "store" / "KLGA" / "2026-Q1.parquet").exists()
 
@@ -136,15 +136,15 @@ def test_obs_dedup_by_valid_time(tmp_dir):
 
 
 def test_append_drops_fxx_gt_1(tmp_dir):
-    """Rows with fxx > 1 are silently dropped (ADR-0003 f01-only storage)."""
+    """Only fxx=1 is stored (ADR-0003 f01-only storage)."""
     store = ParquetStore(tmp_dir / "store")
     df = _make_hrrr(["2026-01-01 00:00"], range(0, 5))   # fxx 0,1,2,3,4
     n = store.append("KLGA", df)
-    assert n == 2   # only fxx 0 and 1 kept
+    assert n == 1   # only fxx 1 kept
 
 
 def test_append_drops_fxx_gt_1_stored_correctly(tmp_dir):
-    """Rows with fxx > 1 are not present in the Parquet files after append."""
+    """Only fxx=1 rows are present in Parquet files after append."""
     store = ParquetStore(tmp_dir / "store")
     df = _make_hrrr(["2026-01-01 00:00"], range(0, 5))
     store.append("KLGA", df)
@@ -154,7 +154,7 @@ def test_append_drops_fxx_gt_1_stored_correctly(tmp_dir):
         pd.Timestamp("2026-01-02", tz="UTC"),
     )
     assert not stored.empty
-    assert stored["fxx"].max() <= 1
+    assert (stored["fxx"] == 1).all()
 
 
 def test_append_all_fxx_gt_1_returns_zero(tmp_dir):

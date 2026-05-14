@@ -168,20 +168,17 @@ def test_build_encoder_obs_window_raises_on_insufficient_merged():
 # ---------------------------------------------------------------------------
 
 def test_build_encoder_obs_window_uses_only_fxx1():
+    # Store guarantees fxx=1 only (ADR-0003); verify build_encoder_obs_window
+    # returns the correct row count without any internal fxx filter.
     init = pd.Timestamp("2026-01-04 12:00:00", tz="UTC")
     base_start = init - pd.Timedelta(hours=144)
 
-    hrrr_df = _make_hrrr_rows(144, base_start)
-    # Inject fxx=0 rows that should be excluded
-    fxx0 = hrrr_df.copy()
-    fxx0["fxx"] = 0
-    mixed = pd.concat([hrrr_df, fxx0], ignore_index=True)
-
-    obs_df = _make_obs_rows(144, base_start)
+    hrrr_df = _make_hrrr_rows(144, base_start)  # all fxx=1 (store invariant)
+    obs_df  = _make_obs_rows(144, base_start)
 
     forecast_store = MagicMock()
     obs_store = MagicMock()
-    forecast_store.read.return_value = mixed
+    forecast_store.read.return_value = hrrr_df
     obs_store.read.return_value = obs_df
 
     station = _make_station()
@@ -191,7 +188,6 @@ def test_build_encoder_obs_window_uses_only_fxx1():
         MockSettings.return_value.cold_start_hours = 72
         result = mgr.build_encoder_obs_window(station, init, n_hours=72)
 
-    # Merged result should only contain fxx=1 rows (72, not 144)
     assert len(result) == 72
     if "fxx" in result.columns:
         assert (result["fxx"] == 1).all()

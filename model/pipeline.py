@@ -11,8 +11,9 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from config.settings import Settings as _Settings
+
 if TYPE_CHECKING:
-    from config.settings import Settings
     from config.stations import StationConfig
     from model.mc import McSampler
     from model.tft import TftModel
@@ -29,9 +30,12 @@ class ModelPipeline:
         McSampler instance.
     data_mgr:
         Duck-typed data manager that must implement:
-          - fetch_hrrr(init_time) -> pd.DataFrame  (fxx 1..48, HRRR vars)
-          - fetch_iem(start, end) -> pd.DataFrame   (obs vars + valid_time)
+          - fetch_hrrr(init_time, station) -> pd.DataFrame
+          - fetch_iem(station, start, end) -> pd.DataFrame
+          - build_encoder_obs_window(station, init_time) -> pd.DataFrame
     """
+
+    _N_ENC: int = 72  # encoder lookback window in hours
 
     def __init__(
         self,
@@ -58,7 +62,7 @@ class ModelPipeline:
         Parameters
         ----------
         station:
-            Station configuration (used for IEM fetch).
+            Station configuration.
         init_time:
             HRRR cycle init time (UTC).
         buckets:
@@ -73,28 +77,45 @@ class ModelPipeline:
             "p50_high_f": float,
         }
         """
-        # 1. Fetch 48-hour HRRR forecast (decoder rows fxx 1..48)
-        logger.debug("Pipeline: fetching HRRR init={} station={}",
-                     init_time, station.station_id)
-        hrrr_df = self.data_mgr.fetch_hrrr(init_time)
-
-        # 2. Fetch 24-hour observations for the encoder window
-        #    encoder covers fxx -23..0  =>  valid_time = init_time-23h .. init_time
-        enc_start = init_time - pd.Timedelta(hours=23)
-        enc_end   = init_time
-        logger.debug("Pipeline: fetching IEM obs {}..{}", enc_start, enc_end)
-        iem_df    = self.data_mgr.fetch_iem(enc_start, enc_end)
-
-        # 3. Assemble encoder_df and decoder_df
-        encoder_df, decoder_df = self._assemble_frames(
-            hrrr_df, iem_df, init_time
+        settings = _Settings()
+        init_utc = (
+            init_time.tz_localize("UTC") if init_time.tzinfo is None
+            else init_time.tz_convert("UTC")
         )
 
-        # 4. TFT inference -> {fxx: {p10, p50, p90}}
+        # 1. Fetch and cache the current HRRR cycle (fxx 0..48, writes to store)
+        logger.debug("Pipeline: fetching HRRR init={} station={}",
+                     init_utc, station.station_id)
+        hrrr_df = self.data_mgr.fetch_hrrr(init_utc, station)
+
+        # 2. Populate obs store for encoder window
+        obs_end   = init_utc - pd.Timedelta(hours=1)
+        obs_start = init_utc - pd.Timedelta(hours=self._N_ENC + settings.cold_start_hours)
+        logger.debug("Pipeline: fetching IEM obs {}..{}", obs_start, obs_end)
+        self.data_mgr.fetch_iem(station, obs_start, obs_end)
+
+        # 3. Build encoder window from store (merged HRRR f01 + obs)
+        encoder_df = self.data_mgr.build_encoder_obs_window(
+            station, init_utc, n_hours=self._N_ENC
+        )
+
+        # 4. Decoder: fxx 1..48 from the HRRR fetch
+        if not hrrr_df.empty:
+            decoder_df = hrrr_df[hrrr_df["fxx"].between(1, 48)].copy()
+        else:
+            decoder_df = pd.DataFrame([
+                {
+                    "fxx":        fxx,
+                    "init_time":  init_utc,
+                    "valid_time": init_utc + pd.Timedelta(hours=fxx),
+                }
+                for fxx in range(1, 49)
+            ])
+
+        # 5. TFT inference -> {fxx: {p10, p50, p90}}
         quantiles = self.tft.predict(encoder_df, decoder_df)
 
-        # 5. Build mu_vec / sigma_vec from TFT quantiles over daytime hours
-        #    Use all decoder hours [1..48] for daily high estimation
+        # 6. Build mu_vec / sigma_vec from TFT quantiles over decoder hours
         mu_vec    = np.array([quantiles[fxx]["p50"] for fxx in range(1, 49)],
                              dtype=float)
         sigma_vec = np.array(
@@ -103,18 +124,17 @@ class ModelPipeline:
             dtype=float,
         )
 
-        # 6. Monte Carlo -> (n_samp,) daily high in degF
+        # 7. Monte Carlo -> (n_samp,) daily high in degF
         daily_highs = self.mc.sample_daily_high(mu_vec, sigma_vec)
 
-        # 7. Convert to bucket probabilities
+        # 8. Convert to bucket probabilities
         probs = self.mc.bucket_probs(daily_highs, buckets)
 
-        # Median daily high from MC samples (degF)
         p50_high_f = float(np.median(daily_highs))
 
         logger.info(
             "Pipeline result: station={} init={} p50_high_f={:.1f}F buckets={}",
-            station.station_id, init_time, p50_high_f,
+            station.station_id, init_utc, p50_high_f,
             {f"{lo:.0f}-{hi:.0f}": f"{p:.3f}" for (lo, hi), p in probs.items()},
         )
         return {
@@ -125,51 +145,7 @@ class ModelPipeline:
         }
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _assemble_frames(
-        hrrr_df: pd.DataFrame,
-        iem_df: pd.DataFrame,
-        init_time: pd.Timestamp,
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Build 24-row encoder and 48-row decoder DataFrames.
-
-        The encoder covers fxx -23..0 (hourly valid_time = init_time - 23h
-        through init_time).  Obs values from iem_df are merged by valid_time.
-        The decoder covers fxx 1..48 from hrrr_df.
-        """
-        # --- Encoder rows (fxx -23..0) ---------------------------------
-        enc_rows: list[dict] = []
-        for offset in range(-23, 1):
-            vt = init_time + pd.Timedelta(hours=offset)
-            row: dict = {
-                "fxx":        offset,
-                "init_time":  init_time,
-                "valid_time": vt,
-            }
-            # Merge obs by valid_time (nearest minute tolerance)
-            if not iem_df.empty:
-                diffs = (iem_df["valid_time"] - vt).abs()
-                best  = int(diffs.idxmin())
-                if diffs.iloc[best] <= pd.Timedelta(minutes=30):
-                    row.update(iem_df.iloc[best].to_dict())
-            enc_rows.append(row)
-        encoder_df = pd.DataFrame(enc_rows)
-
-        # --- Decoder rows (fxx 1..48) ----------------------------------
-        if not hrrr_df.empty:
-            decoder_df = hrrr_df[hrrr_df["fxx"].between(1, 48)].copy()
-        else:
-            dec_rows = [
-                {
-                    "fxx":        fxx,
-                    "init_time":  init_time,
-                    "valid_time": init_time + pd.Timedelta(hours=fxx),
-                }
-                for fxx in range(1, 49)
-            ]
-            decoder_df = pd.DataFrame(dec_rows)
-
-        return encoder_df, decoder_df

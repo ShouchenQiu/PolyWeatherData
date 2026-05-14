@@ -178,3 +178,21 @@ class Cleaner:
         if n <= 0 or df.empty:
             return df.reset_index(drop=True)
         return df.iloc[n:].reset_index(drop=True)
+
+    @staticmethod
+    def process_hrrr(df: pd.DataFrame) -> pd.DataFrame:
+        """Clean and feature-engineer a raw HRRR DataFrame for storage.
+
+        Applies clean_hrrr then build_features_hrrr in the correct order.
+        Use this instead of calling the two steps separately.
+        """
+        return Cleaner.build_features_hrrr(Cleaner.clean_hrrr(df))
+
+    @staticmethod
+    def process_iem(df: pd.DataFrame) -> pd.DataFrame:
+        """Clean and feature-engineer a raw IEM obs DataFrame for storage.
+
+        Applies clean_iem then build_features_iem in the correct order.
+        Use this instead of calling the two steps separately.
+        """
+        return Cleaner.build_features_iem(Cleaner.clean_iem(df))
