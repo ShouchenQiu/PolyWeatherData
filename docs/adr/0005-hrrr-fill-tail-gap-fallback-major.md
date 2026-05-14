@@ -15,6 +15,8 @@ learn to associate with the fill boundary rather than a real forecast signal.
 Rejected because it complicates the DataLoader schema and requires retraining to interpret
 the mask; the fallback MAJOR approach keeps the column schema clean.
 
-**Consequence**: HrrrFill requires access to at least two prior MAJOR-hour runs in
-ParquetStore to handle the worst-case 6-hour tail gap. The data pipeline must ensure
-these are retained before Cleaner runs.
+**Consequence**: HrrrFill requires access to at least two prior MAJOR-hour full runs
+(fxx 0..48) to handle the worst-case 6-hour tail gap.  These runs are fetched directly
+from the network by `BaseGribSource.fetch()` during the non-MAJOR splice; they are
+**not** read from the f01-only ParquetStore (see ADR-0003).  Implementations must not
+rely on the store as a source of full MAJOR-run data for HrrrFill.

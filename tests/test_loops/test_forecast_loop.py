@@ -43,11 +43,14 @@ def station():
 # -----------------------------------------------------------------------
 
 def _make_hrrr_df():
+    """Return a complete HRRR DataFrame covering fxx 1..48 (decoder window)."""
+    init = pd.Timestamp("2026-03-25 12:00:00+00:00")
+    fxx_vals = list(range(1, 49))
     return pd.DataFrame({
-        "init_time":  [pd.Timestamp("2026-03-25 12:00:00+00:00")],
-        "fxx":        [1],
-        "valid_time": [pd.Timestamp("2026-03-25 13:00:00+00:00")],
-        "TMP_2m":     [280.0],
+        "init_time":  [init] * 48,
+        "fxx":        fxx_vals,
+        "valid_time": [init + pd.Timedelta(hours=f) for f in fxx_vals],
+        "TMP_2m":     [280.0] * 48,
     })
 
 
@@ -90,7 +93,7 @@ def test_data_manager_uses_first_successful_source(tmp_path, station):
     store.append.return_value = 1
     mgr    = DataManager([good_src, bad_src], [], store, store)
     df     = mgr.fetch_hrrr(pd.Timestamp("2026-03-25 12:00:00+00:00"), station)
-    assert len(df) == 1
+    assert len(df) == 48
     good_src.fetch.assert_called_once()
     bad_src.fetch.assert_not_called()
 
@@ -160,14 +163,16 @@ def test_data_manager_obs_fallback_on_incomplete_data(station):
 
 def test_data_manager_fetch_hrrr_stores_cleaned_data(station):
     """fetch_hrrr applies Cleaner before storing: TMP_2m in Celsius, u_wind added."""
+    init = pd.Timestamp("2026-03-25 12:00:00+00:00")
+    fxx_vals = list(range(1, 49))
     raw_src = MagicMock()
     raw_src.fetch.return_value = {station.station_id: pd.DataFrame({
-        "init_time":  [pd.Timestamp("2026-03-25 12:00:00+00:00")],
-        "fxx":        [1],
-        "valid_time": [pd.Timestamp("2026-03-25 13:00:00+00:00")],
-        "TMP_2m":     [280.0],   # Kelvin from source
-        "UGRD_10m":   [10.0],    # m/s from source
-        "VGRD_10m":   [5.0],     # m/s from source
+        "init_time":  [init] * 48,
+        "fxx":        fxx_vals,
+        "valid_time": [init + pd.Timedelta(hours=f) for f in fxx_vals],
+        "TMP_2m":     [280.0] * 48,   # Kelvin from source
+        "UGRD_10m":   [10.0]  * 48,   # m/s from source
+        "VGRD_10m":   [5.0]   * 48,   # m/s from source
     })}
     store = MagicMock()
     store.append.return_value = 1

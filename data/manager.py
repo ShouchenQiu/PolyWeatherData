@@ -127,10 +127,20 @@ class DataManager:
 
     @staticmethod
     def _hrrr_is_complete(df: pd.DataFrame) -> bool:
-        """Return True if the DataFrame has at least one valid TMP_2m reading."""
-        if "TMP_2m" not in df.columns:
+        """Return True if df covers the full decoder window (fxx 1..48, TMP_2m non-null).
+
+        A non-MAJOR splice that failed to obtain the nearest MAJOR run returns
+        only fxx 0..18.  This check rejects that short window so the source
+        fallback loop can try the next ForecastSource instead of propagating
+        a truncated decoder frame to ModelPipeline.
+        """
+        if "fxx" not in df.columns or "TMP_2m" not in df.columns:
             return False
-        return bool(df["TMP_2m"].notna().any())
+        decoder_rows = df[df["fxx"].between(1, 48)]
+        missing_steps = set(range(1, 49)) - set(decoder_rows["fxx"].unique())
+        if missing_steps:
+            return False
+        return bool(decoder_rows["TMP_2m"].notna().any())
 
     # ------------------------------------------------------------------
     # Surface observations
