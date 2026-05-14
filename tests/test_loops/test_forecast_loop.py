@@ -104,14 +104,40 @@ def test_data_manager_appends_to_store_on_success(tmp_path, station):
     store.append.assert_called_once()
 
 
+def test_data_manager_obs_fallback_on_incomplete_data(station):
+    """fetch_iem falls back when first source returns non-empty but all-NaN tmpc."""
+    import numpy as np
+    incomplete = MagicMock()
+    incomplete.fetch.return_value = pd.DataFrame({
+        "valid_time":      [pd.Timestamp("2026-03-25 12:00:00+00:00")],
+        "raw_tmpc_tenths": [np.nan],
+    })
+    good = MagicMock()
+    good.fetch.return_value = pd.DataFrame({
+        "valid_time":      [pd.Timestamp("2026-03-25 12:00:00+00:00")],
+        "raw_tmpc_tenths": [5.0],
+    })
+    store = MagicMock()
+    store.append.return_value = 1
+    mgr = DataManager([], [incomplete, good], store, store)
+    df = mgr.fetch_iem(
+        station,
+        pd.Timestamp("2026-03-25 11:00:00+00:00"),
+        pd.Timestamp("2026-03-25 12:00:00+00:00"),
+    )
+    incomplete.fetch.assert_called_once()
+    good.fetch.assert_called_once()
+    assert df["raw_tmpc_tenths"].iloc[0] == pytest.approx(5.0)
+
+
 def test_data_manager_fetch_iem_fallback(station):
     """fetch_iem tries IEM first; falls back to NOAA file source."""
     bad  = MagicMock()
     bad.fetch.side_effect = RuntimeError("IEM down")
     good = MagicMock()
     good.fetch.return_value = pd.DataFrame({
-        "valid_time": [pd.Timestamp("2026-03-25 12:00:00+00:00")],
-        "tmpf":       [55.0],
+        "valid_time":      [pd.Timestamp("2026-03-25 12:00:00+00:00")],
+        "raw_tmpc_tenths": [12.8],
     })
     store = MagicMock()
     store.append.return_value = 1

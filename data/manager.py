@@ -147,6 +147,13 @@ class DataManager:
             try:
                 df = src.fetch(station, start, end)
                 if df is not None and not df.empty:
+                    if not self._obs_is_complete(df):
+                        logger.warning(
+                            "Obs source {} returned incomplete data for "
+                            "station={}, trying next source",
+                            src_name, station.station_id,
+                        )
+                        continue
                     logger.debug(
                         "Obs fetch: source={} station={} rows={}",
                         src_name, station.station_id, len(df),
@@ -164,3 +171,10 @@ class DataManager:
             f"All obs sources failed for station={station.station_id} "
             f"{start}..{end}. Last error: {last_exc}"
         )
+
+    @staticmethod
+    def _obs_is_complete(df: pd.DataFrame) -> bool:
+        """Return True if the DataFrame has at least one valid temperature reading."""
+        if "raw_tmpc_tenths" not in df.columns:
+            return False
+        return bool(df["raw_tmpc_tenths"].notna().any())

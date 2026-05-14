@@ -132,19 +132,27 @@ class IemSource(BaseObsSource):
             "tz": "Etc/UTC",
             "format": "comma",
             "latlon": "no",
-            "year1":  str(start_utc.year),
-            "month1": str(start_utc.month),
-            "day1":   str(start_utc.day),
-            "year2":  str(end_utc.year),
-            "month2": str(end_utc.month),
-            "day2":   str(end_utc.day),
+            "year1":   str(start_utc.year),
+            "month1":  str(start_utc.month),
+            "day1":    str(start_utc.day),
+            "hour1":   str(start_utc.hour),
+            "minute1": str(start_utc.minute),
+            "year2":   str(end_utc.year),
+            "month2":  str(end_utc.month),
+            "day2":    str(end_utc.day),
+            "hour2":   str(end_utc.hour),
+            "minute2": str(end_utc.minute),
         }
 
         csv_text = self._download_csv(params)
         if not csv_text:
             return self._empty_df()
 
-        return self._parse_csv(csv_text)
+        df = self._parse_csv(csv_text)
+        if now_utc is not None and not df.empty:
+            mask = (df["valid_time"] >= start_utc) & (df["valid_time"] <= end_utc)
+            df = df[mask].reset_index(drop=True)
+        return df
 
     # ------------------------------------------------------------------
     # Internal helpers

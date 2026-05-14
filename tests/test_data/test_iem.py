@@ -308,11 +308,43 @@ def test_fetch_tick_mode_uses_51_timestamp():
             now_utc=pd.Timestamp("2026-01-01 14:00", tz="UTC"),
         )
 
-    # now_utc=14:00, H-1=13:00, target=13:51, window=[13:50:30, 13:51:30]
-    # IEM params use day1/day2 only (minute precision not passed)
+    # now_utc=14:00, H-1=13:00, target=13:51
+    # window=[13:50:30, 13:51:30] -> hour1=13, minute1=50, hour2=13, minute2=51
     assert captured_params.get("year1") == "2026"
     assert captured_params.get("month1") == "1"
     assert captured_params.get("day1") == "1"
+    assert captured_params.get("hour1") == "13"
+    assert captured_params.get("minute1") == "50"
+    assert captured_params.get("hour2") == "13"
+    assert captured_params.get("minute2") == "51"
+
+
+def test_fetch_tick_mode_filters_result_to_window():
+    """Tick mode post-filters CSV rows outside the :51 window."""
+    # Two rows: one at 13:00 (outside window) and one at 13:51 (inside window).
+    mixed_csv = (
+        "station,valid,tmpf,dwpf,drct,sknt,p01i,alti,vsby,gust,skyc1,wxcodes,metar\n"
+        "LGA,2026-01-01 13:00,35.0,25.0,270,10,0.0,29.92,10,,CLR,"
+        ",KLGA 010000Z CLR T00280025\n"
+        "LGA,2026-01-01 13:51,36.0,26.0,270,10,0.0,29.93,10,,CLR,"
+        ",KLGA 011351Z CLR T00360026\n"
+    )
+    src = IemSource()
+
+    def mock_download(params: dict) -> str | None:
+        return mixed_csv
+
+    with patch.object(src, "_download_csv", side_effect=mock_download):
+        df = src.fetch(
+            _STATION,
+            start=pd.Timestamp("2026-01-01", tz="UTC"),
+            end=pd.Timestamp("2026-01-02", tz="UTC"),
+            now_utc=pd.Timestamp("2026-01-01 14:00", tz="UTC"),
+        )
+
+    # Only the 13:51 row should survive the post-filter
+    assert len(df) == 1
+    assert df["valid_time"].iloc[0].minute == 51
 
 
 def test_fetch_tick_mode_ignores_start_end():
