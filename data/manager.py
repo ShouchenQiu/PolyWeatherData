@@ -88,7 +88,9 @@ class DataManager:
         for src in self._forecast_sources:
             src_name = type(src).__name__
             try:
-                df = src.fetch(init_time, fxx_range, station)
+                result = src.fetch(init_time, fxx_range, station)
+                # Sources return dict[station_id -> DataFrame]
+                df = result.get(station.station_id, pd.DataFrame())
                 if df is not None and not df.empty:
                     logger.debug(
                         "HRRR fetch: source={} init={} rows={}",

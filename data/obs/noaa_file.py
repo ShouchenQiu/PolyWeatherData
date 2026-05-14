@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 import requests
+from loguru import logger
 
 from data.obs.base import BaseObsSource
 
@@ -147,15 +148,19 @@ class NoaaFileSource(BaseObsSource):
         The file format is:
             Line 1: YYYY/MM/DD HH:MM   (observation date, UTC)
             Line 2: METAR string        (full METAR with remarks)
+
+        An incomplete file (only one non-empty line) is still attempted; the
+        valid_time will be NaN so the caller will discard it via the time-
+        window check.  This avoids silently swallowing partial responses.
         """
         lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
-        if len(lines) < 2:
+        if not lines:
             return None
 
-        date_line  = lines[0]   # "2026/03/25 14:53"
-        metar_line = lines[1]
+        date_line  = lines[0]
+        metar_line = lines[1] if len(lines) >= 2 else ""
 
-        # Parse observation timestamp from date line + METAR ddhhmm
+        # Parse observation timestamp from date line
         try:
             obs_date = pd.Timestamp(date_line.replace("/", "-"), tz="UTC")
         except Exception:  # noqa: BLE001
@@ -183,6 +188,12 @@ class NoaaFileSource(BaseObsSource):
             body_t = _RE_TEMP.search(metar_line)
             tmpc = _metar_temp(body_t.group(1)) if body_t else float("nan")
             dwpc = _metar_temp(body_t.group(2)) if body_t else float("nan")
+
+        if np.isnan(tmpc) and metar_line:
+            logger.warning(
+                "noaa_file: temperature unavailable in METAR: {}",
+                metar_line[:60],
+            )
 
         row["raw_tmpc_tenths"] = tmpc
         row["raw_dwpc_tenths"] = dwpc

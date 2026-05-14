@@ -31,7 +31,7 @@ _IEM_CSV = (
     "LGA,2026-01-01 00:00,35.1,24.1,62,270,10,0.0,29.92,,,10,FEW,,,,"
     "KLGA 010000Z AUTO 27010KT 10SM FEW025 02/M04 A2992 RMK AO2 SLP134"
     " T00170039\n"
-    "LGA,2026-01-01 01:00,37.0,26.1,63,280,8,0.0,29.95,,,10,OVC,,,"
+    "LGA,2026-01-01 01:00,37.0,26.1,63,280,8,0.0,29.95,,,10,OVC,,,,"
     "KLGA 010100Z AUTO 28008KT 10SM OVC030 03/M03 A2995 RMK AO2 SLP147"
     " T00280028\n"
 )
@@ -284,3 +284,144 @@ def test_noaa_parse_fractional_visibility():
     src = NoaaFileSource()
     row = src._parse_txt(txt)
     assert row["raw_vis_sm"] == pytest.approx(1.5, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# V04: IemSource tick mode
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_tick_mode_uses_51_timestamp():
+    """Tick mode computes start/end around :51 of H-1."""
+    src = IemSource()
+    captured_params: dict = {}
+
+    def mock_download(params: dict) -> str | None:
+        captured_params.update(params)
+        return None   # empty response is fine; we only check params
+
+    with patch.object(src, "_download_csv", side_effect=mock_download):
+        src.fetch(
+            _STATION,
+            start=pd.Timestamp("2026-01-01", tz="UTC"),   # ignored in tick mode
+            end=pd.Timestamp("2026-01-02", tz="UTC"),     # ignored in tick mode
+            now_utc=pd.Timestamp("2026-01-01 14:00", tz="UTC"),
+        )
+
+    # now_utc=14:00, H-1=13:00, target=13:51, window=[13:50:30, 13:51:30]
+    # IEM params use day1/day2 only (minute precision not passed)
+    assert captured_params.get("year1") == "2026"
+    assert captured_params.get("month1") == "1"
+    assert captured_params.get("day1") == "1"
+
+
+def test_fetch_tick_mode_ignores_start_end():
+    """Tick mode overrides start/end, not just narrows them."""
+    src = IemSource()
+    calls: list[dict] = []
+
+    def mock_download(params: dict) -> str | None:
+        calls.append(dict(params))
+        return None
+
+    far_future = pd.Timestamp("2030-12-31", tz="UTC")
+    now = pd.Timestamp("2026-01-01 14:00", tz="UTC")
+
+    with patch.object(src, "_download_csv", side_effect=mock_download):
+        src.fetch(_STATION, start=far_future, end=far_future, now_utc=now)
+
+    # The year should be 2026 (from now_utc), not 2030 (from start/end)
+    assert calls[0]["year1"] == "2026"
+
+
+def test_fetch_tick_mode_no_now_utc_uses_start_end():
+    """Without now_utc, fetch() uses start/end as before."""
+    src = IemSource()
+    calls: list[dict] = []
+
+    def mock_download(params: dict) -> str | None:
+        calls.append(dict(params))
+        return None
+
+    with patch.object(src, "_download_csv", side_effect=mock_download):
+        src.fetch(
+            _STATION,
+            start=pd.Timestamp("2026-03-25", tz="UTC"),
+            end=pd.Timestamp("2026-03-26", tz="UTC"),
+        )
+
+    assert calls[0]["year1"] == "2026"
+    assert calls[0]["month1"] == "3"
+    assert calls[0]["day1"] == "25"
+
+
+# ---------------------------------------------------------------------------
+# V04: IemSource T-group fallback WARNING
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_warns_on_tgroup_fallback():
+    """A WARNING is emitted when tmpf is used instead of T-group."""
+    no_tgroup_csv = (
+        "station,valid,tmpf,dwpf,drct,sknt,p01i,alti,vsby,gust,skyc1,wxcodes,metar\n"
+        "LGA,2026-01-01 00:00,35.6,26.6,270,10,0.0,29.92,10,,CLR,,KLGA 010000Z CLR\n"
+    )
+    src = IemSource()
+    messages: list[str] = []
+    from loguru import logger as _logger
+    sink_id = _logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        src._parse_csv(no_tgroup_csv)
+    finally:
+        _logger.remove(sink_id)
+
+    assert any("T-group" in m for m in messages), "Expected T-group fallback WARNING"
+
+
+def test_fetch_no_warning_when_tgroup_present():
+    """No T-group WARNING when all rows have T-group in METAR."""
+    src = IemSource()
+    messages: list[str] = []
+    from loguru import logger as _logger
+    sink_id = _logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        src._parse_csv(_IEM_CSV)   # _IEM_CSV rows have T-group in metar
+    finally:
+        _logger.remove(sink_id)
+
+    tgroup_warnings = [m for m in messages if "T-group" in m]
+    assert not tgroup_warnings, f"Unexpected T-group WARNINGs: {tgroup_warnings}"
+
+
+# ---------------------------------------------------------------------------
+# V04: NoaaFileSource robustness
+# ---------------------------------------------------------------------------
+
+
+def test_noaa_incomplete_metar_no_crash():
+    """A truncated file (1 line only) returns a partial row, not None."""
+    src = NoaaFileSource()
+    row = src._parse_txt("2026/01/01 14:53")
+    # Should return a dict (not None) with NaN for unparseable fields
+    assert row is not None
+    assert "valid_time" in row
+    import numpy as np
+    assert np.isnan(row["raw_tmpc_tenths"])
+
+
+def test_noaa_missing_temp_logs_warning():
+    """METAR without temp field logs a WARNING."""
+    no_temp_txt = (
+        "2026/01/01 14:53\n"
+        "KLGA 011453Z 22012KT 10SM OVC055 A2979 RMK AO2 SLP097\n"
+    )
+    src = NoaaFileSource()
+    messages: list[str] = []
+    from loguru import logger as _logger
+    sink_id = _logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        src._parse_txt(no_temp_txt)
+    finally:
+        _logger.remove(sink_id)
+
+    assert any("temperature unavailable" in m for m in messages)

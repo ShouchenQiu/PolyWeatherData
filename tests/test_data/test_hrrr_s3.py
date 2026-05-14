@@ -25,6 +25,7 @@ _SAMPLE_IDX = """\
 """
 
 _STATION = MagicMock()
+_STATION.station_id = "KLGA"
 _STATION.lat = 40.7769
 _STATION.lon = -73.8740
 _STATION.hrrr_grid_row_zarr = 698
@@ -140,9 +141,24 @@ def _make_fake_idx_resp(idx_text: str) -> MagicMock:
     return resp
 
 
+def test_fetch_returns_dict_keyed_by_station():
+    """fetch() returns a dict with station_id keys."""
+    src = HrrrS3Source()
+    with (
+        patch.object(src, "_fetch_idx", return_value=_SAMPLE_IDX),
+        patch.object(src, "_fetch_range", return_value=None),
+    ):
+        result = src.fetch(
+            pd.Timestamp("2026-01-01 06:00", tz="UTC"),
+            range(0, 3),
+            _STATION,
+        )
+    assert isinstance(result, dict)
+    assert "KLGA" in result
+
+
 def test_fetch_returns_dataframe_with_all_cols():
-    """fetch() should always return a DataFrame with init_time/fxx/valid_time
-    and all 36 data columns; missing values are NaN."""
+    """fetch() result for each station has init_time/fxx/valid_time and all 36 data columns."""
     src = HrrrS3Source()
 
     # Make _fetch_idx return a minimal idx, _fetch_range return None (simulate
@@ -151,12 +167,13 @@ def test_fetch_returns_dataframe_with_all_cols():
         patch.object(src, "_fetch_idx", return_value=_SAMPLE_IDX),
         patch.object(src, "_fetch_range", return_value=None),
     ):
-        df = src.fetch(
+        result = src.fetch(
             pd.Timestamp("2026-01-01 06:00", tz="UTC"),
             range(0, 3),
             _STATION,
         )
 
+    df = result["KLGA"]
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 3
     assert "init_time" in df.columns
@@ -169,11 +186,12 @@ def test_fetch_returns_dataframe_with_all_cols():
 def test_fetch_all_nan_when_idx_unavailable():
     src = HrrrS3Source()
     with patch.object(src, "_fetch_idx", return_value=None):
-        df = src.fetch(
+        result = src.fetch(
             pd.Timestamp("2026-01-01 00:00", tz="UTC"),
             range(0, 2),
             _STATION,
         )
+    df = result["KLGA"]
     assert len(df) == 2
     for col in DATA_COLS:
         assert df[col].isna().all(), f"Expected all NaN for {col}"
@@ -184,12 +202,12 @@ def test_fetch_fxx_values_correct():
     with (
         patch.object(src, "_fetch_idx", return_value=None),
     ):
-        df = src.fetch(
+        result = src.fetch(
             pd.Timestamp("2026-01-01 12:00", tz="UTC"),
             range(0, 5),
             _STATION,
         )
-    assert list(df["fxx"]) == [0, 1, 2, 3, 4]
+    assert list(result["KLGA"]["fxx"]) == [0, 1, 2, 3, 4]
 
 
 # ---------------------------------------------------------------------------

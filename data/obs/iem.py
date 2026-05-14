@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 import requests
+from loguru import logger
 
 from data.obs.base import BaseObsSource
 
@@ -86,7 +87,28 @@ class IemSource(BaseObsSource):
         station: "StationConfig",
         start: pd.Timestamp,
         end: pd.Timestamp,
+        now_utc: "pd.Timestamp | None" = None,
     ) -> pd.DataFrame:
+        """Fetch ASOS observations.
+
+        Parameters
+        ----------
+        now_utc:
+            When provided (tick mode), start/end are ignored.  Instead only
+            the :51 reading for H-1 is fetched: the narrow window
+            [target_dt - 30s, target_dt + 30s] where
+            target_dt = (now_utc - 1h).replace(minute=51).
+        """
+        if now_utc is not None:
+            now_utc_aware = (
+                now_utc.tz_localize("UTC") if now_utc.tzinfo is None
+                else now_utc.tz_convert("UTC")
+            )
+            hour_back = now_utc_aware - pd.Timedelta(hours=1)
+            target_dt = hour_back.replace(minute=51, second=0, microsecond=0)
+            start = target_dt - pd.Timedelta(seconds=30)
+            end   = target_dt + pd.Timedelta(seconds=30)
+
         start_utc = (
             start.tz_localize("UTC") if start.tzinfo is None
             else start.tz_convert("UTC")
@@ -219,7 +241,10 @@ class IemSource(BaseObsSource):
         metar_col: str,
         tgroup_idx: int,
     ) -> pd.Series:
-        """Extract temperature (Celsius) preferring T-group tenths precision."""
+        """Extract temperature (Celsius) preferring T-group tenths precision.
+
+        Logs a WARNING when any row had to fall back from T-group to tmpf/dwpf.
+        """
         n = len(raw)
         result = np.full(n, np.nan)
 
@@ -235,12 +260,24 @@ class IemSource(BaseObsSource):
                         result[i] = _t_group_to_c(groups[2], groups[3])
 
         # Fall back to tmpf/dwpf for rows where T-group was not found
+        fallback_count = 0
         if f_col in raw.columns:
             f_vals = pd.to_numeric(raw[f_col], errors="coerce").values
             missing = np.isnan(result)
+            needed_fallback = missing & ~np.isnan(f_vals)
+            fallback_count = int(needed_fallback.sum())
             result[missing] = np.where(
                 np.isnan(f_vals[missing]), np.nan, _f_to_c(f_vals[missing])
             )
+
+        if fallback_count > 0:
+            col_label = "temp" if tgroup_idx == 0 else "dewpoint"
+            logger.warning(
+                "iem: T-group precision unavailable for {} rows of {}; "
+                "fell back to integer-degree {}",
+                fallback_count, col_label, f_col,
+            )
+
         return pd.Series(result, dtype=float)
 
     @staticmethod

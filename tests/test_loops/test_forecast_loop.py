@@ -54,7 +54,7 @@ def _make_hrrr_df():
 def test_data_manager_uses_first_successful_source(tmp_path, station):
     """fetch_hrrr tries sources in order; succeeds on the first that returns data."""
     good_src = MagicMock()
-    good_src.fetch.return_value = _make_hrrr_df()
+    good_src.fetch.return_value = {station.station_id: _make_hrrr_df()}
     bad_src  = MagicMock()
     bad_src.fetch.side_effect  = RuntimeError("no data")
 
@@ -72,7 +72,7 @@ def test_data_manager_falls_back_to_second_source(tmp_path, station):
     bad_src  = MagicMock()
     bad_src.fetch.side_effect   = RuntimeError("offline")
     good_src = MagicMock()
-    good_src.fetch.return_value = _make_hrrr_df()
+    good_src.fetch.return_value = {station.station_id: _make_hrrr_df()}
 
     store = MagicMock()
     store.append.return_value = 1
@@ -96,7 +96,7 @@ def test_data_manager_raises_when_all_sources_fail(tmp_path, station):
 def test_data_manager_appends_to_store_on_success(tmp_path, station):
     """Successful fetch triggers ParquetStore.append."""
     src   = MagicMock()
-    src.fetch.return_value = _make_hrrr_df()
+    src.fetch.return_value = {station.station_id: _make_hrrr_df()}
     store = MagicMock()
     store.append.return_value = 1
     mgr   = DataManager([src], [], store, store)

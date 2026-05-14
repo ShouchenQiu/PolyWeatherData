@@ -31,9 +31,20 @@ class ParquetStore:
     # ------------------------------------------------------------------
 
     def append(self, station_id: str, df: pd.DataFrame) -> int:
-        """Deduplicate and append rows.  Returns number of newly written rows."""
+        """Deduplicate and append rows.  Returns number of newly written rows.
+
+        HRRR enforcement (ADR-0003): rows with fxx > 1 are dropped before
+        writing.  Only analysis (fxx=0) and first forecast hour (fxx=1) are
+        stored.
+        """
         if df.empty:
             return 0
+
+        # ADR-0003: f01-only Parquet storage
+        if "fxx" in df.columns:
+            df = df[df["fxx"] <= 1].copy()
+            if df.empty:
+                return 0
 
         dedup_key = self._pick_dedup_key(df)
         df = df.copy()

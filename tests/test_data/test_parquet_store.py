@@ -35,26 +35,27 @@ def _make_obs(valid_times: list) -> pd.DataFrame:
 
 def test_append_returns_row_count(tmp_dir):
     store = ParquetStore(tmp_dir / "store")
-    df = _make_hrrr(["2026-01-01 00:00"], range(3))
+    df = _make_hrrr(["2026-01-01 00:00"], range(2))   # fxx 0,1 only (ADR-0003)
     n = store.append("KLGA", df)
-    assert n == 3
+    assert n == 2
 
 
 def test_append_dedup_no_double_write(tmp_dir):
     store = ParquetStore(tmp_dir / "store")
-    df = _make_hrrr(["2026-01-01 00:00"], range(3))
+    df = _make_hrrr(["2026-01-01 00:00"], range(2))   # fxx 0,1 only
     store.append("KLGA", df)
     n2 = store.append("KLGA", df)  # identical data -> 0 new rows
     assert n2 == 0
 
 
 def test_append_partial_overlap(tmp_dir):
+    """Obs (no fxx col) dedup by valid_time: second write of new rows only."""
     store = ParquetStore(tmp_dir / "store")
-    df1 = _make_hrrr(["2026-01-01 00:00"], range(3))
-    df2 = _make_hrrr(["2026-01-01 00:00"], range(2, 5))  # fxx 2,3,4 where 2 exists
-    store.append("KLGA", df1)
-    n = store.append("KLGA", df2)
-    assert n == 2  # only fxx 3 and 4 are new
+    obs1 = _make_obs(["2026-01-01 00:00", "2026-01-01 01:00", "2026-01-01 02:00"])
+    obs2 = _make_obs(["2026-01-01 01:00", "2026-01-01 03:00", "2026-01-01 04:00"])
+    store.append("KLGA_obs", obs1)
+    n = store.append("KLGA_obs", obs2)
+    assert n == 2   # only 03:00 and 04:00 are new
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +97,7 @@ def test_append_across_quarter_boundary(tmp_dir):
 
 def test_read_returns_filtered_rows(tmp_dir):
     store = ParquetStore(tmp_dir / "store")
-    df = _make_hrrr(["2026-01-10 00:00", "2026-01-20 00:00"], range(5))
+    df = _make_hrrr(["2026-01-10 00:00", "2026-01-20 00:00"], range(2))   # fxx 0,1
     store.append("KLGA", df)
 
     start = pd.Timestamp("2026-01-10 00:00", tz="UTC")
@@ -127,3 +128,38 @@ def test_obs_dedup_by_valid_time(tmp_dir):
     store.append("KLGA_obs", obs)
     n2 = store.append("KLGA_obs", obs)
     assert n2 == 0
+
+
+# ---------------------------------------------------------------------------
+# ParquetStore -- ADR-0003: fxx>1 dropped on write
+# ---------------------------------------------------------------------------
+
+
+def test_append_drops_fxx_gt_1(tmp_dir):
+    """Rows with fxx > 1 are silently dropped (ADR-0003 f01-only storage)."""
+    store = ParquetStore(tmp_dir / "store")
+    df = _make_hrrr(["2026-01-01 00:00"], range(0, 5))   # fxx 0,1,2,3,4
+    n = store.append("KLGA", df)
+    assert n == 2   # only fxx 0 and 1 kept
+
+
+def test_append_drops_fxx_gt_1_stored_correctly(tmp_dir):
+    """Rows with fxx > 1 are not present in the Parquet files after append."""
+    store = ParquetStore(tmp_dir / "store")
+    df = _make_hrrr(["2026-01-01 00:00"], range(0, 5))
+    store.append("KLGA", df)
+    stored = store.read(
+        "KLGA",
+        pd.Timestamp("2025-12-31", tz="UTC"),
+        pd.Timestamp("2026-01-02", tz="UTC"),
+    )
+    assert not stored.empty
+    assert stored["fxx"].max() <= 1
+
+
+def test_append_all_fxx_gt_1_returns_zero(tmp_dir):
+    """append() returns 0 when every row has fxx > 1."""
+    store = ParquetStore(tmp_dir / "store")
+    df = _make_hrrr(["2026-01-01 00:00"], range(2, 6))   # fxx 2,3,4,5 only
+    n = store.append("KLGA", df)
+    assert n == 0
