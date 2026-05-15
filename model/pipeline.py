@@ -149,11 +149,12 @@ class ModelPipeline:
 
         # 7. Load per-station max_bias from registry (if available) then
         #    run MC -> (n_samp,) daily high in degF
-        if self.registry is not None:
-            self.mc.set_max_bias(
-                self.registry.load_max_bias(station.station_id)
-            )
-        daily_highs = self.mc.sample_daily_high(mu_vec, sigma_vec)
+        max_bias = (
+            self.registry.load_max_bias(station.station_id)
+            if self.registry is not None
+            else 0.0
+        )
+        daily_highs = self.mc.sample_daily_high(mu_vec, sigma_vec, max_bias=max_bias)
 
         # 8. Convert to bucket probabilities + extract sample quantiles
         raw       = self.mc.bucket_probs(daily_highs, buckets)

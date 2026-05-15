@@ -15,7 +15,6 @@ from backtest.engine import (
     HALFSPREAD_DRAG,
     BacktestEngine,
     _bucket_outcome,
-    _mc_prob_bucket,
 )
 from backtest.analysis import BacktestAnalysis, _pnl_summary
 
@@ -59,47 +58,6 @@ def _clob_row(
 
 def _make_clob_df(rows: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
-
-
-# ---------------------------------------------------------------------------
-# _mc_prob_bucket
-# ---------------------------------------------------------------------------
-
-class TestMcProbBucket:
-    def _samps(self, vals):
-        return np.array(vals, dtype=float)
-
-    def test_range_boundary_lo(self):
-        samps = self._samps([60.0, 65.0, 70.0, 75.0])
-        # 60 and 65 inside [60, 65): 60>=60 and 60<66, 65>=60 and 65<66
-        p = _mc_prob_bucket(samps, 60.0, 65.0)
-        assert p == pytest.approx(2 / 4)
-
-    def test_range_includes_hi_plus_minus_epsilon(self):
-        # samps < hi+1 means 70.99 is included but 71.0 is not
-        samps = self._samps([70.0, 70.9, 71.0])
-        # lo=70, hi=70 -> samps >= 70 AND samps < 71
-        p = _mc_prob_bucket(samps, 70.0, 70.0)
-        assert p == pytest.approx(2 / 3)
-
-    def test_below_bucket(self):
-        # lo = -inf  -> only hi+1 cutoff applies
-        samps = self._samps([60.0, 65.0, 70.0, 75.0])
-        # below 70: samps < 71 -> 3 out of 4
-        p = _mc_prob_bucket(samps, float("-inf"), 70.0)
-        assert p == pytest.approx(3 / 4)
-
-    def test_higher_bucket(self):
-        # hi = +inf -> only lo cutoff applies
-        samps = self._samps([60.0, 65.0, 70.0, 75.0])
-        # higher than 70: samps >= 70 -> 2 out of 4
-        p = _mc_prob_bucket(samps, 70.0, float("inf"))
-        assert p == pytest.approx(2 / 4)
-
-    def test_empty_samps(self):
-        p = _mc_prob_bucket(np.array([]), 60.0, 70.0)
-        # mean of empty array is nan
-        assert math.isnan(p)
 
 
 # ---------------------------------------------------------------------------

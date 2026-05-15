@@ -146,8 +146,11 @@ _Avoid_: parquet file, storage file
 - **encoder window**: 72 rows (-71..0), each = (f01, IEM obs); owned by **Cleaner**
   after all feature engineering is applied.
 - **decoder window**: 48 rows (1..48), each = (HRRR fxx, IEM target).
-- **Cleaner** owns all feature engineering (wind components, log1p smoothing,
-  temp_error column); no other module performs feature transforms.
+- **Cleaner** owns all weather-domain and meteorological feature engineering (wind
+  components, log1p smoothing, temp_error column); no other module performs
+  meteorological transforms. TFT model-adapter features (time_idx, Node_ID, calendar
+  encodings such as sin_hour/cos_hour/sin_doy/cos_doy) are added by
+  `ModelPipeline._add_model_features` immediately before inference.
 - **ForecastLoop** ¡ú **TFT** ¡ú **McSampler** ¡ú bucket probabilities ¡ú **TradingLoop**
 - **DiscoveryLoop** owns **Event** / **Market** / **Token** records; **TradingLoop**
   references them by slug only. At any given time 2¨C3 Events may be concurrently active.

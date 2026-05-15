@@ -40,7 +40,6 @@ class McSampler:
         self.rng_seed  = rng_seed
         self._rng      = np.random.default_rng(rng_seed)
         self._cov: np.ndarray | None = None
-        self._max_bias: float = 0.0
 
     @classmethod
     def from_settings(cls, settings: "Settings") -> "McSampler":
@@ -48,15 +47,6 @@ class McSampler:
             n_samp   = settings.mc_n_samp,
             rng_seed = settings.mc_rng_seed,
         )
-
-    def set_max_bias(self, max_bias: float) -> None:
-        """Set the per-station max-temperature bias correction.
-
-        Loaded from ModelRegistry.load_max_bias() at the pipeline assembly
-        point before each station's MC run.  Defaults to 0.0 (no correction)
-        until calibrated.
-        """
-        self._max_bias = float(max_bias)
 
     # ------------------------------------------------------------------
     # Covariance fitting
@@ -119,6 +109,7 @@ class McSampler:
         self,
         mu_vec: np.ndarray,
         sigma_vec: np.ndarray,
+        max_bias: float = 0.0,
     ) -> np.ndarray:
         """Sample daily high temperatures (degF) with max_bias correction.
 
@@ -128,6 +119,10 @@ class McSampler:
             (n_hours,) post-processed TFT p50 in degC.
         sigma_vec:
             (n_hours,) per-hour sigma in degC.
+        max_bias:
+            Per-station bias correction (degF) subtracted from the daily
+            high samples.  Load from ModelRegistry.load_max_bias() before
+            each call.  Defaults to 0.0 (no correction).
 
         Returns
         -------
@@ -137,7 +132,7 @@ class McSampler:
         samples_c   = self._mc_sample(mu_vec, sigma_safe)  # (n_samp, n_hours)
         daily_high_c = samples_c.max(axis=1)               # (n_samp,)
         daily_high_f = daily_high_c * 1.8 + 32.0          # -> degF
-        return daily_high_f - self._max_bias
+        return daily_high_f - float(max_bias)
 
     # ------------------------------------------------------------------
     # Bucket probability

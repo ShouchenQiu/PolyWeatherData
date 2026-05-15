@@ -6,6 +6,12 @@ For each YES market token:
     edge >  min_edge  =>  BUY signal
     edge < -min_edge  =>  SELL signal  (used to unwind existing positions)
 
+For each NO market token:
+    NO edge = (1 - mc_prob) - clob_price_no
+
+    NO edge >  min_edge  =>  BUY signal on the NO token
+    NO edge < -min_edge  =>  SELL signal on the NO token
+
 Reference: Herbie-main/_sniper_backtest.py  (edge = mc_p - cp)
 Threshold: min_edge = 0.04 (configurable via Settings.min_edge)
 """
@@ -33,16 +39,22 @@ class EdgeStrategy(BaseStrategy):
     def __init__(self, min_edge: float = 0.04) -> None:
         self.min_edge = min_edge
 
+    @property
+    def name(self) -> str:
+        return "edge"
+
     def compute_signals(
         self,
-        probs:   dict[tuple[float, float], float],
-        books:   dict[str, dict],
-        markets: list[dict],
+        probs:          dict[tuple[float, float], float],
+        books:          dict[str, dict],
+        markets:        list[dict],
+        open_positions: dict[str, int] | None = None,
     ) -> list[Signal]:
         """Return signals for markets whose edge exceeds the threshold.
 
-        Only YES-outcome tokens are evaluated; NO tokens are implicitly
-        covered because their fair value is ``1 - mc_prob``.
+        YES and NO outcome tokens are both evaluated.  For YES tokens,
+        edge = mc_prob - clob_price.  For NO tokens,
+        edge = (1 - mc_prob) - clob_price_no.
 
         Parameters
         ----------
@@ -53,6 +65,8 @@ class EdgeStrategy(BaseStrategy):
             Tokens absent from this dict are skipped.
         markets:
             Market rows from the DB.
+        open_positions:
+            Accepted for interface compatibility; not used by EdgeStrategy.
 
         Returns
         -------
@@ -62,9 +76,6 @@ class EdgeStrategy(BaseStrategy):
 
         for mkt in markets:
             outcome = str(mkt.get("outcome", "Yes")).upper()
-            if outcome != "YES":
-                continue
-
             token_id    = str(mkt["token_id"])
             lo_f        = float(mkt.get("bucket_lo_f") or float("-inf"))
             hi_f        = float(mkt.get("bucket_hi_f") or float("inf"))
@@ -82,7 +93,13 @@ class EdgeStrategy(BaseStrategy):
                 continue
 
             clob_price = float(mid)
-            edge       = mc_prob - clob_price
+
+            if outcome == "YES":
+                edge = mc_prob - clob_price
+            elif outcome == "NO":
+                edge = (1.0 - mc_prob) - clob_price
+            else:
+                continue
 
             if edge > self.min_edge:
                 signals.append(Signal(

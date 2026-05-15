@@ -146,14 +146,13 @@ def test_sample_daily_high_no_bias_by_default():
 
 
 def test_sample_daily_high_max_bias_shifts_output():
-    """Setting _max_bias shifts the distribution by exactly that amount."""
+    """max_bias parameter shifts the distribution by exactly that amount."""
     s1 = McSampler(n_samp=2000, rng_seed=3)
     s2 = McSampler(n_samp=2000, rng_seed=3)
-    s2._max_bias = 2.0
     mu    = np.full(48, 20.0)
     sigma = np.ones(48) * 1.0
-    out1 = s1.sample_daily_high(mu, sigma)
-    out2 = s2.sample_daily_high(mu, sigma)
+    out1 = s1.sample_daily_high(mu, sigma, max_bias=0.0)
+    out2 = s2.sample_daily_high(mu, sigma, max_bias=2.0)
     np.testing.assert_allclose(out1 - 2.0, out2)
 
 
@@ -220,16 +219,14 @@ def test_bucket_probs_all_in_one_bucket():
 
 def test_bucket_probs_max_bias_shifts_probabilities():
     """max_bias correction moves samples; bucket assignments shift accordingly."""
-    s_no_bias   = McSampler(n_samp=5000, rng_seed=1)
-    s_with_bias = McSampler(n_samp=5000, rng_seed=1)
-    s_with_bias._max_bias = 5.0
+    s = McSampler(n_samp=5000, rng_seed=1)
 
     mu    = np.full(48, 20.0)   # ~68 F
     sigma = np.ones(48) * 1.0
     buckets = [(float("-inf"), 70.0), (70.0, float("inf"))]
 
-    raw_no   = s_no_bias.bucket_probs(s_no_bias.sample_daily_high(mu, sigma), buckets)
-    raw_with = s_with_bias.bucket_probs(s_with_bias.sample_daily_high(mu, sigma), buckets)
+    raw_no   = s.bucket_probs(s.sample_daily_high(mu, sigma, max_bias=0.0), buckets)
+    raw_with = s.bucket_probs(s.sample_daily_high(mu, sigma, max_bias=5.0), buckets)
 
     prob_no   = raw_no[(float("-inf"), 70.0)]
     prob_with = raw_with[(float("-inf"), 70.0)]

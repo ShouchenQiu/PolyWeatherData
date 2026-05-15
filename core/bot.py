@@ -4,6 +4,13 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+try:
+    from py_clob_client import ClobClient  # type: ignore[import-untyped]
+    from py_clob_client.clob_types import ApiCreds  # type: ignore[import-untyped]
+except ImportError:
+    ClobClient = None  # type: ignore[assignment,misc]
+    ApiCreds   = None  # type: ignore[assignment,misc]
+
 if TYPE_CHECKING:
     from config.settings import Settings
 
@@ -37,17 +44,19 @@ class BotManager:
 
     def _build(self, settings: "Settings", db_path: str | None) -> None:
         """Lazily import and construct every component."""
-        from pathlib import Path
-
         from config.stations import STATIONS
         from core.alerts import AlertBus
-        from core.exchange.paper import PaperExchange
+        from core.exchange.clob import ClobExchange
+        from core.exchange.paper import OrderbookFetcher, PaperExchange
         from core.exchange.settlement import Settler
         from core.positions import PositionTracker
         from core.probability_store import ProbabilityStore
         from core.risk.fixed_fraction import FixedFraction
         from core.strategy.edge import EdgeStrategy
+        from data.forecast.hrrr_nomads import HrrrNomadsSource
+        from data.forecast.hrrr_s3 import HrrrS3Source
         from data.manager import DataManager
+        from data.obs.iem import IemSource
         from data.storage.parquet_store import ParquetStore
         from db.schema import DbClient
         from events.discovery import EventDiscovery
@@ -70,8 +79,8 @@ class BotManager:
         forecast_store = ParquetStore(settings.data_store_dir / "hrrr")
         obs_store      = ParquetStore(settings.data_store_dir / "obs")
         self.data_mgr  = DataManager(
-            forecast_sources = [],
-            obs_sources      = [],
+            forecast_sources = [HrrrS3Source(), HrrrNomadsSource()],
+            obs_sources      = [IemSource()],
             forecast_store   = forecast_store,
             obs_store        = obs_store,
         )
@@ -88,16 +97,44 @@ class BotManager:
         self.prob_store = ProbabilityStore()
         self.alert_bus  = AlertBus()
 
-        # Exchange + risk + positions (owned by TradingLoop in V11)
-        self.exchange   = PaperExchange()
-        self.risk       = FixedFraction.from_settings(settings)
-        self.positions  = PositionTracker(self.db)
+        # Risk + positions
+        self.risk      = FixedFraction.from_settings(settings)
+        self.positions = PositionTracker(self.db)
 
         # Strategy
-        self.strategy   = EdgeStrategy(min_edge=settings.min_edge)
+        self.strategy = EdgeStrategy(min_edge=settings.min_edge)
 
-        # Orderbook (no real CLOB client in default paper mode)
-        self.orderbook  = None
+        # Exchange wiring [ADR-0008]
+        if settings.trading_mode == "live":
+            if ClobClient is None:
+                raise ImportError(
+                    "py_clob_client is required for live trading mode."
+                )
+            creds = ApiCreds(
+                api_key        = settings.polymarket_api_key,
+                api_secret     = settings.polymarket_api_secret,
+                api_passphrase = settings.polymarket_passphrase,
+            )
+            l2_client      = ClobClient(
+                host     = settings.clob_api_url,
+                chain_id = settings.chain_id,
+                creds    = creds,
+            )
+            self.orderbook = None
+            self.exchange  = ClobExchange(l2_client, alert_bus=self.alert_bus)
+        else:
+            if ClobClient is not None:
+                l1_client      = ClobClient(
+                    host     = settings.clob_api_url,
+                    chain_id = settings.chain_id,
+                )
+                self.orderbook = OrderbookFetcher(l1_client)
+            else:
+                self.orderbook = None
+            self.exchange = PaperExchange(
+                book_fetcher = self.orderbook,
+                alert_bus    = self.alert_bus,
+            )
 
         # Events
         self.discovery  = EventDiscovery(self.db, settings)

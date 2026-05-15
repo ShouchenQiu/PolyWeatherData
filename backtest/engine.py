@@ -40,22 +40,6 @@ _CUTOFF_EST_HOUR  = 16    # no new signals at or after 16:00 EST
 _CLOB_WIN_MIN     = 30    # CLOB look-up half-window in minutes
 
 
-def _mc_prob_bucket(samps_f: np.ndarray, lo: float, hi: float) -> float:
-    """Fraction of MC samples that fall inside the temperature bucket.
-
-    Boundary convention (matches _sniper_backtest.py):
-      range  : samps >= lo AND samps < hi + 1
-      below  : samps < hi + 1
-      higher : samps >= lo
-    """
-    if hi == float("inf"):
-        return float((samps_f >= lo).mean())
-    elif lo == float("-inf"):
-        return float((samps_f < hi + 1.0).mean())
-    else:
-        return float(((samps_f >= lo) & (samps_f < hi + 1.0)).mean())
-
-
 def _bucket_outcome(actual_f: float, lo: float, hi: float) -> float:
     """Return 1.0 if actual temperature falls in the bucket, 0.0 otherwise.
 

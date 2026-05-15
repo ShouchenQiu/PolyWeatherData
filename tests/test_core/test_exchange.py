@@ -1,5 +1,7 @@
-"""Tests for core/exchange/ -- PaperExchange and Settler."""
+"""Tests for core/exchange/ -- PaperExchange, ClobExchange, Settler."""
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 
@@ -157,3 +159,233 @@ def test_settler_relayer_failure_falls_back():
     )
     assert result == "fallback"
     assert exch.get_positions() == []
+
+
+# -----------------------------------------------------------------------
+# OrderbookFetcher
+# -----------------------------------------------------------------------
+
+def test_orderbook_fetcher_get_book_delegates_to_client():
+    from core.exchange.paper import OrderbookFetcher
+
+    class FakeClient:
+        def get_order_book(self, token_id):
+            return {"bids": [], "asks": [], "mid_price": 0.55}
+
+    fetcher = OrderbookFetcher(FakeClient())
+    book    = fetcher.get_book("tok1")
+    assert book["mid_price"] == pytest.approx(0.55)
+
+
+def test_orderbook_fetcher_raises_on_client_error():
+    from core.exchange.paper import OrderbookFetcher
+
+    class BrokenClient:
+        def get_order_book(self, token_id):
+            raise RuntimeError("CLOB down")
+
+    fetcher = OrderbookFetcher(BrokenClient())
+    with pytest.raises(RuntimeError):
+        fetcher.get_book("tok1")
+
+
+# -----------------------------------------------------------------------
+# PaperExchange -- order_failure alert on get_book() failure
+# -----------------------------------------------------------------------
+
+def test_paper_exchange_emits_order_failure_on_fetcher_error():
+    """When get_book() raises, PaperExchange emits an order_failure alert."""
+    from core.alerts import AlertBus, AlertEvent
+
+    class BrokenFetcher:
+        def get_book(self, token_id):
+            raise RuntimeError("CLOB timeout")
+
+    emitted: list[AlertEvent] = []
+
+    async def _handler(event: AlertEvent) -> None:
+        emitted.append(event)
+
+    bus  = AlertBus()
+    bus.subscribe(_handler)
+    exch = PaperExchange(book_fetcher=BrokenFetcher(), alert_bus=bus)
+
+    async def _run():
+        exch.place_order("tok1", "BUY", 20.0, 0.50)
+        # give the task a chance to run
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+
+    assert len(emitted) == 1
+    assert emitted[0].alert_type == "order_failure"
+
+
+def test_paper_exchange_no_alert_on_success():
+    """Successful get_book() must NOT emit an alert."""
+    from core.alerts import AlertBus, AlertEvent
+
+    class GoodFetcher:
+        def get_book(self, token_id):
+            return {"mid_price": 0.50}
+
+    emitted: list[AlertEvent] = []
+
+    async def _handler(event: AlertEvent) -> None:
+        emitted.append(event)
+
+    bus  = AlertBus()
+    bus.subscribe(_handler)
+    exch = PaperExchange(book_fetcher=GoodFetcher(), alert_bus=bus)
+
+    async def _run():
+        exch.place_order("tok1", "BUY", 20.0, 0.50)
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+    assert emitted == []
+
+
+def test_paper_exchange_no_alert_when_no_fetcher():
+    """No fetcher -> no alert bus invoked, falls back to submitted price."""
+    from core.alerts import AlertBus, AlertEvent
+
+    emitted: list[AlertEvent] = []
+
+    async def _handler(event: AlertEvent) -> None:
+        emitted.append(event)
+
+    bus  = AlertBus()
+    bus.subscribe(_handler)
+    exch = PaperExchange(book_fetcher=None, alert_bus=bus)
+
+    async def _run():
+        exch.place_order("tok1", "BUY", 20.0, 0.50)
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+    assert emitted == []
+
+
+# -----------------------------------------------------------------------
+# ClobExchange -- order_failure alert
+# -----------------------------------------------------------------------
+
+def test_clob_exchange_emits_order_failure_on_place_exception():
+    """place_order() raising an exception must emit an order_failure alert."""
+    from core.alerts import AlertBus, AlertEvent
+    from core.exchange.clob import ClobExchange
+
+    class BrokenClient:
+        def create_order(self, order_args):
+            raise RuntimeError("auth failure")
+
+    emitted: list[AlertEvent] = []
+
+    async def _handler(event: AlertEvent) -> None:
+        emitted.append(event)
+
+    bus  = AlertBus()
+    bus.subscribe(_handler)
+    exch = ClobExchange(clob_client=BrokenClient(), alert_bus=bus)
+
+    async def _run():
+        with pytest.raises(RuntimeError):
+            exch.place_order("tok1", "BUY", 20.0, 0.50)
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+
+    assert len(emitted) == 1
+    assert emitted[0].alert_type == "order_failure"
+
+
+def test_clob_exchange_emits_order_failure_on_rejected_response():
+    """A response without an orderID must emit an order_failure alert."""
+    from core.alerts import AlertBus, AlertEvent
+    from core.exchange.clob import ClobExchange
+
+    class RejectingClient:
+        def create_order(self, order_args):
+            return object()
+        def post_order(self, signed):
+            return {"errorMsg": "insufficient funds", "orderID": ""}
+
+    emitted: list[AlertEvent] = []
+
+    async def _handler(event: AlertEvent) -> None:
+        emitted.append(event)
+
+    bus  = AlertBus()
+    bus.subscribe(_handler)
+    exch = ClobExchange(clob_client=RejectingClient(), alert_bus=bus)
+
+    async def _run():
+        exch.place_order("tok1", "BUY", 20.0, 0.50)
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+
+    assert len(emitted) == 1
+    assert emitted[0].alert_type == "order_failure"
+
+
+# -----------------------------------------------------------------------
+# bot.py -- auth wiring (V07)
+# -----------------------------------------------------------------------
+
+def test_bot_paper_mode_no_api_creds(tmp_path, monkeypatch):
+    """Paper mode must not pass ApiCreds to ClobClient constructor."""
+    from unittest.mock import MagicMock, patch
+    from config.settings import Settings
+
+    settings = Settings(
+        data_store_dir=tmp_path / "data",
+        trading_mode="paper",
+    )
+
+    constructed_kwargs: list[dict] = []
+
+    class FakeClobClient:
+        def __init__(self, *args, **kwargs):
+            constructed_kwargs.append(kwargs)
+
+    with patch("core.bot.ClobClient", FakeClobClient):
+        from core.bot import BotManager
+        bot = BotManager(settings, db_path=str(tmp_path / "bot.db"))
+
+    # Paper mode: should not have passed creds= kwarg
+    assert all("creds" not in kw for kw in constructed_kwargs)
+
+
+def test_bot_live_mode_passes_api_creds(tmp_path, monkeypatch):
+    """Live mode must pass creds= to ClobClient constructor."""
+    from unittest.mock import patch
+    from config.settings import Settings
+    import core.bot
+
+    monkeypatch.setenv("POLYMARKET_API_KEY", "test-key")
+    monkeypatch.setenv("POLYMARKET_API_SECRET", "test-secret")
+    monkeypatch.setenv("POLYMARKET_PASSPHRASE", "test-pass")
+
+    settings = Settings(
+        data_store_dir=tmp_path / "data",
+        trading_mode="live",
+    )
+
+    constructed_kwargs: list[dict] = []
+
+    class FakeClobClient:
+        def __init__(self, *args, **kwargs):
+            constructed_kwargs.append(kwargs)
+
+    class FakeApiCreds:
+        def __init__(self, **kwargs):
+            pass
+
+    with patch("core.bot.ClobClient", FakeClobClient), \
+         patch("core.bot.ApiCreds", FakeApiCreds):
+        bot = core.bot.BotManager(settings, db_path=str(tmp_path / "bot.db"))
+
+    live_calls = [kw for kw in constructed_kwargs if "creds" in kw]
+    assert len(live_calls) >= 1
