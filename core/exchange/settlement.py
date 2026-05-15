@@ -11,6 +11,7 @@ sell) is fully implemented and used in paper trading.
 """
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -82,14 +83,16 @@ class Settler:
         return "fallback"
 
 
-class SettlementRelayer:
-    """On-chain settlement relay stub.
+class SettlementRelayer(ABC):
+    """Abstract base for on-chain settlement relay.
 
     Full implementation is deferred pending Relayer ABI wiring -- ADR-0007.
     """
 
+    @abstractmethod
     def resolve_on_chain(self, event_id: str) -> bool:
-        raise NotImplementedError(
-            "SettlementRelayer.resolve_on_chain is deferred pending "
-            "Relayer ABI wiring -- see ADR-0007."
-        )
+        """Resolve the event on-chain via the Relayer contract.
+
+        Returns True if the event was successfully resolved, False otherwise.
+        Raises NotImplementedError until the Relayer ABI is wired (ADR-0007).
+        """

@@ -80,9 +80,22 @@ def _order_row(db: DbClient, order_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_settlement_relayer_raises_not_implemented():
-    """resolve_on_chain raises NotImplementedError referencing ADR-0007."""
-    relayer = SettlementRelayer()
+def test_settlement_relayer_is_abstract():
+    """SettlementRelayer is abstract and cannot be instantiated directly."""
+    with pytest.raises(TypeError):
+        SettlementRelayer()
+
+
+def test_settlement_relayer_concrete_raises_not_implemented():
+    """Concrete subclass raises NotImplementedError referencing ADR-0007."""
+    class _StubRelayer(SettlementRelayer):
+        def resolve_on_chain(self, event_id: str) -> bool:
+            raise NotImplementedError(
+                "SettlementRelayer.resolve_on_chain is deferred pending "
+                "Relayer ABI wiring -- see ADR-0007."
+            )
+
+    relayer = _StubRelayer()
     with pytest.raises(NotImplementedError, match="ADR-0007"):
         relayer.resolve_on_chain("cid1")
 
@@ -237,3 +250,103 @@ def test_run_processes_pending_settle_events(
 
     asyncio.run(run_once())
     assert _event_row(db, "cid1")["status"] == "settled"
+
+
+# ---------------------------------------------------------------------------
+# YES/NO payout semantics
+# ---------------------------------------------------------------------------
+
+
+def test_confirm_settlement_no_token_not_in_bucket_wins(
+    db: DbClient,
+    obs_store: ParquetStore,
+    lifecycle: EventLifecycle,
+):
+    """NO token for a bucket the temp falls outside earns full payout."""
+    # max_temp=65.1, so bucket 70-80 is NOT the winner; NO token wins
+    db.upsert_market("tok-no-70-80", "cid1", "slug-70-80-no", 70.0, 80.0, "NO")
+    db.execute(
+        "INSERT INTO orders "
+        "(order_id, token_id, condition_id, side, size_usd, price, status, created_at)"
+        " VALUES ('ord-no-outer', 'tok-no-70-80', 'cid1', 'BUY', 75.0, 0.5, 'filled', '2025-01-01')"
+    )
+    loop = SettlementLoop(
+        lifecycle=lifecycle,
+        positions=PositionTracker(db),
+        obs_store=obs_store,
+        db=db,
+    )
+    loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
+    assert _order_row(db, "ord-no-outer")["settled_payout"] == pytest.approx(75.0)
+
+
+def test_confirm_settlement_no_token_in_winning_bucket_zero(
+    db: DbClient,
+    obs_store: ParquetStore,
+    lifecycle: EventLifecycle,
+):
+    """NO token for the bucket the temp falls inside earns zero payout."""
+    # max_temp=65.1, bucket 60-70 IS the winner; NO token loses
+    db.upsert_market("tok-no-60-70", "cid1", "slug-60-70-no", 60.0, 70.0, "NO")
+    db.execute(
+        "INSERT INTO orders "
+        "(order_id, token_id, condition_id, side, size_usd, price, status, created_at)"
+        " VALUES ('ord-no-inner', 'tok-no-60-70', 'cid1', 'BUY', 80.0, 0.5, 'filled', '2025-01-01')"
+    )
+    loop = SettlementLoop(
+        lifecycle=lifecycle,
+        positions=PositionTracker(db),
+        obs_store=obs_store,
+        db=db,
+    )
+    loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
+    assert _order_row(db, "ord-no-inner")["settled_payout"] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Relayer fallback seam
+# ---------------------------------------------------------------------------
+
+
+def test_no_obs_data_calls_relayer_when_wired(
+    db: DbClient,
+    tmp_path: Path,
+    lifecycle: EventLifecycle,
+):
+    """When IEM obs is absent and a relayer is wired, relayer.resolve_on_chain is called."""
+    class _StubRelayer(SettlementRelayer):
+        called_with: list[str] = []
+        def resolve_on_chain(self, event_id: str) -> bool:
+            self.called_with.append(event_id)
+            return False  # still pending
+
+    relayer      = _StubRelayer()
+    empty_store  = ParquetStore(tmp_path / "empty")
+    loop = SettlementLoop(
+        lifecycle=lifecycle,
+        positions=PositionTracker(db),
+        obs_store=empty_store,
+        db=db,
+        relayer=relayer,
+    )
+    loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
+    assert relayer.called_with == ["cid1"]
+    assert _event_row(db, "cid1")["status"] == "pending_settle"
+
+
+def test_no_obs_data_relayer_none_stays_pending(
+    db: DbClient,
+    tmp_path: Path,
+    lifecycle: EventLifecycle,
+):
+    """When IEM obs is absent and no relayer is wired, event stays pending_settle."""
+    empty_store = ParquetStore(tmp_path / "empty2")
+    loop = SettlementLoop(
+        lifecycle=lifecycle,
+        positions=PositionTracker(db),
+        obs_store=empty_store,
+        db=db,
+        relayer=None,
+    )
+    loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
+    assert _event_row(db, "cid1")["status"] == "pending_settle"

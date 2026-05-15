@@ -12,15 +12,15 @@ Sidebar navigation:
 """
 from __future__ import annotations
 
+import json
 import os
-from pathlib import Path
+from datetime import datetime
 
 import streamlit as st
 
 from config.settings import Settings
-from core.alerts import AlertBus
 from db.schema import DbClient
-from ui.alerts import StalenessState, register_ui_handlers
+from ui.alerts import StalenessState
 
 # ---------------------------------------------------------------------------
 # Page configuration (must be the first Streamlit call)
@@ -46,15 +46,22 @@ def _get_db() -> DbClient:
     return DbClient(db_path)
 
 
-@st.cache_resource
-def _get_alert_bus() -> AlertBus:
-    return AlertBus()
+def _load_staleness_from_db(db: DbClient) -> StalenessState:
+    """Read current staleness from the shared bot_state DB table.
 
-
-@st.cache_resource
-def _get_staleness_state() -> StalenessState:
+    The bot (TradingLoop) writes to bot_state('data_stale') when it detects
+    a stale forecast.  Because the bot and UI may run as separate processes,
+    the DB is the canonical cross-process state store for staleness.
+    """
     state = StalenessState()
-    register_ui_handlers(_get_alert_bus(), state)
+    raw = db.get_bot_state("data_stale")
+    if raw:
+        try:
+            data = json.loads(raw)
+            occurred_at = datetime.fromisoformat(data["occurred_at"])
+            state.mark_stale(occurred_at, data.get("station"))
+        except (json.JSONDecodeError, KeyError, ValueError):
+            pass
     return state
 
 
@@ -81,7 +88,7 @@ st.sidebar.markdown(
 # ---------------------------------------------------------------------------
 
 db = _get_db()
-staleness_state = _get_staleness_state()
+staleness_state = _load_staleness_from_db(db)
 
 if page == "Dashboard":
     from ui.pages import dashboard

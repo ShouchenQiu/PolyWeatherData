@@ -8,6 +8,7 @@ import pandas as pd
 from loguru import logger
 
 if TYPE_CHECKING:
+    from core.exchange.settlement import SettlementRelayer
     from core.positions import PositionTracker
     from data.storage.parquet_store import ParquetStore
     from db.schema import DbClient
@@ -20,8 +21,12 @@ class SettlementLoop:
     For each pending event:
     1. Reads IEM observed max temperature from the ParquetStore.
     2. Identifies the winning bucket (bucket_lo_f <= max_temp < bucket_hi_f).
-    3. Marks each filled/closed order settled with the correct payout.
+    3. Marks each filled/closed order settled with YES/NO-correct payout.
     4. Calls EventLifecycle.set_settled() to finalise the event.
+
+    When IEM data is unavailable, falls back to ``relayer.resolve_on_chain``
+    if a relayer is wired.  If neither source is available, the event stays
+    in ``pending_settle`` for the next attempt.
 
     Parameters
     ----------
@@ -33,6 +38,9 @@ class SettlementLoop:
         ParquetStore holding IEM observed temperature data.
     db:
         DbClient for querying events, markets, and orders.
+    relayer:
+        Optional SettlementRelayer for on-chain resolution when IEM data is
+        unavailable.  Defaults to None (deferred -- ADR-0007).
     interval_seconds:
         How often to run the settlement check.  Default 3600 (1 h).
     """
@@ -43,12 +51,14 @@ class SettlementLoop:
         positions:        "PositionTracker",
         obs_store:        "ParquetStore",
         db:               "DbClient",
+        relayer:          "SettlementRelayer | None" = None,
         interval_seconds: float = 3_600.0,
     ) -> None:
         self._lifecycle        = lifecycle
         self._positions        = positions
         self._obs_store        = obs_store
         self._db               = db
+        self._relayer          = relayer
         self._interval_seconds = interval_seconds
 
     # ------------------------------------------------------------------
@@ -58,12 +68,15 @@ class SettlementLoop:
     def confirm_settlement(self, event: dict, station: str | None) -> None:
         """Settle all filled/closed orders for *event* and mark it settled.
 
-        Reads the IEM max temperature for the event date, identifies the
-        winning bucket, pays out orders accordingly, then calls set_settled().
+        Payout rules:
+          - YES token in the winning bucket  -> payout = size_usd
+          - YES token in a losing bucket     -> payout = 0.0
+          - NO token in the winning bucket   -> payout = 0.0
+          - NO token in a losing bucket      -> payout = size_usd
 
-        If *station* is None or the obs store has no data for the event date,
-        the method logs a warning and returns without modifying the DB so the
-        event stays in ``pending_settle`` for the next attempt.
+        If IEM obs data is unavailable and a relayer is wired, delegates to
+        ``relayer.resolve_on_chain``.  Otherwise the event stays in
+        ``pending_settle`` for the next check.
 
         Parameters
         ----------
@@ -104,38 +117,50 @@ class SettlementLoop:
 
         if obs_df.empty or "tmpf" not in obs_df.columns:
             logger.warning(
-                "SettlementLoop: no tmpf obs for station={} date={}; skipping {}",
+                "SettlementLoop: no tmpf obs for station={} date={}; event={}",
                 station,
                 end_date_str,
                 condition_id,
             )
+            self._try_relayer_fallback(condition_id)
             return
 
         actual_max_temp: float = obs_df["tmpf"].max()
+        self._settle_from_obs(condition_id, actual_max_temp)
 
-        # Build a token_id -> (bucket_lo_f, bucket_hi_f) map
+    def _settle_from_obs(self, condition_id: str, actual_max_temp: float) -> None:
+        """Apply YES/NO payout logic and mark the event settled."""
+        # Build token_id -> (bucket_lo_f, bucket_hi_f, outcome) map
         markets = self._db.get_markets_for_event(condition_id)
-        token_bucket: dict[str, tuple[float, float]] = {}
+        token_market: dict[str, tuple[float, float, str]] = {}
         for mkt in markets:
             lo = mkt.get("bucket_lo_f")
             hi = mkt.get("bucket_hi_f")
             if lo is not None and hi is not None:
-                token_bucket[mkt["token_id"]] = (float(lo), float(hi))
+                token_market[mkt["token_id"]] = (
+                    float(lo),
+                    float(hi),
+                    (mkt.get("outcome") or "YES").upper(),
+                )
 
-        # Settle each filled/closed order
         orders = self._db.get_orders_for_settlement(condition_id)
         for order in orders:
             order_id = order["order_id"]
             token_id = order["token_id"]
             size_usd = float(order.get("size_usd") or 0.0)
 
-            bucket = token_bucket.get(token_id)
-            if bucket is not None:
-                lo, hi = bucket
-                payout = size_usd if lo <= actual_max_temp < hi else 0.0
+            entry = token_market.get(token_id)
+            if entry is not None:
+                lo, hi, outcome = entry
+                in_bucket = lo <= actual_max_temp < hi
+                if outcome == "YES":
+                    payout = size_usd if in_bucket else 0.0
+                else:  # "NO"
+                    payout = size_usd if not in_bucket else 0.0
             else:
                 logger.warning(
-                    "SettlementLoop: token_id {} has no bucket; payout=0", token_id
+                    "SettlementLoop: token_id {} has no market entry; payout=0",
+                    token_id,
                 )
                 payout = 0.0
 
@@ -143,10 +168,38 @@ class SettlementLoop:
 
         self._lifecycle.set_settled(condition_id, self._db)
         logger.info(
-            "SettlementLoop: event {} settled (max_temp={:.1f}F)",
+            "SettlementLoop: event {} settled via IEM (max_temp={:.1f}F)",
             condition_id,
             actual_max_temp,
         )
+
+    def _try_relayer_fallback(self, condition_id: str) -> None:
+        """Attempt on-chain resolution via SettlementRelayer when IEM data is absent."""
+        if self._relayer is None:
+            logger.info(
+                "SettlementLoop: no relayer wired for {}; staying pending_settle",
+                condition_id,
+            )
+            return
+        try:
+            resolved = self._relayer.resolve_on_chain(condition_id)
+            if resolved:
+                self._lifecycle.set_settled(condition_id, self._db)
+                logger.info(
+                    "SettlementLoop: event {} settled via SettlementRelayer",
+                    condition_id,
+                )
+            else:
+                logger.warning(
+                    "SettlementLoop: relayer returned False for {}; staying pending_settle",
+                    condition_id,
+                )
+        except NotImplementedError:
+            logger.warning(
+                "SettlementLoop: SettlementRelayer.resolve_on_chain not yet "
+                "implemented for {}; staying pending_settle (ADR-0007)",
+                condition_id,
+            )
 
     # ------------------------------------------------------------------
     # Loop

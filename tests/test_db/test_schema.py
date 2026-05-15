@@ -186,3 +186,33 @@ def test_context_manager_closes(tmp_dir) -> None:
     # Connection should be closed; further use raises
     with pytest.raises(Exception):
         db._conn.execute("SELECT 1")
+
+
+# ---------------------------------------------------------------------------
+# bot_state KV table
+# ---------------------------------------------------------------------------
+
+
+def test_set_and_get_bot_state() -> None:
+    db = DbClient(":memory:")
+    db.set_bot_state("data_stale", '{"station": "KLGA"}')
+    assert db.get_bot_state("data_stale") == '{"station": "KLGA"}'
+
+
+def test_get_bot_state_absent_returns_none() -> None:
+    db = DbClient(":memory:")
+    assert db.get_bot_state("nonexistent") is None
+
+
+def test_set_bot_state_upsert_overwrites() -> None:
+    db = DbClient(":memory:")
+    db.set_bot_state("key", "first")
+    db.set_bot_state("key", "second")
+    assert db.get_bot_state("key") == "second"
+
+
+def test_set_bot_state_none_clears() -> None:
+    db = DbClient(":memory:")
+    db.set_bot_state("key", "something")
+    db.set_bot_state("key", None)
+    assert db.get_bot_state("key") is None

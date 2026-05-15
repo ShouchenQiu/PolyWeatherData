@@ -13,36 +13,33 @@ if TYPE_CHECKING:
 
 
 def _load_orders(db: "DbClient") -> pd.DataFrame:
-    """Return orders joined with signal data as a DataFrame."""
-    cur = db._conn.execute(
+    """Return orders as a DataFrame."""
+    rows = db.query(
         """
-        SELECT o.order_id, o.status, o.size_usd, o.price, o.filled_at,
-               s.timestamp, s.mc_prob, s.clob_price, s.edge, s.side,
-               s.token_id
-        FROM orders o
-        JOIN signals s ON o.signal_id = s.signal_id
-        ORDER BY s.timestamp DESC
+        SELECT order_id, token_id, condition_id, side, size_usd, price,
+               fill_price, status, created_at, filled_at, settled_payout
+        FROM orders
+        ORDER BY created_at DESC
         """
     )
-    rows = [dict(r) for r in cur.fetchall()]
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+    return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
 
 def _compute_pnl(df: pd.DataFrame) -> float:
-    """Rough mid-price P&L across all filled orders."""
+    """Net P&L across all settled orders: sum of (payout - cost)."""
     if df.empty:
         return 0.0
-    filled = df[df["status"] == "filled"].copy()
-    if filled.empty:
+    settled = df[df["status"] == "settled"].copy()
+    if settled.empty:
         return 0.0
-    # For YES buys: pnl = (1 - price) * size_usd if won, else (-price) * size_usd
-    # We approximate with edge * size_usd as a proxy when outcome unknown.
-    return float((filled["edge"] * filled["size_usd"]).sum())
+    payouts = settled["settled_payout"].fillna(0.0)
+    costs   = settled["size_usd"].fillna(0.0)
+    return float((payouts - costs).sum())
 
 
 def _load_station_summary(db: "DbClient") -> pd.DataFrame:
     """Active events grouped by station."""
-    cur = db._conn.execute(
+    rows = db.query(
         """
         SELECT e.station_id,
                COUNT(*) AS active_events,
@@ -52,8 +49,7 @@ def _load_station_summary(db: "DbClient") -> pd.DataFrame:
         GROUP BY e.station_id
         """
     )
-    rows = [dict(r) for r in cur.fetchall()]
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+    return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
 
 
 def render(db: "DbClient", staleness_state: "StalenessState | None" = None) -> None:
@@ -77,7 +73,7 @@ def render(db: "DbClient", staleness_state: "StalenessState | None" = None) -> N
             else "unknown time"
         )
         st.warning(
-            f"Data stale since {since_label} ¡ª {station_label} forecast not updated.",
+            f"Data stale since {since_label} -- {station_label} forecast not updated.",
             icon="warning",
         )
 
@@ -108,7 +104,7 @@ def render(db: "DbClient", staleness_state: "StalenessState | None" = None) -> N
     if orders_df.empty:
         st.info("No signals recorded yet.")
     else:
-        cols = ["timestamp", "token_id", "side", "mc_prob", "clob_price",
-                "edge", "size_usd", "status"]
+        cols = ["order_id", "token_id", "side", "size_usd", "price",
+                "status", "created_at", "filled_at", "settled_payout"]
         display = orders_df[[c for c in cols if c in orders_df.columns]]
         st.dataframe(display.head(50), use_container_width=True)

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class DbClient:
@@ -90,6 +95,12 @@ class DbClient:
             CREATE TABLE IF NOT EXISTS station_max_bias (
                 station_id  TEXT PRIMARY KEY,
                 max_bias    REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS bot_state (
+                key        TEXT PRIMARY KEY,
+                value_text TEXT,
+                updated_at TEXT NOT NULL
             );
             """
         )
@@ -342,6 +353,39 @@ class DbClient:
         Callers must not access ``_conn`` directly.
         """
         return self._conn.execute(sql, params).fetchall()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Bot state (cross-process key-value store for UI/bot communication)
+    # ------------------------------------------------------------------
+
+    def set_bot_state(self, key: str, value_text: str | None) -> None:
+        """Upsert *key* in bot_state.  Pass None to clear the entry."""
+        if value_text is None:
+            self._conn.execute("DELETE FROM bot_state WHERE key=?", (key,))
+        else:
+            self._conn.execute(
+                """
+                INSERT INTO bot_state (key, value_text, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value_text=excluded.value_text,
+                    updated_at=excluded.updated_at
+                """,
+                (key, value_text, _utcnow_iso()),
+            )
+        self._conn.commit()
+
+    def get_bot_state(self, key: str) -> str | None:
+        """Return the stored value for *key*, or None if absent."""
+        cur = self._conn.execute(
+            "SELECT value_text FROM bot_state WHERE key=?", (key,)
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
 
     # ------------------------------------------------------------------
     # Lifecycle

@@ -100,19 +100,25 @@ class TradingLoop:
     # ------------------------------------------------------------------
 
     def _on_data_stale(self, station: str | None, age_min: float) -> None:
-        """Emit a data_stale AlertEvent via the AlertBus."""
+        """Emit a data_stale AlertEvent via the AlertBus and persist to DB."""
+        import json
         if age_min == float("inf"):
             message = "Forecast data missing from ProbabilityStore"
         else:
             message = f"Forecast data stale: {age_min:.1f} min since last update"
+        occurred_at = datetime.now(timezone.utc)
         self._alert_bus.emit(
             AlertEvent(
                 alert_type  = "data_stale",
                 station     = station,
                 message     = message,
-                occurred_at = datetime.now(timezone.utc),
+                occurred_at = occurred_at,
                 context     = {"age_min": age_min},
             )
+        )
+        self._db.set_bot_state(
+            "data_stale",
+            json.dumps({"station": station, "occurred_at": occurred_at.isoformat()}),
         )
 
     async def _is_fresh(
