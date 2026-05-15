@@ -47,12 +47,14 @@ class BotManager:
         from config.stations import STATIONS
         from core.alerts import AlertBus
         from core.exchange.clob import ClobExchange
-        from core.exchange.paper import OrderbookFetcher, PaperExchange
-        from core.exchange.settlement import Settler
+        from core.exchange.paper import PaperExchange
+        from data.clob.orderbook import OrderbookFetcher
         from core.positions import PositionTracker
         from core.probability_store import ProbabilityStore
         from core.risk.fixed_fraction import FixedFraction
+        from core.risk.pipeline import RiskPipeline
         from core.strategy.edge import EdgeStrategy
+        from core.strategy.multi import MultiStrategy
         from data.forecast.hrrr_nomads import HrrrNomadsSource
         from data.forecast.hrrr_s3 import HrrrS3Source
         from data.manager import DataManager
@@ -64,6 +66,7 @@ class BotManager:
         from loops.discovery_loop import DiscoveryLoop
         from loops.forecast_loop import ForecastLoop
         from loops.settlement_loop import SettlementLoop
+        from loops.sniper_loop import SniperLoop
         from loops.trading_loop import TradingLoop
         from model.mc import McSampler
         from model.pipeline import ModelPipeline
@@ -76,13 +79,13 @@ class BotManager:
         self.db = DbClient(path)
 
         # Data layer
-        forecast_store = ParquetStore(settings.data_store_dir / "hrrr")
-        obs_store      = ParquetStore(settings.data_store_dir / "obs")
-        self.data_mgr  = DataManager(
+        forecast_store  = ParquetStore(settings.data_store_dir / "hrrr")
+        self.obs_store  = ParquetStore(settings.data_store_dir / "obs")
+        self.data_mgr   = DataManager(
             forecast_sources = [HrrrS3Source(), HrrrNomadsSource()],
             obs_sources      = [IemSource()],
             forecast_store   = forecast_store,
-            obs_store        = obs_store,
+            obs_store        = self.obs_store,
         )
 
         # Model
@@ -98,11 +101,11 @@ class BotManager:
         self.alert_bus  = AlertBus()
 
         # Risk + positions
-        self.risk      = FixedFraction.from_settings(settings)
+        self.risk      = RiskPipeline([FixedFraction.from_settings(settings)])
         self.positions = PositionTracker(self.db)
 
         # Strategy
-        self.strategy = EdgeStrategy(min_edge=settings.min_edge)
+        self.strategy = MultiStrategy([EdgeStrategy(min_edge=settings.min_edge)])
 
         # Exchange wiring [ADR-0008]
         if settings.trading_mode == "live":
@@ -120,7 +123,7 @@ class BotManager:
                 chain_id = settings.chain_id,
                 creds    = creds,
             )
-            self.orderbook = None
+            self.orderbook = OrderbookFetcher(l2_client)
             self.exchange  = ClobExchange(l2_client, alert_bus=self.alert_bus)
         else:
             if ClobClient is not None:
@@ -140,9 +143,6 @@ class BotManager:
         self.discovery  = EventDiscovery(self.db, settings)
         self.lifecycle  = EventLifecycle()
 
-        # Settler
-        self.settler    = Settler()
-
         # Snipers
         first_station   = self.station.station_id
         self.snipers    = SniperManager([
@@ -161,24 +161,21 @@ class BotManager:
             prob_store = self.prob_store,
             alert_bus  = self.alert_bus,
             settings   = settings,
+            strategy   = self.strategy,
+            risk       = self.risk,
+            exchange   = self.exchange,
+            positions  = self.positions,
+            db         = self.db,
+            orderbook  = self.orderbook,
         )
         self.discovery_loop  = DiscoveryLoop(self.discovery)
         self.settlement_loop = SettlementLoop(
-            settler   = self.settler,
-            exchange  = self.exchange,
-            lifecycle = self.lifecycle,
-            db        = self.db,
+            lifecycle  = self.lifecycle,
+            positions  = self.positions,
+            obs_store  = self.obs_store,
+            db         = self.db,
         )
-
-    # ------------------------------------------------------------------
-    # Run
-    # ------------------------------------------------------------------
-
-    async def run(self) -> None:
-        """Launch all loops concurrently.  Runs until cancelled."""
-        from loops.sniper_loop import SniperLoop
-
-        sniper_loop = SniperLoop(
+        self.sniper_loop = SniperLoop(
             sniper_mgr = self.snipers,
             orderbook  = self.orderbook,
             risk       = self.risk,
@@ -187,23 +184,16 @@ class BotManager:
             db         = self.db,
         )
 
-        async def _forecast_hourly():
-            """Wrapper: call tick() every hour."""
-            while True:
-                await self.forecast_loop.tick()
-                await asyncio.sleep(3_600)
+    # ------------------------------------------------------------------
+    # Run
+    # ------------------------------------------------------------------
 
-        async def _trading_cadence():
-            """Wrapper: drive TradingLoop at its configured interval."""
-            while True:
-                # V11 will supply active condition_ids from the DB.
-                # For now the loop idles between ticks without processing events.
-                await asyncio.sleep(self.trading_loop.interval_s)
-
+    async def run(self) -> None:
+        """Launch all loops concurrently.  Runs until cancelled."""
         await asyncio.gather(
-            _forecast_hourly(),
-            _trading_cadence(),
-            sniper_loop.run(),
+            self.forecast_loop.run(),
+            self.trading_loop.run(),
+            self.sniper_loop.run(),
             self.snipers.start_all(),
             self.discovery_loop.run(),
             self.settlement_loop.run(),

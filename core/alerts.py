@@ -16,7 +16,7 @@ class AlertEvent:
     Fields
     ------
     alert_type:
-        Domain: ``"data_stale" | "order_failure" | "risk_rejected"``.
+        Domain: ``"data_stale" | "order_failure" | "risk_rejected" | "book_fetch_failure"``.
     station:
         Station ID relevant to the alert, or None if not applicable.
     message:
@@ -28,7 +28,7 @@ class AlertEvent:
         Consumed by downstream subscribers such as Telegram or dashboard.
     """
 
-    alert_type:  Literal["data_stale", "order_failure", "risk_rejected"]
+    alert_type:  Literal["data_stale", "order_failure", "risk_rejected", "book_fetch_failure"]
     station:     str | None
     message:     str
     occurred_at: datetime

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from core.probability_store import BucketPayload, ProbabilityStore
+from core.probability_store import BucketPayload, ProbabilitySnapshot, ProbabilityStore
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +47,7 @@ def test_write_and_read_back_single_bucket() -> None:
         await store.write("cid-001", 0, buckets)
         result = await store.read("cid-001", 0)
         assert result is not None
-        assert abs(result[(60.0, 70.0)].mc_prob - 0.72) < 1e-9
+        assert abs(result.buckets[(60.0, 70.0)].mc_prob - 0.72) < 1e-9
 
     asyncio.run(run())
 
@@ -64,9 +64,9 @@ def test_write_and_read_multiple_day_offsets() -> None:
         r1 = await store.read("cid-001", 1)
         r2 = await store.read("cid-001", 2)
 
-        assert r0 is not None and abs(r0[(60.0, 70.0)].mc_prob - 0.60) < 1e-9
-        assert r1 is not None and abs(r1[(60.0, 70.0)].mc_prob - 0.70) < 1e-9
-        assert r2 is not None and abs(r2[(60.0, 70.0)].mc_prob - 0.80) < 1e-9
+        assert r0 is not None and abs(r0.buckets[(60.0, 70.0)].mc_prob - 0.60) < 1e-9
+        assert r1 is not None and abs(r1.buckets[(60.0, 70.0)].mc_prob - 0.70) < 1e-9
+        assert r2 is not None and abs(r2.buckets[(60.0, 70.0)].mc_prob - 0.80) < 1e-9
 
     asyncio.run(run())
 
@@ -89,7 +89,7 @@ def test_write_overwrites_previous_value() -> None:
         await store.write("cid-001", 0, {(60.0, 70.0): _make_payload(0.99)})
         result = await store.read("cid-001", 0)
         assert result is not None
-        assert abs(result[(60.0, 70.0)].mc_prob - 0.99) < 1e-9
+        assert abs(result.buckets[(60.0, 70.0)].mc_prob - 0.99) < 1e-9
 
     asyncio.run(run())
 
@@ -149,7 +149,7 @@ def test_concurrent_writes_do_not_corrupt_state() -> None:
             result = await store.read(f"cid-{i}", 0)
             assert result is not None
             bucket = (float(i), float(i + 10))
-            assert abs(result[bucket].mc_prob - float(i) / 100) < 1e-9
+            assert abs(result.buckets[bucket].mc_prob - float(i) / 100) < 1e-9
 
     asyncio.run(run())
 
@@ -168,12 +168,12 @@ def test_mutating_read_result_does_not_corrupt_store() -> None:
         result = await store.read("cid-001", 0)
         assert result is not None
         # Mutate the nested dict from the read result
-        result[(60.0, 70.0)].quantiles_by_fxx[1]["p50"] = 999.0
+        result.buckets[(60.0, 70.0)].quantiles_by_fxx[1]["p50"] = 999.0
 
         # Re-read; store must be unaffected
         result2 = await store.read("cid-001", 0)
         assert result2 is not None
-        assert result2[(60.0, 70.0)].quantiles_by_fxx[1]["p50"] == 63.0
+        assert result2.buckets[(60.0, 70.0)].quantiles_by_fxx[1]["p50"] == 63.0
 
     asyncio.run(run())
 
@@ -192,7 +192,7 @@ def test_mutating_written_buckets_does_not_corrupt_store() -> None:
 
         result = await store.read("cid-001", 0)
         assert result is not None
-        assert result[(60.0, 70.0)].quantiles_by_fxx[1]["p50"] == original_q
+        assert result.buckets[(60.0, 70.0)].quantiles_by_fxx[1]["p50"] == original_q
 
     asyncio.run(run())
 
@@ -228,6 +228,60 @@ def test_write_consistent_last_tick_utc_accepted() -> None:
         await store.write("cid-001", 0, {(60.0, 70.0): p1, (70.0, 80.0): p2})
         result = await store.read("cid-001", 0)
         assert result is not None
-        assert len(result) == 2
+        assert len(result.buckets) == 2
+
+
+# ---------------------------------------------------------------------------
+# ProbabilitySnapshot interface
+# ---------------------------------------------------------------------------
+
+
+def test_probability_snapshot_last_tick_utc_is_top_level() -> None:
+    """read() exposes last_tick_utc directly on the snapshot."""
+    store = ProbabilityStore()
+    ts    = datetime(2026, 7, 4, 12, 0, 0, tzinfo=timezone.utc)
+    p     = BucketPayload(mc_prob=0.55, quantiles_by_fxx={}, last_tick_utc=ts)
+
+    async def run() -> None:
+        await store.write("cid-001", 0, {(60.0, 70.0): p})
+        snap = await store.read("cid-001", 0)
+        assert snap is not None
+        assert isinstance(snap, ProbabilitySnapshot)
+        assert snap.last_tick_utc == ts
+
+    asyncio.run(run())
+
+
+def test_probability_snapshot_is_fresh_within_threshold() -> None:
+    """is_fresh() returns True when age <= threshold_min."""
+    store = ProbabilityStore()
+    now   = datetime(2026, 7, 4, 12, 0, 0, tzinfo=timezone.utc)
+    ts    = datetime(2026, 7, 4, 11, 0, 0, tzinfo=timezone.utc)  # 60 min ago
+    p     = BucketPayload(mc_prob=0.55, quantiles_by_fxx={}, last_tick_utc=ts)
+
+    async def run() -> None:
+        await store.write("cid-001", 0, {(60.0, 70.0): p})
+        snap = await store.read("cid-001", 0)
+        assert snap is not None
+        assert snap.is_fresh(threshold_min=65, now=now) is True
+        assert snap.is_fresh(threshold_min=55, now=now) is False
+
+    asyncio.run(run())
+
+
+def test_probability_snapshot_age_minutes() -> None:
+    """age_minutes() returns elapsed minutes since last_tick_utc."""
+    store = ProbabilityStore()
+    now   = datetime(2026, 7, 4, 12, 0, 0, tzinfo=timezone.utc)
+    ts    = datetime(2026, 7, 4, 11, 30, 0, tzinfo=timezone.utc)  # 30 min ago
+    p     = BucketPayload(mc_prob=0.55, quantiles_by_fxx={}, last_tick_utc=ts)
+
+    async def run() -> None:
+        await store.write("cid-001", 0, {(60.0, 70.0): p})
+        snap = await store.read("cid-001", 0)
+        assert snap is not None
+        assert snap.age_minutes(now) == pytest.approx(30.0)
+
+    asyncio.run(run())
 
     asyncio.run(run())

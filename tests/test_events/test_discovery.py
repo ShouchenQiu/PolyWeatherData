@@ -237,6 +237,44 @@ def test_discover_idempotent(mem_db):
     assert len(events) == 1
 
 
+def test_discover_dedup_second_call_returns_empty(mem_db):
+    """Second discover() with the same event_id returns [] -- no re-discovery."""
+    settings = _make_settings()
+    disc     = EventDiscovery(db=mem_db, settings=settings)
+    response = _gamma_response()
+
+    with patch.object(disc, "_fetch_events", return_value=response):
+        first  = disc.discover()
+        second = disc.discover()
+
+    assert len(first) == 1
+    assert second == []
+
+
+def test_discover_dedup_skips_upsert_on_second_call(mem_db):
+    """DB write count for upsert_event must be exactly 1 across two calls."""
+    from unittest.mock import call
+    settings = _make_settings()
+    disc     = EventDiscovery(db=mem_db, settings=settings)
+    response = _gamma_response()
+
+    original_upsert = mem_db.upsert_event
+    upsert_calls: list = []
+
+    def _counting_upsert(*args, **kwargs):
+        upsert_calls.append((args, kwargs))
+        return original_upsert(*args, **kwargs)
+
+    mem_db.upsert_event = _counting_upsert
+
+    with patch.object(disc, "_fetch_events", return_value=response):
+        disc.discover()
+        disc.discover()
+
+    # upsert_event must have been called exactly once (first call only)
+    assert len(upsert_calls) == 1
+
+
 def test_discover_result_has_required_keys(mem_db):
     settings = _make_settings()
     disc     = EventDiscovery(db=mem_db, settings=settings)

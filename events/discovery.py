@@ -146,6 +146,24 @@ class EventDiscovery:
                 continue
 
             condition_id   = ev.get("conditionId") or ev.get("id") or slug
+
+            # Dedup: event metadata already persisted -- only sync missing markets.
+            if self._db.event_exists(condition_id):
+                added = self._sync_missing_markets(
+                    ev.get("markets", []), condition_id
+                )
+                if added:
+                    logger.info(
+                        "EventDiscovery: synced {} new market(s) for existing event {}",
+                        len(added), condition_id,
+                    )
+                else:
+                    logger.debug(
+                        "EventDiscovery: no new markets for existing event {}",
+                        condition_id,
+                    )
+                continue
+
             question       = ev.get("title") or ev.get("question") or slug
             event_slug     = ev.get("slug") or ""
             event_end_date = ev.get("endDate") or ev.get("end_date_iso") or ""
@@ -192,6 +210,55 @@ class EventDiscovery:
             raise RuntimeError(
                 f"Gamma API request failed: {exc}"
             ) from exc
+
+    def _sync_missing_markets(
+        self, markets: list[dict], condition_id: str
+    ) -> list[dict]:
+        """Upsert markets whose token_id is not yet in the DB.
+
+        Called when the parent event already exists.  Only adds genuinely
+        new tokens; existing token rows are not touched.
+        """
+        added: list[dict] = []
+        for mkt in markets:
+            market_slug   = mkt.get("slug") or mkt.get("market_slug") or ""
+            result        = parse_slug(market_slug)
+            lo_f, hi_f    = result if result is not None else (None, None)
+
+            token_ids_raw = mkt.get("clobTokenIds") or "[]"
+            if isinstance(token_ids_raw, str):
+                try:
+                    token_ids = json.loads(token_ids_raw)
+                except json.JSONDecodeError:
+                    token_ids = []
+            else:
+                token_ids = list(token_ids_raw)
+
+            outcomes_raw = mkt.get("outcomes") or '["Yes","No"]'
+            if isinstance(outcomes_raw, str):
+                try:
+                    outcomes = json.loads(outcomes_raw)
+                except json.JSONDecodeError:
+                    outcomes = ["Yes", "No"]
+            else:
+                outcomes = list(outcomes_raw)
+
+            for idx, token_id in enumerate(token_ids):
+                if not token_id:
+                    continue
+                if self._db.market_exists(token_id):
+                    continue
+                outcome = outcomes[idx] if idx < len(outcomes) else "YES"
+                self._db.upsert_market(
+                    token_id     = token_id,
+                    condition_id = condition_id,
+                    market_slug  = market_slug,
+                    bucket_lo_f  = lo_f,
+                    bucket_hi_f  = hi_f,
+                    outcome      = outcome,
+                )
+                added.append({"token_id": token_id, "outcome": outcome})
+        return added
 
     def _process_markets(
         self, markets: list[dict], condition_id: str

@@ -1,4 +1,4 @@
-"""DiscoveryLoop: daily Gamma API polling for new weather markets."""
+"""DiscoveryLoop: hourly Gamma API polling for new weather markets."""
 from __future__ import annotations
 
 import asyncio
@@ -11,20 +11,20 @@ if TYPE_CHECKING:
 
 
 class DiscoveryLoop:
-    """Run EventDiscovery.discover() once per day.
+    """Run EventDiscovery.discover() once per hour.
 
     Parameters
     ----------
     discovery:
         EventDiscovery instance (handles Gamma API + DB upsert).
     interval_seconds:
-        How often to poll for new events.  Default is 86400 (24 h).
+        How often to poll for new events.  Default is 3600 (1 h).
     """
 
     def __init__(
         self,
         discovery:        "EventDiscovery",
-        interval_seconds: float = 86_400.0,
+        interval_seconds: float = 3_600.0,
     ) -> None:
         self._discovery        = discovery
         self._interval_seconds = interval_seconds

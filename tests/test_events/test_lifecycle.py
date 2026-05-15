@@ -26,7 +26,7 @@ def _ts(date: str, hour: int = 0) -> pd.Timestamp:
     return pd.Timestamp(f"{date}T{hour:02d}:00:00", tz="UTC")
 
 
-lc = EventLifecycle(cutoff_hour_utc=21)
+lc = EventLifecycle()
 
 
 # -----------------------------------------------------------------------
@@ -46,25 +46,26 @@ def test_active_before_cutoff_stays_active():
 
 
 # -----------------------------------------------------------------------
-# active -> cutoff
+# no cutoff gating -- ACTIVE until midnight
 # -----------------------------------------------------------------------
 
-def test_advance_to_cutoff_exactly_at_cutoff_hour():
+def test_advance_active_at_21_utc():
+    """21:00 UTC is no longer a cutoff; event stays ACTIVE."""
     ev  = _event(ACTIVE, "2025-03-20")
-    now = _ts("2025-03-20", hour=21)   # exactly 21:00 UTC
-    assert lc.advance(ev, now) == CUTOFF
+    now = _ts("2025-03-20", hour=21)
+    assert lc.advance(ev, now) == ACTIVE
 
 
-def test_advance_to_cutoff_after_cutoff_hour():
+def test_advance_active_at_23_utc():
     ev  = _event(ACTIVE, "2025-03-20")
     now = _ts("2025-03-20", hour=23)
-    assert lc.advance(ev, now) == CUTOFF
+    assert lc.advance(ev, now) == ACTIVE
 
 
-def test_discovered_after_cutoff_becomes_cutoff():
+def test_discovered_at_22_utc_still_active():
     ev  = _event(DISCOVERED, "2025-03-20")
     now = _ts("2025-03-20", hour=22)
-    assert lc.advance(ev, now) == CUTOFF
+    assert lc.advance(ev, now) == ACTIVE
 
 
 # -----------------------------------------------------------------------
@@ -128,17 +129,6 @@ def test_full_end_iso_string():
     assert lc.advance(ev, now) == ACTIVE
 
 
-# -----------------------------------------------------------------------
-# Custom cutoff hour
-# -----------------------------------------------------------------------
-
-def test_custom_cutoff_hour():
-    """Use cutoff_hour_utc=18 (13:00 EST) for an earlier cutoff."""
-    lc2 = EventLifecycle(cutoff_hour_utc=18)
-    ev  = _event(ACTIVE, "2025-03-20")
-    assert lc2.advance(ev, _ts("2025-03-20", hour=17)) == ACTIVE
-    assert lc2.advance(ev, _ts("2025-03-20", hour=18)) == CUTOFF
-
 
 # -----------------------------------------------------------------------
 # is_tradeable convenience wrapper
@@ -150,10 +140,11 @@ def test_is_tradeable_true_when_active():
     assert lc.is_tradeable(ev, now) is True
 
 
-def test_is_tradeable_false_at_cutoff():
+def test_is_tradeable_true_at_21_utc():
+    """21:00 UTC is now ACTIVE (cutoff gating removed); event is tradeable."""
     ev  = _event(ACTIVE, "2025-03-20")
     now = _ts("2025-03-20", hour=21)
-    assert lc.is_tradeable(ev, now) is False
+    assert lc.is_tradeable(ev, now) is True
 
 
 def test_is_tradeable_false_when_settled():
@@ -168,11 +159,11 @@ def test_is_tradeable_false_when_settled():
 
 @pytest.mark.parametrize("status,hour,expected", [
     (DISCOVERED,     10, ACTIVE),
-    (DISCOVERED,     21, CUTOFF),
+    (DISCOVERED,     21, ACTIVE),   # no cutoff hour gating
     (ACTIVE,         10, ACTIVE),
-    (ACTIVE,         21, CUTOFF),
-    (CUTOFF,         10, ACTIVE),    # on event day before cutoff
-    (CUTOFF,         22, CUTOFF),    # on event day after cutoff
+    (ACTIVE,         21, ACTIVE),   # no cutoff hour gating
+    (CUTOFF,         10, ACTIVE),   # DB-legacy CUTOFF rows heal to ACTIVE
+    (CUTOFF,         22, ACTIVE),   # DB-legacy CUTOFF rows heal to ACTIVE
     (PENDING_SETTLE, 10, PENDING_SETTLE),
     (SETTLED,        10, SETTLED),
 ])

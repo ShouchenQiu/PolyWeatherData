@@ -9,6 +9,7 @@ import streamlit as st
 
 if TYPE_CHECKING:
     from db.schema import DbClient
+    from ui.alerts import StalenessState
 
 
 def _load_orders(db: "DbClient") -> pd.DataFrame:
@@ -55,9 +56,30 @@ def _load_station_summary(db: "DbClient") -> pd.DataFrame:
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
-def render(db: "DbClient") -> None:
-    """Render the Dashboard page."""
+def render(db: "DbClient", staleness_state: "StalenessState | None" = None) -> None:
+    """Render the Dashboard page.
+
+    Parameters
+    ----------
+    db:
+        DbClient for loading orders and event summary.
+    staleness_state:
+        Optional shared staleness tracker.  When provided, a warning banner
+        is shown whenever the bot has reported stale forecast data.
+    """
     st.header("Dashboard")
+
+    if staleness_state is not None and staleness_state.is_stale:
+        station_label = staleness_state.station or "unknown station"
+        since_label   = (
+            staleness_state.stale_since.strftime("%H:%M UTC")
+            if staleness_state.stale_since is not None
+            else "unknown time"
+        )
+        st.warning(
+            f"Data stale since {since_label} ¡ª {station_label} forecast not updated.",
+            icon="warning",
+        )
 
     orders_df  = _load_orders(db)
     station_df = _load_station_summary(db)

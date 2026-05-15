@@ -151,15 +151,32 @@ _Avoid_: parquet file, storage file
   meteorological transforms. TFT model-adapter features (time_idx, Node_ID, calendar
   encodings such as sin_hour/cos_hour/sin_doy/cos_doy) are added by
   `ModelPipeline._add_model_features` immediately before inference.
-- **ForecastLoop** ¡ú **TFT** ¡ú **McSampler** ¡ú bucket probabilities ¡ú **TradingLoop**
+- **ForecastLoop** -> **TFT** -> **McSampler** -> bucket probabilities -> **TradingLoop**
 - **DiscoveryLoop** owns **Event** / **Market** / **Token** records; **TradingLoop**
-  references them by slug only. At any given time 2¨C3 Events may be concurrently active.
+  references them by slug only. At any given time 2-3 Events may be concurrently active.
 - **TradingLoop** iterates over all active Events each tick; it runs until every
-  active Event is settled ¡ª there is no cutoff hour.
+  active Event is settled - there is no cutoff hour.
 - **cold-start** rows (first 72 h of any dataset) are dropped by **Cleaner** before
   any model input or backtest entry.
 - **staleness** is computed by **TradingLoop** as `now - ForecastLoop.last_tick_utc`;
   no other component tracks it.
+
+## Layer Exceptions
+
+### `core/bot.py` -- BotManager wiring root
+
+`BotManager` in `core/bot.py` is the top-level wiring root: it constructs and
+connects all subsystems (data layer, exchange, loops, snipers, DB) in a single
+`_build()` method.  As a result it imports from `data/`, `loops/`, `model/`,
+`snipers/`, and `db/` -- all of which nominally sit "above" `core/` in the
+standard layer hierarchy.
+
+This is an intentional architectural exception.  `BotManager` is conceptually
+outside all layers; it lives in `core/` solely for historical reasons.  Do not
+apply the standard `core/` import restriction when reviewing `bot.py`.  If the
+wiring root is ever extracted to a dedicated top-level `bot.py` module alongside
+`main.py`, update this note.
+
 
 ## Flagged ambiguities
 

@@ -2,10 +2,39 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.alerts import AlertBus
 
 
 class BaseExchange(ABC):
     """Abstract base class for all exchange adapters."""
+
+    def __init__(self, alert_bus: "AlertBus | None" = None) -> None:
+        self._alert_bus = alert_bus
+
+    def _emit_alert(
+        self,
+        alert_type: str,
+        token_id:   str,
+        reason:     str,
+    ) -> None:
+        """Emit a trade-related alert via the wired AlertBus.
+
+        No-op when no AlertBus is wired.
+        """
+        if self._alert_bus is None:
+            return
+        from core.alerts import AlertEvent
+        self._alert_bus.emit(AlertEvent(
+            alert_type  = alert_type,
+            station     = None,
+            message     = f"{type(self).__name__}: {alert_type} for {token_id}: {reason}",
+            occurred_at = datetime.now(tz=timezone.utc),
+            context     = {"token_id": token_id, "reason": reason},
+        ))
 
     @abstractmethod
     def place_order(

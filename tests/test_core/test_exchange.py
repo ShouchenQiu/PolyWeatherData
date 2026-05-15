@@ -166,11 +166,15 @@ def test_settler_relayer_failure_falls_back():
 # -----------------------------------------------------------------------
 
 def test_orderbook_fetcher_get_book_delegates_to_client():
-    from core.exchange.paper import OrderbookFetcher
+    from data.clob.orderbook import OrderbookFetcher
+
+    class FakeSummary:
+        bids = [{"price": "0.52", "size": "100"}]
+        asks = [{"price": "0.58", "size": "100"}]
 
     class FakeClient:
         def get_order_book(self, token_id):
-            return {"bids": [], "asks": [], "mid_price": 0.55}
+            return FakeSummary()
 
     fetcher = OrderbookFetcher(FakeClient())
     book    = fetcher.get_book("tok1")
@@ -178,7 +182,7 @@ def test_orderbook_fetcher_get_book_delegates_to_client():
 
 
 def test_orderbook_fetcher_raises_on_client_error():
-    from core.exchange.paper import OrderbookFetcher
+    from data.clob.orderbook import OrderbookFetcher
 
     class BrokenClient:
         def get_order_book(self, token_id):
@@ -193,8 +197,8 @@ def test_orderbook_fetcher_raises_on_client_error():
 # PaperExchange -- order_failure alert on get_book() failure
 # -----------------------------------------------------------------------
 
-def test_paper_exchange_emits_order_failure_on_fetcher_error():
-    """When get_book() raises, PaperExchange emits an order_failure alert."""
+def test_paper_exchange_emits_book_fetch_failure_on_fetcher_error():
+    """When get_book() raises, PaperExchange emits a book_fetch_failure alert."""
     from core.alerts import AlertBus, AlertEvent
 
     class BrokenFetcher:
@@ -218,7 +222,7 @@ def test_paper_exchange_emits_order_failure_on_fetcher_error():
     asyncio.run(_run())
 
     assert len(emitted) == 1
-    assert emitted[0].alert_type == "order_failure"
+    assert emitted[0].alert_type == "book_fetch_failure"
 
 
 def test_paper_exchange_no_alert_on_success():

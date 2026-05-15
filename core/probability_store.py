@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,43 @@ class BucketPayload:
 # Bucket tuple: (lo_f, hi_f)
 _BucketKey = tuple[float, float]
 _BucketMap = dict[_BucketKey, BucketPayload]
+
+
+@dataclass(frozen=True)
+class ProbabilitySnapshot:
+    """A complete snapshot for one (condition_id, day_offset) key.
+
+    Returned by ProbabilityStore.read() so callers get the key-level
+    last_tick_utc as an explicit field rather than extracting it from an
+    arbitrary bucket.  All buckets in a snapshot share the same
+    last_tick_utc by construction (enforced at write time).
+
+    Fields
+    ------
+    buckets:
+        Mapping of (lo_f, hi_f) -> BucketPayload for this key.
+    last_tick_utc:
+        UTC timestamp of the ForecastLoop run that produced this snapshot.
+    """
+
+    buckets:       dict[tuple[float, float], BucketPayload]
+    last_tick_utc: datetime
+
+    def age_minutes(self, now: datetime | None = None) -> float:
+        """Return minutes elapsed since last_tick_utc.
+
+        Parameters
+        ----------
+        now:
+            Reference time.  Defaults to ``datetime.now(timezone.utc)``.
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+        return (now - self.last_tick_utc).total_seconds() / 60.0
+
+    def is_fresh(self, threshold_min: float, now: datetime | None = None) -> bool:
+        """Return True when age_minutes(now) <= threshold_min."""
+        return self.age_minutes(now) <= threshold_min
 
 _VALID_DAY_OFFSETS = frozenset({0, 1, 2})
 
@@ -106,8 +143,8 @@ class ProbabilityStore:
         self,
         condition_id: str,
         day_offset: int,
-    ) -> _BucketMap | None:
-        """Return the bucket map for (condition_id, day_offset), or None.
+    ) -> ProbabilitySnapshot | None:
+        """Return a ProbabilitySnapshot for (condition_id, day_offset), or None.
 
         Parameters
         ----------
@@ -118,8 +155,8 @@ class ProbabilityStore:
 
         Returns
         -------
-        A copy of the stored bucket map, or None if the key has not been
-        written yet.
+        ProbabilitySnapshot with buckets and last_tick_utc, or None if the
+        key has not been written yet.
 
         Raises
         ------
@@ -129,4 +166,8 @@ class ProbabilityStore:
         self._validate_day_offset(day_offset)
         async with self._lock:
             entry = self._data.get((condition_id, day_offset))
-            return {k: copy.deepcopy(v) for k, v in entry.items()} if entry is not None else None
+            if entry is None:
+                return None
+            buckets = {k: copy.deepcopy(v) for k, v in entry.items()}
+            last_tick_utc = next(iter(buckets.values())).last_tick_utc
+            return ProbabilitySnapshot(buckets=buckets, last_tick_utc=last_tick_utc)

@@ -10,7 +10,9 @@ are the sole responsibility of TradingLoop (ADR-0004).
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+import asyncio
+
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -75,16 +77,16 @@ class ForecastLoop:
         )
 
         logger.info("ForecastLoop tick: init_time={}", init_utc)
-        active_events = self.db.get_active_events()
-        logger.debug("ForecastLoop: {} active event(s)", len(active_events))
+        forecast_events = self.db.get_forecast_events(init_utc.date().isoformat())
+        logger.debug("ForecastLoop: {} forecast event(s)", len(forecast_events))
         written: list[str] = []
 
-        for event in active_events:
+        for event in forecast_events:
             condition_id = event["condition_id"]
 
-            # day_offset: days from init_utc.date() to event_end_date, restricted to {0,1,2}
+            # day_offset: days from init_utc.date() to event_end_date
             try:
-                delta = (
+                day_offset = (
                     date.fromisoformat(event["event_end_date"]) - init_utc.date()
                 ).days
             except (KeyError, ValueError, TypeError):
@@ -93,13 +95,6 @@ class ForecastLoop:
                     condition_id,
                 )
                 continue
-            if delta not in (0, 1, 2):
-                logger.debug(
-                    "ForecastLoop: event {} day_offset={} outside 0..2, skipping",
-                    condition_id, delta,
-                )
-                continue
-            day_offset = delta
 
             markets = self.db.get_markets_for_event(condition_id)
             if not markets:
@@ -107,7 +102,7 @@ class ForecastLoop:
             buckets = [
                 (m["bucket_lo_f"], m["bucket_hi_f"])
                 for m in markets
-                if m["outcome"] == "YES"
+                if str(m["outcome"]).upper() == "YES"
             ]
             if not buckets:
                 continue
@@ -124,7 +119,7 @@ class ForecastLoop:
                 condition_id, result.get("p50_high_f", float("nan")),
             )
 
-            last_tick = datetime.now(timezone.utc)
+            last_tick = result.get("last_tick_utc") or datetime.now(timezone.utc)
             bucket_map = {
                 (lo, hi): BucketPayload(
                     mc_prob=prob,
@@ -149,3 +144,21 @@ class ForecastLoop:
 
         logger.info("ForecastLoop tick done: {} event(s) written", len(written))
         return written
+
+    async def run(self) -> None:
+        """Run ForecastLoop indefinitely, aligned to wall-clock UTC hours.
+
+        Each iteration: tick() first, then sleep until the start of the next
+        full UTC hour so subsequent ticks land within +-5 s of the hour boundary.
+        """
+        while True:
+            await self.tick()
+            now       = datetime.now(timezone.utc)
+            next_hour = (now + timedelta(hours=1)).replace(
+                minute=0, second=0, microsecond=0
+            )
+            sleep_s = (next_hour - now).total_seconds()
+            logger.info(
+                "ForecastLoop: next tick in {:.0f}s at {}", sleep_s, next_hour
+            )
+            await asyncio.sleep(sleep_s)

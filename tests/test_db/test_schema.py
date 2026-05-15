@@ -90,6 +90,31 @@ def test_get_active_events_excludes_resolved(tmp_db: sqlite3.Connection) -> None
 
 
 # ---------------------------------------------------------------------------
+# event_exists
+# ---------------------------------------------------------------------------
+
+
+def test_event_exists_returns_false_when_absent() -> None:
+    db = DbClient(":memory:")
+    assert db.event_exists("nonexistent-cid") is False
+
+
+def test_event_exists_returns_true_after_upsert() -> None:
+    db = DbClient(":memory:")
+    db.upsert_station(*STATION)
+    db.upsert_event(*EVENT)
+    assert db.event_exists("cid-001") is True
+
+
+def test_event_exists_ignores_status() -> None:
+    """event_exists returns True regardless of event status (resolved/cancelled)."""
+    db = DbClient(":memory:")
+    db.upsert_station(*STATION)
+    db.upsert_event("cid-resolved", "Q", "slug", "2026-01-01", "KLGA", "resolved")
+    assert db.event_exists("cid-resolved") is True
+
+
+# ---------------------------------------------------------------------------
 # Signal and order round-trip
 # ---------------------------------------------------------------------------
 

@@ -18,7 +18,9 @@ from pathlib import Path
 import streamlit as st
 
 from config.settings import Settings
+from core.alerts import AlertBus
 from db.schema import DbClient
+from ui.alerts import StalenessState, register_ui_handlers
 
 # ---------------------------------------------------------------------------
 # Page configuration (must be the first Streamlit call)
@@ -44,6 +46,18 @@ def _get_db() -> DbClient:
     return DbClient(db_path)
 
 
+@st.cache_resource
+def _get_alert_bus() -> AlertBus:
+    return AlertBus()
+
+
+@st.cache_resource
+def _get_staleness_state() -> StalenessState:
+    state = StalenessState()
+    register_ui_handlers(_get_alert_bus(), state)
+    return state
+
+
 # ---------------------------------------------------------------------------
 # Sidebar navigation
 # ---------------------------------------------------------------------------
@@ -67,10 +81,11 @@ st.sidebar.markdown(
 # ---------------------------------------------------------------------------
 
 db = _get_db()
+staleness_state = _get_staleness_state()
 
 if page == "Dashboard":
     from ui.pages import dashboard
-    dashboard.render(db)
+    dashboard.render(db, staleness_state=staleness_state)
 
 elif page == "Positions":
     from ui.pages import positions

@@ -152,6 +152,62 @@ class DbClient:
         )
         return [dict(r) for r in cur.fetchall()]
 
+    def get_forecast_events(self, now_date: str, horizon_days: int = 2) -> list[dict]:
+        """Return events whose end date is within [today, today+horizon_days].
+
+        Excludes resolved, cancelled, and settled events.  The date
+        window is the only filter -- callers do not need to re-implement
+        day_offset arithmetic.
+
+        Parameters
+        ----------
+        now_date:
+            ISO-8601 date string for today (e.g. ``"2026-07-04"``).
+        horizon_days:
+            Maximum number of calendar days ahead (inclusive). Default 2.
+        """
+        cur = self._conn.execute(
+            """
+            SELECT * FROM events
+            WHERE status NOT IN ('resolved', 'cancelled', 'settled')
+              AND event_end_date >= ?
+              AND event_end_date <= date(?, '+' || ? || ' days')
+            """,
+            (now_date, now_date, horizon_days),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_tradeable_events(self, now_date: str) -> list[dict]:
+        """Return events that are in 'active' status and within the 0..2-day window.
+
+        These are candidates for order submission.
+        """
+        cur = self._conn.execute(
+            """
+            SELECT * FROM events
+            WHERE status = 'active'
+              AND event_end_date >= ?
+              AND event_end_date <= date(?, '+2 days')
+            """,
+            (now_date, now_date),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_pending_settlement_events(self) -> list[dict]:
+        """Return events awaiting settlement (status = 'pending_settle')."""
+        cur = self._conn.execute(
+            "SELECT * FROM events WHERE status = 'pending_settle'"
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def event_exists(self, condition_id: str) -> bool:
+        """Return True if the event is already persisted, regardless of status."""
+        cur = self._conn.execute(
+            "SELECT 1 FROM events WHERE condition_id=? LIMIT 1",
+            (condition_id,),
+        )
+        return cur.fetchone() is not None
+
     def update_event_status(self, condition_id: str, status: str) -> None:
         self._conn.execute(
             "UPDATE events SET status=? WHERE condition_id=?",
@@ -191,6 +247,26 @@ class DbClient:
     def get_markets_for_event(self, condition_id: str) -> list[dict]:
         cur = self._conn.execute(
             "SELECT * FROM markets WHERE condition_id=?",
+            (condition_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def market_exists(self, token_id: str) -> bool:
+        """Return True if this token_id is already persisted in markets."""
+        cur = self._conn.execute(
+            "SELECT 1 FROM markets WHERE token_id=? LIMIT 1",
+            (token_id,),
+        )
+        return cur.fetchone() is not None
+
+    def get_orders_for_settlement(self, condition_id: str) -> list[dict]:
+        """Return all filled or closed orders for *condition_id*.
+
+        Used by SettlementLoop.confirm_settlement to determine payouts.
+        """
+        cur = self._conn.execute(
+            "SELECT * FROM orders"
+            " WHERE condition_id=? AND status IN ('filled', 'closed')",
             (condition_id,),
         )
         return [dict(r) for r in cur.fetchall()]

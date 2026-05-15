@@ -80,3 +80,16 @@ class Settler:
                 )
 
         return "fallback"
+
+
+class SettlementRelayer:
+    """On-chain settlement relay stub.
+
+    Full implementation is deferred pending Relayer ABI wiring -- ADR-0007.
+    """
+
+    def resolve_on_chain(self, event_id: str) -> bool:
+        raise NotImplementedError(
+            "SettlementRelayer.resolve_on_chain is deferred pending "
+            "Relayer ABI wiring -- see ADR-0007."
+        )

@@ -10,7 +10,20 @@ if the package is missing.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
+
+
+@runtime_checkable
+class OrderbookReader(Protocol):
+    """Structural interface for anything that can return an L2 order book.
+
+    Any object implementing ``get_book(token_id)`` satisfies this Protocol.
+    Used as the type annotation for the ``orderbook`` parameter in
+    TradingLoop and SniperLoop so the concrete SDK class is not imported
+    outside ``data/``.
+    """
+
+    def get_book(self, token_id: str) -> dict: ...
 
 
 def _mid(bids: list, asks: list) -> float | None:

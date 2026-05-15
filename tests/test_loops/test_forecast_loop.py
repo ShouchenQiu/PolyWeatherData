@@ -329,9 +329,9 @@ def test_forecast_loop_tick_writes_prob_store(db, station):
     )
     written = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
     assert written == ["cid1"]
-    buckets = asyncio.run(prob_store.read("cid1", 0))
-    assert (60.0, 70.0) in buckets
-    payload = buckets[(60.0, 70.0)]
+    snapshot = asyncio.run(prob_store.read("cid1", 0))
+    assert (60.0, 70.0) in snapshot.buckets
+    payload = snapshot.buckets[(60.0, 70.0)]
     assert abs(payload.mc_prob - 0.70) < 1e-9
     assert payload.quantiles_by_fxx[1]["p50"] == pytest.approx(5.0)
 
@@ -350,3 +350,157 @@ def test_forecast_loop_tick_skips_event_outside_day_offset(db, station):
     )
     written = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
     assert written == []
+
+
+# -----------------------------------------------------------------------
+# ForecastLoop.run  (V10 -- wall-clock UTC hour alignment)
+# -----------------------------------------------------------------------
+
+def test_forecast_loop_run_aligns_to_next_utc_hour(db, station):
+    """run() sleeps until the next wall-clock UTC hour boundary (within 5 s)."""
+    from datetime import datetime, timezone, timedelta
+    from unittest.mock import patch
+
+    slept_for: list[float] = []
+
+    async def _spy_sleep(secs: float) -> None:
+        slept_for.append(secs)
+        raise asyncio.CancelledError
+
+    pipeline = MagicMock()
+    pipeline.run.return_value = {"probs": {}, "quantiles": {}}
+    loop = ForecastLoop(
+        pipeline   = pipeline,
+        prob_store = ProbabilityStore(),
+        db         = db,
+        station    = station,
+    )
+
+    with patch("asyncio.sleep", new=_spy_sleep):
+        try:
+            asyncio.run(loop.run())
+        except (asyncio.CancelledError, SystemExit):
+            pass
+
+    assert len(slept_for) == 1
+    now       = datetime.now(timezone.utc)
+    next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    expected  = (next_hour - now).total_seconds()
+    assert abs(slept_for[0] - expected) < 5.0
+
+
+def test_forecast_loop_run_calls_tick_then_sleeps(db, station):
+    """run() calls tick() once before sleeping."""
+    from unittest.mock import patch, AsyncMock
+
+    call_order: list[str] = []
+
+    async def _spy_sleep(secs: float) -> None:
+        call_order.append("sleep")
+        raise asyncio.CancelledError
+
+    pipeline = MagicMock()
+    pipeline.run.return_value = {"probs": {}, "quantiles": {}}
+    loop = ForecastLoop(
+        pipeline   = pipeline,
+        prob_store = ProbabilityStore(),
+        db         = db,
+        station    = station,
+    )
+    original_tick = loop.tick
+
+    async def _spy_tick(*args, **kwargs):
+        call_order.append("tick")
+        return await original_tick(*args, **kwargs)
+
+    loop.tick = _spy_tick
+
+    with patch("asyncio.sleep", new=_spy_sleep):
+        try:
+            asyncio.run(loop.run())
+        except (asyncio.CancelledError, SystemExit):
+            pass
+
+    assert call_order == ["tick", "sleep"]
+
+
+# -----------------------------------------------------------------------
+# ForecastLoop.tick -- all 3 day_offsets  (V10 acceptance criterion)
+# -----------------------------------------------------------------------
+
+def test_forecast_loop_tick_writes_all_3_day_offsets(db, station):
+    """tick() writes to ProbabilityStore for day_offsets 0, 1, and 2."""
+    station_id = next(iter(STATIONS))
+    init_time  = pd.Timestamp("2026-03-25 12:00:00+00:00")
+    today      = init_time.date()
+
+    for day_off, cid in enumerate(("cid-d0", "cid-d1", "cid-d2")):
+        end_date = str(today + pd.Timedelta(days=day_off))
+        db.upsert_event(cid, "q", "slug", end_date, station_id, status="active")
+        db.upsert_market(f"tok-{day_off}", cid, "slug-60-70", 60.0, 70.0, "YES")
+
+    pipeline = MagicMock()
+    pipeline.run.return_value = {
+        "probs":     {(60.0, 70.0): 0.60},
+        "quantiles": {},
+    }
+    prob_store = ProbabilityStore()
+    loop = ForecastLoop(
+        pipeline   = pipeline,
+        prob_store = prob_store,
+        db         = db,
+        station    = station,
+    )
+
+    written = asyncio.run(loop.tick(init_time))
+
+    assert set(written) == {"cid-d0", "cid-d1", "cid-d2"}
+    for day_off, cid in enumerate(("cid-d0", "cid-d1", "cid-d2")):
+        snapshot = asyncio.run(prob_store.read(cid, day_off))
+        assert (60.0, 70.0) in snapshot.buckets, f"day_offset {day_off} not written"
+
+
+# -----------------------------------------------------------------------
+# V10 fixes -- outcome case-insensitivity and pipeline last_tick_utc
+# -----------------------------------------------------------------------
+
+def test_forecast_loop_tick_outcome_case_insensitive(db, station):
+    """tick() includes buckets for markets whose outcome is 'yes' (lowercase)."""
+    station_id = next(iter(STATIONS))
+    db.upsert_event("cid-ci", "q", "slug", "2026-03-25", station_id, status="active")
+    db.upsert_market("tok-ci", "cid-ci", "slug-60-70", 60.0, 70.0, "yes")  # lowercase
+
+    pipeline = MagicMock()
+    pipeline.run.return_value = {"probs": {(60.0, 70.0): 0.55}, "quantiles": {}}
+    loop = ForecastLoop(
+        pipeline   = pipeline,
+        prob_store = ProbabilityStore(),
+        db         = db,
+        station    = station,
+    )
+    written = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
+    assert written == ["cid-ci"]
+
+
+def test_forecast_loop_tick_pipeline_last_tick_utc_used(db, station):
+    """tick() stores pipeline-returned last_tick_utc in BucketPayload."""
+    from datetime import datetime, timezone
+    _seed_event_and_market(db)
+    expected_ts = datetime(2026, 3, 25, 11, 45, tzinfo=timezone.utc)
+
+    pipeline = MagicMock()
+    pipeline.run.return_value = {
+        "probs":         {(60.0, 70.0): 0.65},
+        "quantiles":     {},
+        "last_tick_utc": expected_ts,
+    }
+    prob_store = ProbabilityStore()
+    loop = ForecastLoop(
+        pipeline   = pipeline,
+        prob_store = prob_store,
+        db         = db,
+        station    = station,
+    )
+    asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
+    snapshot = asyncio.run(prob_store.read("cid1", 0))
+    assert snapshot.buckets[(60.0, 70.0)].last_tick_utc == expected_ts

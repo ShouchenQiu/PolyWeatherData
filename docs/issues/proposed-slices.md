@@ -60,7 +60,7 @@ Each is independently verifiable before any dependent slice starts.
 - **Tests**:
   - Handler is called with correct `AlertEvent` when `emit` fires
   - Second handler still fires when first handler raises an exception
-  - Emitting `"data_stale"`, `"order_failure"`, `"risk_rejected"` types all accepted
+  Emitting `"data_stale"`, `"order_failure"`, `"risk_rejected"`, `"book_fetch_failure"` types all accepted
 - **Source refs**:
   - `grill-tasks.md:237` (`core/alerts.py [NEW]` -- AlertEvent + AlertBus, L238-251)
 - **Out of scope**:
@@ -433,26 +433,28 @@ Each vertical slice is end-to-end verifiable on its own.
 - **What to build**:
   Add `order_failure` alert emission to `core/exchange/clob.py` via `AlertBus`
   on submission exception, auth failure, or rejected-order response.
-  Change `core/exchange/paper.py` to use real CLOB order book:
-  add `OrderbookFetcher` (wraps L1-only `ClobClient`, exposes `get_book(token_id)`);
-  add `order_failure` alert when `get_book()` fails.
+  Add `OrderbookFetcher` to `data/clob/orderbook.py` (wraps L1-only `ClobClient`,
+  normalises bids/asks, exposes `get_book(token_id)`);
+  use it in `core/exchange/paper.py`; emit `book_fetch_failure` alert when
+  `get_book()` fails (the paper order still succeeds, filled at submitted price).
   Fix `core/bot.py` paper-mode data source wiring; change auth: live mode
   constructs full L2 `ClobClient`; paper mode constructs L1-only `ClobClient`,
   wraps as `OrderbookFetcher`, never loads L2 credentials [ADR-0008].
 - **Acceptance criteria**:
   - [ ] Live mode: L2 `ClobClient` with ApiCreds wired to `ClobExchange`
-  - [ ] Paper mode: L1-only `ClobClient` wrapped as `OrderbookFetcher`; no ApiCreds loaded
-  - [ ] `order_failure` alert emitted on CLOB exception (clob.py and paper.py)
+  - [ ] Paper mode: L1-only `ClobClient` wrapped as `data.clob.orderbook.OrderbookFetcher`; no ApiCreds loaded
+  - [ ] `order_failure` alert emitted on CLOB exception (`clob.py`)
+  - [ ] `book_fetch_failure` alert emitted on `get_book()` failure (`paper.py`)
   - [ ] `bot.py` paper mode mounts real data sources to DataManager
   - [ ] Tests validate constructor wiring only (no real credentials required; AFK-safe)
 - **Tests**:
   - `bot.py` live mode: ApiCreds passed to `ClobClient` constructor (mock ClobClient)
   - `bot.py` paper mode: no ApiCreds argument present (mock ClobClient)
   - `ClobExchange`: `order_failure` alert emitted on injected exception
-  - `PaperExchange`: `order_failure` alert emitted on `get_book()` failure
+  - `PaperExchange`: `book_fetch_failure` alert emitted on `get_book()` failure
 - **Source refs**:
   - `grill-tasks.md:295` (`core/exchange/clob.py` -- ADD order_failure alert, L296-301)
-  - `grill-tasks.md:302` (`core/exchange/paper.py` -- CHANGE + ADD OrderbookFetcher + ADD alert, L303-309)
+  - `grill-tasks.md:302` (`data/clob/orderbook.py` -- OrderbookFetcher; `core/exchange/paper.py` -- ADD book_fetch_failure alert, L303-309)
   - `grill-tasks.md:310` (`core/bot.py` -- FIX paper mode + CHANGE auth, L311-315) [ADR-0008]
 - **Out of scope**: TradingLoop calling these exchanges (V11); full credential rotation
 
@@ -726,9 +728,9 @@ Each vertical slice is end-to-end verifiable on its own.
 | risk/kelly.py [NEW] -- ADD KellyCriterion stub | V06 | Covered |
 | risk/pipeline.py [NEW] -- ADD RiskPipeline | V06 | Covered |
 | exchange/clob.py -- ADD order_failure alert | V07 | Covered |
-| exchange/paper.py -- CHANGE to real CLOB book | V07 | Covered |
-| exchange/paper.py -- ADD OrderbookFetcher (L1-only) | V07 | Covered |
-| exchange/paper.py -- ADD order_failure alert | V07 | Covered |
+| data/clob/orderbook.py -- ADD OrderbookFetcher normalising wrapper | V07 | Covered |
+| exchange/paper.py -- CHANGE to use data.clob.orderbook.OrderbookFetcher | V07 | Covered |
+| exchange/paper.py -- ADD book_fetch_failure alert | V07 | Covered |
 | bot.py -- FIX paper mode data sources | V07 | Covered |
 | bot.py -- CHANGE live/paper auth wire-up [ADR-0008] | V07 | Covered |
 | ui/app.py -- ADD staleness alert display | V13 | Covered |

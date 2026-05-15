@@ -6,7 +6,6 @@ if the package is missing.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -32,8 +31,8 @@ class ClobExchange(BaseExchange):
         clob_client: Any,
         alert_bus: "AlertBus | None" = None,
     ) -> None:
-        self._client    = clob_client
-        self._alert_bus = alert_bus
+        super().__init__(alert_bus=alert_bus)
+        self._client = clob_client
 
     def place_order(
         self,
@@ -71,33 +70,20 @@ class ClobExchange(BaseExchange):
             resp   = self._client.post_order(signed)
         except Exception as exc:
             logger.error("[CLOB] Order submission failed for {}: {}", token_id, exc)
-            self._emit_order_failure(token_id=token_id, reason=str(exc))
+            self._emit_alert("order_failure", token_id, str(exc))
             raise
 
         order_id = resp.get("orderID", "") or resp.get("order_id", "")
         if not order_id:
             error_msg = resp.get("errorMsg", "rejected")
             logger.error("[CLOB] Order rejected for {}: {}", token_id, error_msg)
-            self._emit_order_failure(token_id=token_id, reason=error_msg)
+            self._emit_alert("order_failure", token_id, error_msg)
         else:
             logger.info(
                 "[CLOB] {} {} ${:.2f} @ {:.4f} order_id={}",
                 side.upper(), token_id, size_usd, price, order_id,
             )
         return order_id
-
-    def _emit_order_failure(self, token_id: str, reason: str) -> None:
-        """Emit an order_failure alert if an AlertBus is wired."""
-        if self._alert_bus is None:
-            return
-        from core.alerts import AlertEvent
-        self._alert_bus.emit(AlertEvent(
-            alert_type  = "order_failure",
-            station     = None,
-            message     = f"ClobExchange order failed for {token_id}: {reason}",
-            occurred_at = datetime.now(tz=timezone.utc),
-            context     = {"token_id": token_id, "reason": reason},
-        ))
 
     def cancel_order(self, order_id: str) -> bool:
         try:

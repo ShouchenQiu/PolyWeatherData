@@ -1,10 +1,13 @@
 """Event lifecycle state machine.
 
-States (in order):
-  discovered  -> active -> cutoff -> pending_settle -> settled
+States:
+  discovered -> active -> pending_settle -> settled
 
 Transitions are driven by the current UTC time relative to the
-event's end date.
+event's end date.  The CUTOFF constant is preserved for backward
+compatibility with existing DB rows but is no longer a transition
+target; rows with status 'cutoff' heal to 'active' on the next
+advance() call.
 """
 from __future__ import annotations
 
@@ -14,12 +17,9 @@ import pandas as pd
 # State constants (kept as plain strings so they match the DB column value)
 DISCOVERED      = "discovered"
 ACTIVE          = "active"
-CUTOFF          = "cutoff"
+CUTOFF          = "cutoff"          # legacy -- no longer a transition target
 PENDING_SETTLE  = "pending_settle"
 SETTLED         = "settled"
-
-# 16:00 EST = 21:00 UTC
-_CUTOFF_HOUR_UTC = 21
 
 
 class EventLifecycle:
@@ -33,31 +33,20 @@ class EventLifecycle:
 
     active
         Markets are open and the HRRR forecast + TFT pipeline can generate
-        signals.  Entered once the event end date is in the future and the
-        cutoff hour has not yet passed.
-
-    cutoff
-        16:00 EST (21:00 UTC) on the event end date day.  No new orders
-        should be placed; existing positions are held.
+        signals.  Entered whenever the event end date has not yet passed
+        (midnight UTC boundary).
 
     pending_settle
-        The event end date has passed (midnight UTC).  Awaiting settlement
+        The day after the event end date (midnight UTC).  Awaiting settlement
         data (actual observed temperature).
 
     settled
-        Settlement is complete (set externally by the Settler component).
-        This state is NOT set by advance() -- it is set by marking status
-        "settled" in the DB.
-
-    Parameters
-    ----------
-    cutoff_hour_utc:
-        The UTC hour at which trading is cut off on the event date.
-        Defaults to 21 (16:00 EST).
+        Terminal state.  Set explicitly by calling set_settled(); advance()
+        never transitions to this state automatically.
     """
 
-    def __init__(self, cutoff_hour_utc: int = _CUTOFF_HOUR_UTC) -> None:
-        self.cutoff_hour_utc = cutoff_hour_utc
+    def __init__(self) -> None:
+        pass
 
     def advance(self, event: dict, now_utc: pd.Timestamp) -> str:
         """Return the next state for *event* given current UTC time.
@@ -74,7 +63,7 @@ class EventLifecycle:
         Returns
         -------
         New status string.  Returns current status unchanged when the
-        current state is terminal (``settled``) or no transition applies.
+        current state is terminal (``settled``) or no end date is available.
         """
         current = event.get("status", DISCOVERED)
 
@@ -83,7 +72,6 @@ class EventLifecycle:
 
         end_date_str = event.get("event_end_date") or ""
         if not end_date_str:
-            # Cannot determine transitions without an end date
             return current
 
         try:
@@ -91,28 +79,24 @@ class EventLifecycle:
         except (ValueError, TypeError):
             return current
 
-        # Normalise now_utc to UTC aware
         if now_utc.tzinfo is None:
             now_utc = now_utc.tz_localize("UTC")
 
-        # Cutoff boundary: event_end_date at cutoff_hour_utc
-        cutoff_ts = event_end.normalize() + pd.Timedelta(hours=self.cutoff_hour_utc)
-
-        # --- State transitions ---
         if current == PENDING_SETTLE:
-            # No further automatic advance beyond pending_settle
             return PENDING_SETTLE
 
         if now_utc >= event_end + pd.Timedelta(days=1):
-            # Day after the event date -> pending settlement
             return PENDING_SETTLE
 
-        if now_utc >= cutoff_ts:
-            # Past cutoff on the event date
-            return CUTOFF
-
-        # Before cutoff: always ACTIVE (time-driven, overrides stale status)
         return ACTIVE
+
+    def set_settled(self, event_id: str, db: object) -> None:
+        """Write the 'settled' terminal state for *event_id* to the DB.
+
+        Must be called explicitly after all orders have been marked;
+        advance() never transitions to 'settled' automatically.
+        """
+        db.update_event_status(event_id, SETTLED)  # type: ignore[union-attr]
 
     def is_tradeable(self, event: dict, now_utc: pd.Timestamp) -> bool:
         """Return True if signals may be generated for this event.
