@@ -1,4 +1,4 @@
-"""Tests for core/exchange/ -- PaperExchange, ClobExchange, Settler."""
+"""Tests for core/exchange/ -- PaperExchange, ClobExchange, ExitSettler."""
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +6,7 @@ import asyncio
 import pytest
 
 from core.exchange.paper import PaperExchange
-from core.exchange.settlement import Settler
+from core.exchange.settlement import ExitSettler
 
 
 # -----------------------------------------------------------------------
@@ -97,14 +97,14 @@ def test_paper_multiple_tokens_independent():
 
 
 # -----------------------------------------------------------------------
-# Settler
+# ExitSettler
 # -----------------------------------------------------------------------
 
 def test_settler_fallback_sells_open_positions():
     exch = PaperExchange()
     exch.place_order("tok1", "BUY", 25.0, 0.50)
 
-    settler = Settler(relayer_client=None)
+    settler = ExitSettler(relayer_client=None)
     result  = settler.settle(
         event    = {"condition_id": "c1", "token_ids": ["tok1"]},
         exchange = exch,
@@ -120,7 +120,7 @@ def test_settler_only_closes_relevant_tokens():
     exch.place_order("tok1", "BUY", 25.0, 0.50)
     exch.place_order("tok2", "BUY", 25.0, 0.50)
 
-    settler = Settler(relayer_client=None)
+    settler = ExitSettler(relayer_client=None)
     settler.settle(
         event    = {"condition_id": "c1", "token_ids": ["tok1"]},
         exchange = exch,
@@ -137,7 +137,7 @@ def test_settler_relayer_success_returns_relayer():
             return True
 
     exch    = PaperExchange()
-    settler = Settler(relayer_client=FakeRelayer())
+    settler = ExitSettler(relayer_client=FakeRelayer())
     result  = settler.settle(
         event = {"condition_id": "c1", "token_ids": []},
         exchange = exch,
@@ -152,7 +152,7 @@ def test_settler_relayer_failure_falls_back():
 
     exch = PaperExchange()
     exch.place_order("tok1", "BUY", 10.0, 0.50)
-    settler = Settler(relayer_client=BrokenRelayer())
+    settler = ExitSettler(relayer_client=BrokenRelayer())
     result  = settler.settle(
         event    = {"condition_id": "c1", "token_ids": ["tok1"]},
         exchange = exch,

@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 
@@ -189,30 +190,69 @@ def test_context_manager_closes(tmp_dir) -> None:
 
 
 # ---------------------------------------------------------------------------
-# bot_state KV table
+# bot_state KV table (private helpers)
 # ---------------------------------------------------------------------------
 
 
 def test_set_and_get_bot_state() -> None:
     db = DbClient(":memory:")
-    db.set_bot_state("data_stale", '{"station": "KLGA"}')
-    assert db.get_bot_state("data_stale") == '{"station": "KLGA"}'
+    db._set_bot_state("data_stale", '{"station": "KLGA"}')
+    assert db._get_bot_state("data_stale") == '{"station": "KLGA"}'
 
 
 def test_get_bot_state_absent_returns_none() -> None:
     db = DbClient(":memory:")
-    assert db.get_bot_state("nonexistent") is None
+    assert db._get_bot_state("nonexistent") is None
 
 
 def test_set_bot_state_upsert_overwrites() -> None:
     db = DbClient(":memory:")
-    db.set_bot_state("key", "first")
-    db.set_bot_state("key", "second")
-    assert db.get_bot_state("key") == "second"
+    db._set_bot_state("key", "first")
+    db._set_bot_state("key", "second")
+    assert db._get_bot_state("key") == "second"
 
 
 def test_set_bot_state_none_clears() -> None:
     db = DbClient(":memory:")
-    db.set_bot_state("key", "something")
-    db.set_bot_state("key", None)
-    assert db.get_bot_state("key") is None
+    db._set_bot_state("key", "something")
+    db._set_bot_state("key", None)
+    assert db._get_bot_state("key") is None
+
+
+# ---------------------------------------------------------------------------
+# Typed staleness accessors
+# ---------------------------------------------------------------------------
+
+
+def test_set_and_get_data_stale() -> None:
+    db = DbClient(":memory:")
+    t = datetime(2026, 5, 15, 12, 0, 0, tzinfo=timezone.utc)
+    db.set_data_stale("KLGA", t)
+    result = db.get_data_stale()
+    assert result is not None
+    station, occurred_at = result
+    assert station == "KLGA"
+    assert occurred_at == t
+
+
+def test_set_data_stale_none_station() -> None:
+    db = DbClient(":memory:")
+    t = datetime(2026, 5, 15, tzinfo=timezone.utc)
+    db.set_data_stale(None, t)
+    result = db.get_data_stale()
+    assert result is not None
+    station, occurred_at = result
+    assert station is None
+    assert occurred_at == t
+
+
+def test_get_data_stale_absent_returns_none() -> None:
+    db = DbClient(":memory:")
+    assert db.get_data_stale() is None
+
+
+def test_clear_data_stale() -> None:
+    db = DbClient(":memory:")
+    db.set_data_stale(None, datetime(2026, 5, 15, tzinfo=timezone.utc))
+    db.clear_data_stale()
+    assert db.get_data_stale() is None

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -359,10 +360,14 @@ class DbClient:
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
-    # Bot state (cross-process key-value store for UI/bot communication)
+    # Bot state (cross-process key-value for UI/bot communication)
+    # ------------------------------------------------------------------
+    # Typed accessors below are the public interface.  The two private
+    # helpers (_set_bot_state / _get_bot_state) are implementation detail
+    # and should not be called outside this class.
     # ------------------------------------------------------------------
 
-    def set_bot_state(self, key: str, value_text: str | None) -> None:
+    def _set_bot_state(self, key: str, value_text: str | None) -> None:
         """Upsert *key* in bot_state.  Pass None to clear the entry."""
         if value_text is None:
             self._conn.execute("DELETE FROM bot_state WHERE key=?", (key,))
@@ -379,13 +384,43 @@ class DbClient:
             )
         self._conn.commit()
 
-    def get_bot_state(self, key: str) -> str | None:
+    def _get_bot_state(self, key: str) -> str | None:
         """Return the stored value for *key*, or None if absent."""
         cur = self._conn.execute(
-            "SELECT value_text FROM bot_state WHERE key=?", (key,)
+            "SELECT value_text FROM bot_state WHERE key=?",
+            (key,),
         )
         row = cur.fetchone()
         return row[0] if row else None
+
+    # -- Typed staleness interface --
+    # JSON schema for the 'data_stale' key:
+    #   {"station": str | null, "occurred_at": ISO-8601 str}
+    # Both writer (TradingLoop) and reader (UI) go through these methods;
+    # neither side touches the raw JSON.
+
+    def set_data_stale(self, station: str | None, occurred_at: datetime) -> None:
+        """Record a data_stale event from TradingLoop."""
+        self._set_bot_state(
+            "data_stale",
+            json.dumps({"station": station, "occurred_at": occurred_at.isoformat()}),
+        )
+
+    def clear_data_stale(self) -> None:
+        """Remove the data_stale entry (called on recovery, if needed)."""
+        self._set_bot_state("data_stale", None)
+
+    def get_data_stale(self) -> tuple[str | None, datetime] | None:
+        """Return (station, occurred_at) if a stale alert is recorded, else None."""
+        raw = self._get_bot_state("data_stale")
+        if raw is None:
+            return None
+        try:
+            data = json.loads(raw)
+            occurred_at = datetime.fromisoformat(data["occurred_at"])
+            return data.get("station"), occurred_at
+        except (json.JSONDecodeError, KeyError, ValueError):
+            return None
 
     # ------------------------------------------------------------------
     # Lifecycle

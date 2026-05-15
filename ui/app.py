@@ -12,9 +12,7 @@ Sidebar navigation:
 """
 from __future__ import annotations
 
-import json
 import os
-from datetime import datetime
 
 import streamlit as st
 
@@ -49,19 +47,15 @@ def _get_db() -> DbClient:
 def _load_staleness_from_db(db: DbClient) -> StalenessState:
     """Read current staleness from the shared bot_state DB table.
 
-    The bot (TradingLoop) writes to bot_state('data_stale') when it detects
-    a stale forecast.  Because the bot and UI may run as separate processes,
+    The bot (TradingLoop) writes via db.set_data_stale() when it detects a
+    stale forecast.  Because the bot and UI may run as separate processes,
     the DB is the canonical cross-process state store for staleness.
     """
     state = StalenessState()
-    raw = db.get_bot_state("data_stale")
-    if raw:
-        try:
-            data = json.loads(raw)
-            occurred_at = datetime.fromisoformat(data["occurred_at"])
-            state.mark_stale(occurred_at, data.get("station"))
-        except (json.JSONDecodeError, KeyError, ValueError):
-            pass
+    result = db.get_data_stale()
+    if result is not None:
+        station, occurred_at = result
+        state.mark_stale(occurred_at, station)
     return state
 
 

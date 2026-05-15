@@ -15,7 +15,6 @@ References: ADR-0004 (two-loop design), ADR-0006 (stale-data halt).
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -26,10 +25,6 @@ from core.probability_store import ProbabilitySnapshot, ProbabilityStore
 from core.risk.pipeline import RiskPipeline
 from core.strategy.multi import MultiStrategy
 from data.clob.orderbook import OrderbookReader
-
-# Key used in the bot_state KV table to communicate staleness to the UI.
-# Schema: {"station": str | None, "occurred_at": ISO-8601 str}
-_BOT_STATE_KEY_STALE = "data_stale"
 
 if TYPE_CHECKING:
     from config.settings import Settings
@@ -120,10 +115,7 @@ class TradingLoop:
                 context     = {"age_min": age_min},
             )
         )
-        self._db.set_bot_state(
-            _BOT_STATE_KEY_STALE,
-            json.dumps({"station": station, "occurred_at": occurred_at.isoformat()}),
-        )
+        self._db.set_data_stale(station, occurred_at)
 
     async def _is_fresh(
         self,

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 _FALLBACK_SELL_PRICE = 0.99
 
 
-class Settler:
+class ExitSettler:
     """Settle expired events by closing all open YES positions.
 
     Parameters

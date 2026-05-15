@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 import pandas as pd
 from loguru import logger
 
+from core.settlement_resolver import SettlementResolver
+
 if TYPE_CHECKING:
     from core.exchange.settlement import SettlementRelayer
     from core.positions import PositionTracker
@@ -60,6 +62,7 @@ class SettlementLoop:
         self._db               = db
         self._relayer          = relayer
         self._interval_seconds = interval_seconds
+        self._resolver         = SettlementResolver(db)
 
     # ------------------------------------------------------------------
     # Settlement logic
@@ -130,47 +133,15 @@ class SettlementLoop:
 
     def _settle_from_obs(self, condition_id: str, actual_max_temp: float) -> None:
         """Apply YES/NO payout logic and mark the event settled."""
-        # Build token_id -> (bucket_lo_f, bucket_hi_f, outcome) map
-        markets = self._db.get_markets_for_event(condition_id)
-        token_market: dict[str, tuple[float, float, str]] = {}
-        for mkt in markets:
-            lo = mkt.get("bucket_lo_f")
-            hi = mkt.get("bucket_hi_f")
-            if lo is not None and hi is not None:
-                token_market[mkt["token_id"]] = (
-                    float(lo),
-                    float(hi),
-                    (mkt.get("outcome") or "YES").upper(),
-                )
-
-        orders = self._db.get_orders_for_settlement(condition_id)
-        for order in orders:
-            order_id = order["order_id"]
-            token_id = order["token_id"]
-            size_usd = float(order.get("size_usd") or 0.0)
-
-            entry = token_market.get(token_id)
-            if entry is not None:
-                lo, hi, outcome = entry
-                in_bucket = lo <= actual_max_temp < hi
-                if outcome == "YES":
-                    payout = size_usd if in_bucket else 0.0
-                else:  # "NO"
-                    payout = size_usd if not in_bucket else 0.0
-            else:
-                logger.warning(
-                    "SettlementLoop: token_id {} has no market entry; payout=0",
-                    token_id,
-                )
-                payout = 0.0
-
-            self._positions.mark_settled(order_id, payout)
-
+        settlements = self._resolver.resolve_from_obs(condition_id, actual_max_temp)
+        for s in settlements:
+            self._positions.mark_settled(s.order_id, s.payout)
         self._lifecycle.set_settled(condition_id, self._db)
         logger.info(
-            "SettlementLoop: event {} settled via IEM (max_temp={:.1f}F)",
+            "SettlementLoop: event {} settled via IEM (max_temp={:.1f}F, orders={})",
             condition_id,
             actual_max_temp,
+            len(settlements),
         )
 
     def _try_relayer_fallback(self, condition_id: str) -> None:
