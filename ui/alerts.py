@@ -1,18 +1,17 @@
-"""AlertBus handlers and shared staleness state for the PolyWeatherBot UI.
+"""Shared staleness state for the PolyWeatherBot UI.
 
 Separates testable logic from Streamlit-specific wiring in app.py.
 All objects in this module are safe to import in tests without a running
 Streamlit context.
+
+Note: the UI runs as a separate process from the bot.  Staleness state is
+read from the bot_state DB table (written by TradingLoop) on each render;
+there is no in-process AlertBus subscription.  See ui/app.py and ADR-0006.
 """
 from __future__ import annotations
 
 from datetime import datetime
 from threading import Lock
-from typing import Callable, Awaitable
-
-from loguru import logger
-
-from core.alerts import AlertBus, AlertEvent
 
 
 class StalenessState:
@@ -60,38 +59,3 @@ class StalenessState:
     def station(self) -> str | None:
         with self._lock:
             return self._station
-
-
-def make_data_stale_handler(
-    state: StalenessState,
-) -> Callable[[AlertEvent], Awaitable[None]]:
-    """Return an async AlertBus handler that marks *state* stale on
-    ``data_stale`` events.  Non-matching alert types are silently ignored."""
-
-    async def handler(event: AlertEvent) -> None:
-        if event.alert_type == "data_stale":
-            state.mark_stale(event.occurred_at, event.station)
-
-    return handler
-
-
-async def telegram_stub_handler(event: AlertEvent) -> None:
-    """Telegram stub: logs at DEBUG level and does nothing else.
-
-    Full Telegram routing is deferred (see Deferred Register in
-    docs/issues/proposed-slices.md).
-    """
-    logger.debug(
-        "Telegram not yet implemented (alert_type={})", event.alert_type
-    )
-
-
-def register_ui_handlers(bus: AlertBus, state: StalenessState) -> None:
-    """Register all UI alert handlers on *bus*.
-
-    Wires:
-    - ``make_data_stale_handler(state)`` for staleness state tracking.
-    - ``telegram_stub_handler`` for stub Telegram fanout.
-    """
-    bus.subscribe(make_data_stale_handler(state))
-    bus.subscribe(telegram_stub_handler)

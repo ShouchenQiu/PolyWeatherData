@@ -11,7 +11,12 @@ advance() call.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pandas as pd
+
+if TYPE_CHECKING:
+    from db.schema import DbClient
 
 
 # State constants (kept as plain strings so they match the DB column value)
@@ -90,13 +95,13 @@ class EventLifecycle:
 
         return ACTIVE
 
-    def set_settled(self, event_id: str, db: object) -> None:
+    def set_settled(self, event_id: str, db: "DbClient") -> None:
         """Write the 'settled' terminal state for *event_id* to the DB.
 
         Must be called explicitly after all orders have been marked;
         advance() never transitions to 'settled' automatically.
         """
-        db.update_event_status(event_id, SETTLED)  # type: ignore[union-attr]
+        db.update_event_status(event_id, SETTLED)
 
     def is_tradeable(self, event: dict, now_utc: pd.Timestamp) -> bool:
         """Return True if signals may be generated for this event.
