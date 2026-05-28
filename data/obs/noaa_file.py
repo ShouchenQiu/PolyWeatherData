@@ -82,7 +82,8 @@ class NoaaFileSource(BaseObsSource):
     -----
     - HEAD the URL to check Last-Modified without downloading the body.
     - GET the URL to retrieve the METAR text.
-    - Parse the METAR into the clean schema.
+    - Parse the METAR into the clean schema. The parsed valid_time remains
+      the raw METAR time; Cleaner.clean_iem() stores the nearest whole hour.
     - Return empty DataFrame if the observation timestamp is outside
       the requested [start, end] window.
     """
@@ -108,6 +109,22 @@ class NoaaFileSource(BaseObsSource):
         end: pd.Timestamp,
         now_utc: "pd.Timestamp | None" = None,
     ) -> pd.DataFrame:
+        """Fetch the latest NOAA METAR if it falls in the requested window.
+
+        When now_utc is provided (tick mode), this mirrors IEM: the latest
+        METAR must be the H-1 :51 observation, which later rounds to the
+        current whole hour during shared obs cleaning.
+        """
+        if now_utc is not None:
+            now_utc_aware = (
+                now_utc.tz_localize("UTC") if now_utc.tzinfo is None
+                else now_utc.tz_convert("UTC")
+            )
+            hour_back = now_utc_aware - pd.Timedelta(hours=1)
+            target_dt = hour_back.replace(minute=51, second=0, microsecond=0)
+            start = target_dt - pd.Timedelta(seconds=30)
+            end = target_dt + pd.Timedelta(seconds=30)
+
         url = _TGFTP_URL_TPL.format(station=station.station_id)
         try:
             resp = self._session.get(url, timeout=self._timeout)
@@ -205,17 +222,20 @@ class NoaaFileSource(BaseObsSource):
             dir_s = w_m.group("dir")
             spd   = float(w_m.group("spd"))
             gust  = float(w_m.group("gust")) if w_m.group("gust") else spd
-            drct  = 0.0 if dir_s == "VRB" else float(dir_s)
+            drct  = float("nan") if dir_s == "VRB" else float(dir_s)
         else:
             spd = gust = drct = float("nan")
 
         row["raw_wind_spd_kt"]  = spd
         row["raw_wind_gust_kt"] = gust
 
-        dir_rad = np.deg2rad(0.0 if np.isnan(drct) else drct)
-        spd_v   = 0.0 if np.isnan(spd) else spd
-        row["obs_U"] = -spd_v * float(np.sin(dir_rad))
-        row["obs_V"] = -spd_v * float(np.cos(dir_rad))
+        if np.isnan(spd) or np.isnan(drct):
+            row["obs_U"] = float("nan")
+            row["obs_V"] = float("nan")
+        else:
+            dir_rad = np.deg2rad(drct)
+            row["obs_U"] = -spd * float(np.sin(dir_rad))
+            row["obs_V"] = -spd * float(np.cos(dir_rad))
 
         # Visibility
         v_m = _RE_VIS.search(metar_line)

@@ -99,6 +99,18 @@ def test_parse_csv_wind_fields():
     assert not pd.isna(df["raw_wind_spd_kt"].iloc[0])
 
 
+def test_parse_csv_missing_wind_direction_leaves_uv_nan():
+    csv = (
+        "station,valid,tmpf,dwpf,drct,sknt,p01i,alti,vsby,gust,skyc1,wxcodes,metar\n"
+        "LGA,2026-01-01 13:51,35.0,25.0,,10,0.0,29.92,10,,CLR,,"
+        "KLGA 011351Z 10KT 10SM CLR T00280025\n"
+    )
+    src = IemSource()
+    df = src._parse_csv(csv)
+    assert pd.isna(df["obs_U"].iloc[0])
+    assert pd.isna(df["obs_V"].iloc[0])
+
+
 def test_parse_csv_sky_cover_numeric():
     src = IemSource()
     df = src._parse_csv(_IEM_CSV)
@@ -206,6 +218,16 @@ def test_noaa_parse_txt_wind():
     assert row["raw_wind_gust_kt"] == pytest.approx(18.0)
 
 
+def test_noaa_parse_vrb_wind_leaves_uv_nan():
+    txt = "2026/01/01 13:51\nKLGA 011351Z VRB10KT 10SM CLR 12/10 A2980\n"
+    src = NoaaFileSource()
+    row = src._parse_txt(txt)
+    assert row is not None
+    assert row["raw_wind_spd_kt"] == pytest.approx(10.0)
+    assert pd.isna(row["obs_U"])
+    assert pd.isna(row["obs_V"])
+
+
 def test_noaa_parse_txt_altimeter():
     # A2979 -> 29.79 inHg
     src = NoaaFileSource()
@@ -276,6 +298,53 @@ def test_noaa_fetch_inside_window_returns_row():
         )
     assert len(df) == 1
     assert df["raw_tmpc_tenths"].iloc[0] == pytest.approx(13.9, abs=0.01)
+
+
+def test_noaa_fetch_tick_mode_accepts_h_minus_one_51_metar():
+    txt = (
+        "2026/01/01 13:51\n"
+        "KLGA 011351Z 22012KT 10SM OVC055 14/03 A2979 "
+        "RMK AO2 T01390028\n"
+    )
+    src = NoaaFileSource()
+    with patch.object(src._session, "get") as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.text = txt
+        mock_resp.raise_for_status = lambda: None
+        mock_get.return_value = mock_resp
+
+        df = src.fetch(
+            _STATION,
+            start=pd.Timestamp("2030-01-01", tz="UTC"),
+            end=pd.Timestamp("2030-01-01", tz="UTC"),
+            now_utc=pd.Timestamp("2026-01-01 14:00", tz="UTC"),
+        )
+
+    assert len(df) == 1
+    assert df["valid_time"].iloc[0] == pd.Timestamp("2026-01-01 13:51:00+00:00")
+
+
+def test_noaa_fetch_tick_mode_rejects_metar_outside_51_window():
+    txt = (
+        "2026/01/01 13:49\n"
+        "KLGA 011349Z 22012KT 10SM OVC055 14/03 A2979 "
+        "RMK AO2 T01390028\n"
+    )
+    src = NoaaFileSource()
+    with patch.object(src._session, "get") as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.text = txt
+        mock_resp.raise_for_status = lambda: None
+        mock_get.return_value = mock_resp
+
+        df = src.fetch(
+            _STATION,
+            start=pd.Timestamp("2026-01-01 13:00", tz="UTC"),
+            end=pd.Timestamp("2026-01-01 14:00", tz="UTC"),
+            now_utc=pd.Timestamp("2026-01-01 14:00", tz="UTC"),
+        )
+
+    assert len(df) == 0
 
 
 def test_noaa_parse_fractional_visibility():

@@ -327,8 +327,10 @@ class DataManager:
                 f"(have {len(merged)}, need {n_hours})"
             )
 
-        if "TMP_2m" in merged.columns and "tmpc" in merged.columns:
-            merged["temp_error"] = merged["tmpc"] - merged["TMP_2m"]
+        if "TMP_2m" in merged.columns and (
+            "raw_tmpc_tenths" in merged.columns or "tmpc" in merged.columns
+        ):
+            merged = Cleaner.compute_temp_error(merged)
             merged = merged.dropna(subset=["temp_error"]).reset_index(drop=True)
 
         if len(merged) < n_hours:
@@ -339,4 +341,3 @@ class DataManager:
             )
 
         return merged.tail(n_hours).reset_index(drop=True)
-

@@ -190,11 +190,12 @@ class BotManager:
 
     async def run(self) -> None:
         """Launch all loops concurrently.  Runs until cancelled."""
-        await asyncio.gather(
+        tasks = [
             self.forecast_loop.run(),
             self.trading_loop.run(),
-            self.sniper_loop.run(),
-            self.snipers.start_all(),
             self.discovery_loop.run(),
             self.settlement_loop.run(),
-        )
+        ]
+        if self.settings.enable_sniper:
+            tasks.append(self.sniper_loop.run())
+        await asyncio.gather(*tasks)

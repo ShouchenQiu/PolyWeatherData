@@ -63,7 +63,8 @@ class IemSource(BaseObsSource):
 
     Field mapping
     -------------
-    valid          -> valid_time  (converted to UTC-aware)
+    valid          -> valid_time  (raw METAR time, converted to UTC-aware;
+                                    Cleaner stores nearest whole hour)
     tmpf           -> raw_tmpc_tenths  (F->C; T-group from metar if present)
     dwpf           -> raw_dwpc_tenths  (F->C; T-group from metar if present)
     sknt           -> raw_wind_spd_kt
@@ -95,7 +96,8 @@ class IemSource(BaseObsSource):
         ----------
         now_utc:
             When provided (tick mode), start/end are ignored.  Instead only
-            the :51 reading for H-1 is fetched: the narrow window
+            the H-1 :51 reading is fetched as the representative observation
+            for the nearest whole hour: the narrow window
             [target_dt - 30s, target_dt + 30s] where
             target_dt = (now_utc - 1h).replace(minute=51).
         """
@@ -213,11 +215,13 @@ class IemSource(BaseObsSource):
         out["raw_wind_spd_kt"]  = spd.values
         out["raw_wind_gust_kt"] = gust.values
 
-        # Wind U/V decomposition
-        dir_rad = np.deg2rad(drct.fillna(0.0).values)
-        spd_filled = spd.fillna(0.0).values
-        out["obs_U"] = -spd_filled * np.sin(dir_rad)
-        out["obs_V"] = -spd_filled * np.cos(dir_rad)
+        # Wind U/V decomposition. Preserve missing/variable direction as NaN;
+        # Cleaner.clean_iem() performs the common time-series fill.
+        valid_wind = spd.notna() & drct.notna()
+        dir_rad = np.deg2rad(drct.where(valid_wind).values)
+        spd_vals = spd.where(valid_wind).values
+        out["obs_U"] = -spd_vals * np.sin(dir_rad)
+        out["obs_V"] = -spd_vals * np.cos(dir_rad)
 
         # Visibility and pressure
         out["raw_vis_sm"]    = _col("vsby").values

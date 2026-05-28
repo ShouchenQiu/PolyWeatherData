@@ -906,8 +906,7 @@ All loops run as `asyncio` coroutines within the single `BotManager.run()` gathe
 ```python
 await asyncio.gather(
     _forecast_hourly(),      # ForecastLoop every 60 min
-    sniper_loop.run(),       # SniperLoop ¡ª processes queue
-    self.snipers.start_all(),# SniperManager ¡ª polls AWC + NOAA
+    sniper_loop.run(),       # SniperLoop owns source polling + queue processing
     self.discovery_loop.run(),   # DiscoveryLoop every 24h
     self.settlement_loop.run(),  # SettlementLoop every 1h
 )
@@ -948,16 +947,13 @@ On each tick:
 
 ### `loops/sniper_loop.py` ¡ª `SniperLoop`
 
-Consumes the `SniperManager.queue` of new METAR observations.
+Runs the full sniper subsystem: starts `SniperManager` source polling and consumes
+the `SniperManager.queue` of new METAR observations.
 
 For each observation dequeued:
 1. Parse the METAR text to extract current temperature.
-2. Re-run `ModelPipeline.run()` with the new observation as an additional encoder data point.
-3. Execute the same signal ¡ú risk ¡ú exchange flow as `ForecastLoop.tick()`.
-
-The pipeline benefits from the real-time observation because it updates the TFT encoder's
-most recent observation row, potentially improving the probability estimate moments before the
-market closes at the 21:00 UTC cutoff.
+2. Identify the matching temperature bucket from active tradeable events.
+3. Submit ground-truth BUY signals through risk, exchange, and position recording.
 
 ---
 
@@ -997,6 +993,7 @@ Polls the NOAA tgftp file server.
 - Launches all source pollers concurrently via `asyncio.gather`.
 - Deduplicates observations: stripped METAR text is added to `seen_obs` set; duplicates are silently dropped.
 - Places new unique observations into `asyncio.Queue` for consumption by `SniperLoop`.
+- Does not consume the queue or submit trades; `SniperLoop` owns that lifecycle.
 
 **Callback signature used by snipers:**
 ```python

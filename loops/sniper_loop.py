@@ -8,7 +8,9 @@ the true temperature bucket, then places:
 """
 from __future__ import annotations
 
+import asyncio
 import re
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -91,12 +93,25 @@ class SniperLoop:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        """Consume the sniper queue indefinitely.
+        """Run the full sniper subsystem until cancelled.
 
-        Each item dequeued triggers a ground-truth BUY cycle.  The loop
-        exits only when the task is cancelled.
+        Starts source polling via SniperManager and consumes the resulting
+        queue in parallel.  The loop exits only when the task is cancelled
+        or a source task fails.
         """
         logger.info("SniperLoop started")
+        try:
+            await asyncio.gather(
+                self._consume_queue(),
+                self.sniper_mgr.start_all(),
+            )
+        finally:
+            stop_all = getattr(self.sniper_mgr, "stop_all", None)
+            if stop_all is not None:
+                await stop_all()
+
+    async def _consume_queue(self) -> None:
+        """Consume queued METAR observations and process each independently."""
         while True:
             metar_text, source, timestamp = await self.sniper_mgr.queue.get()
             logger.debug("SniperLoop: new METAR from {} at {}", source, timestamp)
@@ -130,7 +145,11 @@ class SniperLoop:
             "SniperLoop: actual_temp_f={:.1f} from {}", actual_temp_f, source
         )
 
-        active_events = self.db.get_active_events()
+        now_date = datetime.now(timezone.utc).date().isoformat()
+        if hasattr(self.db, "get_tradeable_events"):
+            active_events = self.db.get_tradeable_events(now_date)
+        else:
+            active_events = self.db.get_active_events()
 
         for event in active_events:
             condition_id = event["condition_id"]
@@ -141,8 +160,29 @@ class SniperLoop:
             # Build per-bucket lookup: {(lo_f, hi_f): {"YES": token_id, "NO": token_id}}
             bucket_tokens: dict[tuple[float, float], dict[str, str]] = {}
             for mkt in markets:
-                lo  = float(mkt.get("bucket_lo_f") or float("-inf"))
-                hi  = float(mkt.get("bucket_hi_f") or float("inf"))
+                raw_lo = mkt.get("bucket_lo_f")
+                raw_hi = mkt.get("bucket_hi_f")
+                if raw_lo is None or raw_hi is None:
+                    logger.warning(
+                        "SniperLoop: market {} has missing bucket bounds, skipping",
+                        mkt.get("token_id"),
+                    )
+                    continue
+                try:
+                    lo = float(raw_lo)
+                    hi = float(raw_hi)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "SniperLoop: market {} has invalid bucket bounds ({}, {}), skipping",
+                        mkt.get("token_id"), raw_lo, raw_hi,
+                    )
+                    continue
+                if lo >= hi:
+                    logger.warning(
+                        "SniperLoop: market {} has non-increasing bucket ({}, {}), skipping",
+                        mkt.get("token_id"), lo, hi,
+                    )
+                    continue
                 out = str(mkt.get("outcome", "")).upper()
                 if out not in ("YES", "NO"):
                     continue
@@ -167,11 +207,14 @@ class SniperLoop:
                     continue
 
                 # Fetch best ask from orderbook; fall back to 0.95
-                try:
-                    book  = self.orderbook.get_book(token_id)
-                    price = book.get("best_ask") or book.get("mid_price") or 0.95
-                except Exception:
+                if self.orderbook is None:
                     price = 0.95
+                else:
+                    try:
+                        book  = self.orderbook.get_book(token_id)
+                        price = book.get("best_ask") or book.get("mid_price") or 0.95
+                    except Exception:
+                        price = 0.95
 
                 sig = Signal(
                     token_id     = token_id,
@@ -195,6 +238,12 @@ class SniperLoop:
                     outcome_key, token_id, price, size,
                 )
                 order_id = self.exchange.place_order(token_id, "BUY", size, price)
+                if not order_id:
+                    logger.error(
+                        "SniperLoop: empty order_id for token {}; order not recorded",
+                        token_id,
+                    )
+                    continue
                 self.positions.record_order(
                     order_id, token_id, condition_id, "BUY", size, price
                 )

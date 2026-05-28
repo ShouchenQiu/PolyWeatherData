@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -10,6 +10,7 @@ import pytest
 from config.stations import STATIONS
 from core.probability_store import ProbabilityStore
 from data.manager import DataManager
+from data.obs.noaa_file import NoaaFileSource
 from db.schema import DbClient
 from loops.forecast_loop import ForecastLoop
 
@@ -132,7 +133,7 @@ def test_data_manager_appends_to_store_on_success(tmp_path, station):
 
 
 def test_data_manager_obs_fallback_on_incomplete_data(station):
-    """fetch_iem falls back when first source returns non-empty but all-NaN tmpc."""
+    """fetch_iem falls back when first source returns non-empty but all-NaN raw temp."""
     import numpy as np
     incomplete = MagicMock()
     incomplete.fetch.return_value = pd.DataFrame({
@@ -158,7 +159,7 @@ def test_data_manager_obs_fallback_on_incomplete_data(station):
 
 
 def test_data_manager_fetch_hrrr_stores_cleaned_data(station):
-    """fetch_hrrr applies Cleaner before storing: TMP_2m in Celsius, u_wind added."""
+    """fetch_hrrr applies Cleaner before storing: TMP_2m in Celsius, wind features added."""
     init = pd.Timestamp("2026-03-25 12:00:00+00:00")
     fxx_vals = list(range(1, 49))
     raw_src = MagicMock()
@@ -176,20 +177,23 @@ def test_data_manager_fetch_hrrr_stores_cleaned_data(station):
     df = mgr.fetch_hrrr(pd.Timestamp("2026-03-25 12:00:00+00:00"), station)
 
     assert df["TMP_2m"].iloc[0] == pytest.approx(280.0 - 273.15, abs=0.01)
-    assert "u_wind" in df.columns
-    assert "v_wind" in df.columns
+    assert df["UGRD_10m"].iloc[0] == pytest.approx(10.0)
+    assert "WS_10m" in df.columns
+    assert df["WS_10m"].iloc[0] == pytest.approx((10.0 ** 2 + 5.0 ** 2) ** 0.5)
     appended_df = store.append.call_args[0][1]
     assert appended_df["TMP_2m"].iloc[0] == pytest.approx(280.0 - 273.15, abs=0.01)
-    assert "u_wind" in appended_df.columns
+    assert "WS_10m" in appended_df.columns
 
 
 def test_data_manager_fetch_iem_stores_cleaned_data(station):
-    """fetch_iem applies Cleaner before storing: tmpc alias and raw cols both present."""
+    """fetch_iem applies Cleaner before storing canonical raw obs columns."""
     raw_src = MagicMock()
     raw_src.fetch.return_value = pd.DataFrame({
         "valid_time":      [pd.Timestamp("2026-03-25 12:51:00+00:00")],
         "raw_tmpc_tenths": [8.5],
         "raw_dwpc_tenths": [3.2],
+        "obs_U": [3.0],
+        "obs_V": [4.0],
     })
     store = MagicMock()
     store.append.return_value = 1
@@ -200,11 +204,50 @@ def test_data_manager_fetch_iem_stores_cleaned_data(station):
         pd.Timestamp("2026-03-25 12:52:00+00:00"),
     )
 
-    assert "tmpc" in df.columns
-    assert df["tmpc"].iloc[0] == pytest.approx(8.5)
     assert "raw_tmpc_tenths" in df.columns
+    assert df["raw_tmpc_tenths"].iloc[0] == pytest.approx(8.5)
+    assert "tmpc" not in df.columns
+    assert "obs_WS" in df.columns
+    assert df["obs_WS"].iloc[0] == pytest.approx(5.0)
+    assert df["valid_time"].iloc[0] == pd.Timestamp("2026-03-25 13:00:00+00:00")
     appended_df = store.append.call_args[0][1]
-    assert "tmpc" in appended_df.columns
+    assert "raw_tmpc_tenths" in appended_df.columns
+    assert "tmpc" not in appended_df.columns
+    assert appended_df["valid_time"].iloc[0] == pd.Timestamp(
+        "2026-03-25 13:00:00+00:00"
+    )
+
+
+def test_data_manager_noaa_tick_fallback_stores_representative_hour(station):
+    """NOAA tick fallback accepts H-1 :51 and stores it as the current hour."""
+    bad = MagicMock()
+    bad.fetch.side_effect = RuntimeError("IEM down")
+    noaa = NoaaFileSource()
+    txt = (
+        "2026/03/25 13:51\n"
+        "KLGA 251351Z 22012KT 10SM OVC055 14/03 A2979 "
+        "RMK AO2 T01390028\n"
+    )
+    store = MagicMock()
+    store.append.return_value = 1
+    mgr = DataManager([], [bad, noaa], store, store)
+
+    with patch.object(noaa._session, "get") as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.text = txt
+        mock_resp.raise_for_status = lambda: None
+        mock_get.return_value = mock_resp
+
+        df = mgr.fetch_latest_iem_tick(
+            station,
+            pd.Timestamp("2026-03-25 14:00:00+00:00"),
+        )
+
+    assert df["valid_time"].iloc[0] == pd.Timestamp("2026-03-25 14:00:00+00:00")
+    appended_df = store.append.call_args[0][1]
+    assert appended_df["valid_time"].iloc[0] == pd.Timestamp(
+        "2026-03-25 14:00:00+00:00"
+    )
 
 
 def test_data_manager_fetch_iem_fallback(station):

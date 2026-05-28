@@ -71,7 +71,7 @@ def _make_encoder_df(init_time: pd.Timestamp) -> pd.DataFrame:
         {
             "valid_time": init_time - pd.Timedelta(hours=72 - h),
             "TMP_2m":     5.0 + h * 0.1,
-            "tmpc":       6.0 + h * 0.1,
+            "raw_tmpc_tenths": 6.0 + h * 0.1,
         }
         for h in range(72)
     ]
@@ -353,4 +353,3 @@ def test_pipeline_without_registry_uses_zero_bias():
     pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
 
     assert captured["max_bias"] == pytest.approx(0.0)
-
