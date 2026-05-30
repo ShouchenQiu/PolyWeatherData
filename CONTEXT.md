@@ -120,10 +120,18 @@ ProbabilityStore, check staleness, run strategy+risk, submit orders to CLOB.
 Runs continuously until all active Events are settled; never has a cutoff hour.
 _Avoid_: main loop
 
+**day_offset**: Integer offset from `init_utc.date()` (UTC) to the target Event's
+`event_end_date`; values in {0, 1, 2} meaning today/tomorrow/day-after. Used as part
+of the ProbabilityStore key `(condition_id, day_offset)`. Controls which local-calendar-day
+boundary the pipeline uses to filter fxx hours for the daily-high computation: the
+target window is `[target_local_day 00:00, target_local_day 24:00)` in the station's
+local timezone, converted to UTC and mapped to fxx offsets from init_time.
+_Avoid_: day index, target day index
+
 **ProbabilityStore**: The in-process shared-memory object written by ForecastLoop and
-read by TradingLoop. Holds, per condition_id ¡Á day_offset ¡Á bucket: the MC bucket
-probability, plus the TFT p10/p50/p90 quantiles for each decoder hour, plus
-`last_tick_utc` for staleness computation.
+read by TradingLoop. Holds per `(condition_id, day_offset)` key: a `ProbabilitySnapshot`
+containing the per-bucket `mc_prob` float map, the `quantiles_by_fxx` dict (shared
+across all buckets for the same key), and `last_tick_utc` for staleness computation.
 _Avoid_: probability cache, result store
 
 **DiscoveryLoop**: The hourly recurring cycle that fetches all currently-active
@@ -156,8 +164,12 @@ _Avoid_: parquet file, storage file
   references them by slug only. At any given time 2-3 Events may be concurrently active.
 - **TradingLoop** iterates over all active Events each tick; it runs until every
   active Event is settled - there is no cutoff hour.
-- **cold-start** rows (first 72 h of any dataset) are dropped by **Cleaner** before
-  any model input or backtest entry.
+- **cold-start period**: the first `cold_start_hours` (72 h) of any dataset/station are
+  a data-pipeline burn-in window; **Cleaner** drops these rows permanently at write time.
+  Distinct from encoder_length (also 72 h): the two constraints are additive, so the
+  first eligible `init_time` for a new dataset is `data_start + 144 h`.
+- **first eligible init**: `data_start + cold_start_hours + encoder_length`; the earliest
+  `init_time` at which `DataManager.inference_readiness()` returns `ready=True`.
 - **staleness** is computed by **TradingLoop** as `now - ForecastLoop.last_tick_utc`;
   no other component tracks it.
 

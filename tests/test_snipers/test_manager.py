@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -146,6 +146,112 @@ def test_noaa_window_exactly_at_end_rolls():
     assert ws.hour == 15
 
 
+class _NoaaResp:
+    def __init__(
+        self,
+        status_code: int,
+        text: str = "",
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.text = text
+        self.headers = headers or {}
+
+
+class _NoaaSession:
+    def __init__(
+        self,
+        head_response: _NoaaResp | Exception | None = None,
+        get_response: _NoaaResp | Exception | None = None,
+    ) -> None:
+        self.head_response = head_response or _NoaaResp(200)
+        self.get_response = get_response or _NoaaResp(200)
+
+    def head(self, *args, **kwargs):
+        if isinstance(self.head_response, Exception):
+            raise self.head_response
+        return self.head_response
+
+    def get(self, *args, **kwargs):
+        if isinstance(self.get_response, Exception):
+            raise self.get_response
+        return self.get_response
+
+
+def test_noaa_head_returns_last_modified():
+    session = _NoaaSession(
+        head_response=_NoaaResp(200, headers={"Last-Modified": "mod-1"})
+    )
+
+    assert NoaaSniper()._head(session) == "mod-1"
+
+
+def test_noaa_head_failure_returns_empty():
+    assert NoaaSniper()._head(_NoaaSession(head_response=_NoaaResp(503))) == ""
+    assert NoaaSniper()._head(_NoaaSession(head_response=RuntimeError("net"))) == ""
+
+
+def test_noaa_get_normalizes_metar_line():
+    session = _NoaaSession(
+        get_response=_NoaaResp(200, "2026/03/25 19:51\n KLGA   251951Z   20/14 ")
+    )
+
+    assert NoaaSniper()._get(session) == "KLGA 251951Z 20/14"
+
+
+def test_noaa_get_failure_returns_none():
+    assert NoaaSniper()._get(_NoaaSession(get_response=_NoaaResp(500))) is None
+    assert NoaaSniper()._get(_NoaaSession(get_response=RuntimeError("net"))) is None
+
+
+def test_noaa_start_retries_idle_callback_failure_and_uses_aware_utc(monkeypatch):
+    """last_mod should advance only after the callback succeeds."""
+    sniper = NoaaSniper()
+    sniper._head = MagicMock(side_effect=["old", "new", "new"])
+    sniper._get = MagicMock(return_value="KLGA 251951Z 20/14")
+    sniper._sniper_window = MagicMock(
+        side_effect=lambda now: (
+            now + timedelta(seconds=60),
+            now + timedelta(seconds=360),
+        )
+    )
+    sniper.IDLE_INTERVAL = 0
+    sessions: list[MagicMock] = []
+
+    def _session_factory():
+        session = MagicMock()
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr("snipers.noaa.requests.Session", _session_factory)
+    sleep_calls = 0
+    seen: list[tuple[str, str, datetime]] = []
+
+    def _callback(raw, source, timestamp):
+        seen.append((raw, source, timestamp))
+        if len(seen) == 1:
+            raise RuntimeError("callback failed")
+
+    async def _sleep(_secs):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls >= 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(sniper.start(_callback))
+
+    assert [item[0] for item in seen] == [
+        "KLGA 251951Z 20/14",
+        "KLGA 251951Z 20/14",
+    ]
+    assert seen[-1][1] == "NOAA"
+    assert seen[-1][2].tzinfo is timezone.utc
+    assert sessions[0].close.called
+
+
 # -----------------------------------------------------------------------
 # AwcSniper._in_sniper_window -- tuple comparison boundary checks
 # -----------------------------------------------------------------------
@@ -176,3 +282,89 @@ def test_awc_in_window_at_end_boundary():
 def test_awc_not_in_window_outside_hour():
     """xx:00:00 is completely outside the window."""
     assert AwcSniper()._in_sniper_window(datetime(2026, 3, 25, 14, 0, 0)) is False
+
+
+# -----------------------------------------------------------------------
+# AwcSniper._get / start -- response normalization and callback behavior
+# -----------------------------------------------------------------------
+
+class _Resp:
+    def __init__(self, status_code: int, text: str = "") -> None:
+        self.status_code = status_code
+        self.text = text
+
+
+class _Session:
+    def __init__(self, response: _Resp | Exception) -> None:
+        self.response = response
+
+    def get(self, *args, **kwargs):
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
+
+
+def test_awc_get_normalizes_first_metar():
+    """AWC responses may contain '$'-separated rows; only newest row is used."""
+    sniper = AwcSniper()
+    session = _Session(_Resp(200, " KLGA   251951Z   20/14  $ KLGA old "))
+
+    assert sniper._get(session) == "KLGA 251951Z 20/14"
+
+
+def test_awc_get_non_200_returns_none():
+    assert AwcSniper()._get(_Session(_Resp(503, "unavailable"))) is None
+
+
+def test_awc_get_exception_returns_none():
+    assert AwcSniper()._get(_Session(RuntimeError("network"))) is None
+
+
+def test_awc_start_warmup_does_not_emit_and_new_obs_uses_aware_utc(monkeypatch):
+    """Warmup seeds seen_obs; the next new METAR is emitted with aware UTC time."""
+    sniper = AwcSniper()
+    sniper._get = MagicMock(side_effect=["KLGA warmup", "KLGA new 20/14"])
+    sniper.NORMAL_INTERVAL = 0
+    sniper.SNIPER_INTERVAL = 0
+    seen: list[tuple[str, str, datetime]] = []
+
+    async def _stop_after_first_sleep(_secs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", _stop_after_first_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(sniper.start(lambda *args: seen.append(args)))
+
+    assert len(seen) == 1
+    assert seen[0][0] == "KLGA new 20/14"
+    assert seen[0][1] == "AWC"
+    assert seen[0][2].tzinfo is timezone.utc
+
+
+def test_awc_start_retries_when_callback_fails(monkeypatch):
+    """A callback failure must not permanently mark the METAR as seen."""
+    sniper = AwcSniper()
+    sniper._get = MagicMock(side_effect=[None, "KLGA new 20/14", "KLGA new 20/14"])
+    sniper.NORMAL_INTERVAL = 0
+    sniper.SNIPER_INTERVAL = 0
+    calls: list[str] = []
+    sleep_calls = 0
+
+    def _callback(raw, _source, _timestamp):
+        calls.append(raw)
+        if len(calls) == 1:
+            raise RuntimeError("callback failed")
+
+    async def _sleep(_secs):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls >= 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(sniper.start(_callback))
+
+    assert calls == ["KLGA new 20/14", "KLGA new 20/14"]

@@ -10,10 +10,12 @@ Polling strategy:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from collections import deque
+from datetime import datetime, timezone
 from typing import Callable
 
 import requests
+from loguru import logger
 
 from snipers.base import BaseSniperSource
 
@@ -24,6 +26,7 @@ _HEADERS = {
 }
 
 _REQUEST_TIMEOUT = 4
+_SEEN_OBS_MAX = 256
 
 
 class AwcSniper(BaseSniperSource):
@@ -65,11 +68,13 @@ class AwcSniper(BaseSniperSource):
         try:
             r = session.get(self._url, timeout=_REQUEST_TIMEOUT)
             if r.status_code != 200:
+                logger.debug("AwcSniper: AWC returned HTTP {}", r.status_code)
                 return None
             # API returns newest-first entries separated by '$'; take only the first
             first = r.text.split("$")[0].strip()
             return " ".join(first.split()) or None
-        except Exception:
+        except Exception as exc:
+            logger.debug("AwcSniper: AWC request failed: {}", exc)
             return None
 
     # ------------------------------------------------------------------
@@ -82,31 +87,41 @@ class AwcSniper(BaseSniperSource):
         session       = requests.Session()
         session.headers.update(_HEADERS)
         seen_obs: set[str] = set()
+        seen_order: deque[str] = deque()
+
+        def _mark_seen(obs: str) -> None:
+            if obs in seen_obs:
+                return
+            seen_obs.add(obs)
+            seen_order.append(obs)
+            while len(seen_order) > _SEEN_OBS_MAX:
+                seen_obs.discard(seen_order.popleft())
 
         # Baseline: pre-seed seen_obs so the current observation is not
         # forwarded as a new capture on the first poll.
         try:
             warmup = await asyncio.to_thread(self._get, session)
             if warmup:
-                seen_obs.add(warmup)
-        except Exception:
-            pass
+                _mark_seen(warmup)
+        except Exception as exc:
+            logger.debug("AwcSniper: warmup fetch failed: {}", exc)
 
         try:
             while self._running:
-                sniper = self._in_sniper_window(datetime.now())
+                now = datetime.now(timezone.utc)
+                sniper = self._in_sniper_window(now)
                 try:
                     raw = await asyncio.to_thread(self._get, session)
                     if raw and raw not in seen_obs:
-                        seen_obs.add(raw)
-                        on_observation(raw, "AWC", datetime.utcnow())
-                except Exception:
-                    pass
+                        on_observation(raw, "AWC", datetime.now(timezone.utc))
+                        _mark_seen(raw)
+                except Exception as exc:
+                    logger.warning("AwcSniper: polling iteration failed: {}", exc)
                 await asyncio.sleep(
                     self.SNIPER_INTERVAL if sniper else self.NORMAL_INTERVAL
                 )
         except asyncio.CancelledError:
-            pass
+            raise
         finally:
             session.close()
 
