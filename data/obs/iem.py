@@ -78,10 +78,15 @@ class IemSource(BaseObsSource):
     wxcodes        -> is_rain, is_snow  (binarised)
     """
 
-    def __init__(self, timeout: int = 60) -> None:
+    def __init__(
+        self,
+        timeout: int = 60,
+        fallback: "BaseObsSource | None" = None,
+    ) -> None:
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "PolyWeatherBot/1.0"})
         self._timeout = timeout
+        self._fallback = fallback
 
     def fetch(
         self,
@@ -148,6 +153,8 @@ class IemSource(BaseObsSource):
 
         csv_text = self._download_csv(params)
         if not csv_text:
+            if self._fallback is not None:
+                return self._fallback.fetch(station, start, end)
             return self._empty_df()
 
         df = self._parse_csv(csv_text)

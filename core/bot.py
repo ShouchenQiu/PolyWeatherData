@@ -58,6 +58,7 @@ class BotManager:
         from data.forecast.hrrr_s3 import HrrrS3Source
         from data.manager import DataManager
         from data.obs.iem import IemSource
+        from data.obs.noaa_file import NoaaFileSource
         from data.storage.parquet_store import ParquetStore
         from db.schema import DbClient
         from events.discovery import EventDiscovery
@@ -69,7 +70,7 @@ class BotManager:
         from loops.trading_loop import TradingLoop
         from model.mc import McSampler
         from model.pipeline import ModelPipeline
-        from model.tft import NullTftModel
+        from model.store.registry import ModelRegistry
         from snipers.awc import AwcSniper
         from snipers.sniper_manager import SniperManager
         from snipers.noaa import NoaaSniper
@@ -88,15 +89,29 @@ class BotManager:
                 HrrrS3Source(base_url=s3_base),
                 HrrrNomadsSource(base_url=nomads_base),
             ],
-            obs_sources      = [IemSource()],
+            obs_sources      = [IemSource(fallback=NoaaFileSource())],
             forecast_store   = forecast_store,
             obs_store        = self.obs_store,
         )
 
         # Model
-        self.mc         = McSampler(settings)
-        self.pipeline   = ModelPipeline(tft=NullTftModel(), mc=self.mc,
-                                        data_mgr=self.data_mgr)
+        registry = ModelRegistry(
+            store_dir = settings.model_store_dir,
+            db        = self.db,
+        )
+        try:
+            tft = registry.load_latest()
+        except (RuntimeError, FileNotFoundError) as exc:
+            raise RuntimeError(
+                f"TFT model file not found at {settings.model_store_dir}"
+            ) from exc
+        self.mc       = McSampler(n_samp=settings.mc_n_samp,
+                                  rng_seed=settings.mc_rng_seed)
+        cov = registry.load_covariance()
+        if cov is not None:
+            self.mc.set_cov(cov)
+        self.pipeline = ModelPipeline(tft=tft, mc=self.mc,
+                                      data_mgr=self.data_mgr)
 
         # Station (default KLGA)
         self.station    = next(iter(STATIONS.values()))

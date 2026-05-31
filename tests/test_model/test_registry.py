@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from loguru import logger
 
 from db.schema import DbClient
 from model.store.registry import ModelRegistry
@@ -95,3 +96,71 @@ def test_calibrate_max_bias_subsequent_load(registry):
     residuals = np.ones((10, 6)) * 2.0
     registry.calibrate_max_bias("KJFK", residuals)
     assert registry.load_max_bias("KJFK") == pytest.approx(2.0)
+
+
+# -----------------------------------------------------------------------
+# load_covariance -- V2V06
+# -----------------------------------------------------------------------
+
+def test_load_covariance_returns_none_when_no_active_version(registry):
+    """When no checkpoint is registered, load_covariance logs WARNING and returns None."""
+    messages: list[str] = []
+    sink_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        result = registry.load_covariance()
+    finally:
+        logger.remove(sink_id)
+    assert result is None
+    assert any("covariance" in m.lower() for m in messages)
+
+
+def test_load_covariance_returns_none_when_file_absent(registry, db, tmp_path):
+    """When covariance.npy is absent, load_covariance returns None with a WARNING."""
+    ckpt = tmp_path / "model.ckpt"
+    ckpt.write_text("fake", encoding="ascii")
+    registry.publish("v1", ckpt, {"train_mae": 0.5, "test_mae": 0.6})
+
+    messages: list[str] = []
+    sink_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        result = registry.load_covariance()
+    finally:
+        logger.remove(sink_id)
+
+    assert result is None
+    assert any("covariance" in m.lower() for m in messages)
+
+
+def test_load_covariance_returns_matrix_when_present(registry, db, tmp_path):
+    """When covariance.npy is present beside the checkpoint, it is returned as ndarray."""
+    ckpt = tmp_path / "model.ckpt"
+    ckpt.write_text("fake", encoding="ascii")
+    registry.publish("v1", ckpt, {"train_mae": 0.5, "test_mae": 0.6})
+
+    # Write covariance.npy in the active version dir
+    version_dir = registry.store_dir / "v1"
+    cov = np.eye(48) * 2.0
+    np.save(version_dir / "covariance.npy", cov)
+
+    result = registry.load_covariance()
+
+    assert result is not None
+    assert isinstance(result, np.ndarray)
+    assert result.shape == (48, 48)
+    np.testing.assert_allclose(result, cov)
+
+
+def test_load_covariance_specific_version(registry, db, tmp_path):
+    """load_covariance(version='v2') loads from that specific version dir."""
+    for v in ("v1", "v2"):
+        ckpt = tmp_path / f"{v}.ckpt"
+        ckpt.write_text("fake", encoding="ascii")
+        registry.publish(v, ckpt, {"train_mae": 0.5, "test_mae": 0.6})
+
+    # Only put covariance in v2
+    cov = np.eye(48) * 3.0
+    np.save(registry.store_dir / "v2" / "covariance.npy", cov)
+
+    result = registry.load_covariance(version="v2")
+    assert result is not None
+    assert result.shape == (48, 48)

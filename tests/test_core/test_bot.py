@@ -231,3 +231,66 @@ def test_hrrr_zarr_bucket_env_overrides_default(monkeypatch):
     monkeypatch.setenv("HRRR_ZARR_BUCKET", "env-zarr-bucket")
     s = Settings()
     assert s.hrrr_zarr_bucket == "env-zarr-bucket"
+
+
+# ---------------------------------------------------------------------------
+# V2V06 -- McSampler construction, NOAA fallback, TFT guard, covariance wiring
+# ---------------------------------------------------------------------------
+
+def test_bot_uses_mc_n_samp_not_settings_object(tmp_path):
+    """Bot must pass settings.mc_n_samp (int) to McSampler, not the Settings object."""
+    from model.mc import McSampler
+
+    settings = Settings(data_store_dir=tmp_path / "data", mc_n_samp=500)
+    bot = BotManager(settings, db_path=str(tmp_path / "bot.db"))
+
+    assert isinstance(bot.mc, McSampler)
+    assert bot.mc.n_samp == 500
+
+
+def test_bot_wires_noaa_fallback(tmp_path):
+    """IemSource in DataManager must have _fallback set to a NoaaFileSource."""
+    from data.obs.iem import IemSource
+    from data.obs.noaa_file import NoaaFileSource
+
+    settings = Settings(data_store_dir=tmp_path / "data")
+    bot = BotManager(settings, db_path=str(tmp_path / "bot.db"))
+
+    obs_sources = bot.data_mgr._obs_sources
+    assert obs_sources, "No obs sources in DataManager"
+    iem = obs_sources[0]
+    assert isinstance(iem, IemSource), f"Expected IemSource, got {type(iem)}"
+    assert isinstance(iem._fallback, NoaaFileSource)
+
+
+def test_bot_raises_if_tft_checkpoint_absent(no_tft_stub, tmp_path):
+    """Bot raises RuntimeError when no TFT checkpoint is registered."""
+    # Default model_store_dir will have no checkpoints
+    settings = Settings(
+        data_store_dir=tmp_path / "data",
+        model_store_dir=tmp_path / "models",
+    )
+    with pytest.raises(RuntimeError, match="TFT model file not found"):
+        BotManager(settings, db_path=str(tmp_path / "bot.db"))
+
+
+def test_bot_calls_set_cov_when_covariance_present(tmp_path, monkeypatch):
+    """When registry.load_covariance() returns a matrix, mc.set_cov() is called."""
+    import numpy as np
+    from model.mc import McSampler
+    from model.store.registry import ModelRegistry
+
+    cov = np.eye(48)
+
+    def _load_cov_stub(self, version=None):
+        return cov
+
+    monkeypatch.setattr(ModelRegistry, "load_covariance", _load_cov_stub)
+
+    settings = Settings(
+        data_store_dir=tmp_path / "data",
+        model_store_dir=tmp_path / "models",
+    )
+    bot = BotManager(settings, db_path=str(tmp_path / "bot.db"))
+
+    np.testing.assert_array_equal(bot.mc._cov, cov)

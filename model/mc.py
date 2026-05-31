@@ -52,6 +52,21 @@ class McSampler:
     # Covariance fitting
     # ------------------------------------------------------------------
 
+    def set_cov(self, cov_matrix: np.ndarray) -> None:
+        """Load a pre-computed covariance matrix for production use.
+
+        Parameters
+        ----------
+        cov_matrix:
+            (n_hours, n_hours) covariance matrix loaded from disk (e.g. via
+            ModelRegistry.load_covariance()).  Must be square.
+        """
+        if cov_matrix.ndim != 2 or cov_matrix.shape[0] != cov_matrix.shape[1]:
+            raise ValueError(
+                f"set_cov requires a square matrix, got shape {cov_matrix.shape}"
+            )
+        self._cov = cov_matrix
+
     def fit_cov(self, residuals: np.ndarray) -> None:
         """Estimate empirical covariance from historical forecast residuals.
 
@@ -61,6 +76,15 @@ class McSampler:
             (n_obs, n_hours) array of forecast error residuals from training.
             Rows are individual cycles; columns are decoder hours.
         """
+        if residuals.size == 0 or residuals.shape[0] == 0:
+            raise ValueError(
+                "fit_cov requires a non-empty residuals array"
+            )
+        if residuals.ndim < 2 or residuals.shape[0] < residuals.shape[1]:
+            raise ValueError(
+                f"fit_cov requires at least as many rows as columns; "
+                f"got shape {residuals.shape}"
+            )
         self._cov = np.cov(residuals.T)  # (n_hours, n_hours)
 
     # ------------------------------------------------------------------
@@ -88,6 +112,12 @@ class McSampler:
         -------
         (n_samp, n_hours) array of temperature samples in degC.
         """
+        if len(mu_vec) == 0:
+            raise ValueError("_mc_sample: mu_vec and sigma_vec must not be empty")
+        if not np.all(np.isfinite(mu_vec)):
+            raise ValueError("_mc_sample: mu_vec contains non-finite values")
+        if not np.all(np.isfinite(sigma_vec)):
+            raise ValueError("_mc_sample: sigma_vec contains non-finite values")
         n = len(mu_vec)
         if self._cov is not None and self._cov.shape == (n, n):
             Sigma = self._cov.copy()
@@ -161,6 +191,19 @@ class McSampler:
           - "p50_f" -> 50th percentile of daily_highs
           - "p90_f" -> 90th percentile of daily_highs
         """
+        if len(daily_highs) == 0:
+            raise ValueError("bucket_probs: daily_highs sample array must not be empty")
+        # Check for overlapping buckets
+        finite_buckets = [(lo, hi) for lo, hi in buckets if lo != float("-inf") and hi != float("inf")]
+        sorted_b = sorted(buckets, key=lambda t: t[0])
+        for i in range(len(sorted_b) - 1):
+            _, hi_a = sorted_b[i]
+            lo_b, _ = sorted_b[i + 1]
+            if hi_a > lo_b:
+                raise ValueError(
+                    f"bucket_probs: overlapping buckets detected "
+                    f"(hi={hi_a} > next lo={lo_b})"
+                )
         probs: dict = {}
         n = len(daily_highs)
         for lo, hi in buckets:

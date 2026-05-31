@@ -232,3 +232,69 @@ def test_bucket_probs_max_bias_shifts_probabilities():
     prob_with = raw_with[(float("-inf"), 70.0)]
     assert prob_with > prob_no, "max_bias should shift more samples below 70 F"
 
+
+# -----------------------------------------------------------------------
+# V2V06 -- set_cov, fit_cov validation, _mc_sample validation, bucket_probs guards
+# -----------------------------------------------------------------------
+
+def test_set_cov_stores_matrix():
+    """set_cov() stores the matrix so subsequent _mc_sample uses it."""
+    s = McSampler(n_samp=200, rng_seed=0)
+    cov = np.eye(6) * 4.0
+    s.set_cov(cov)
+    assert s._cov is not None
+    np.testing.assert_array_equal(s._cov, cov)
+
+
+def test_set_cov_rejects_non_square():
+    s = McSampler(n_samp=100, rng_seed=0)
+    with pytest.raises(ValueError, match="square"):
+        s.set_cov(np.ones((4, 5)))
+
+
+def test_fit_cov_raises_on_empty_residuals():
+    s = McSampler(n_samp=100, rng_seed=0)
+    with pytest.raises(ValueError, match="empty"):
+        s.fit_cov(np.empty((0, 48)))
+
+
+def test_fit_cov_raises_when_rows_lt_cols():
+    s = McSampler(n_samp=100, rng_seed=0)
+    with pytest.raises(ValueError, match="rows"):
+        s.fit_cov(np.ones((3, 48)))
+
+
+def test_mc_sample_raises_on_empty_mu():
+    s = McSampler(n_samp=100, rng_seed=0)
+    with pytest.raises(ValueError, match="empty"):
+        s._mc_sample(np.array([]), np.array([]))
+
+
+def test_mc_sample_raises_on_non_finite_mu():
+    s = McSampler(n_samp=100, rng_seed=0)
+    mu = np.array([1.0, float("nan"), 3.0])
+    sigma = np.ones(3)
+    with pytest.raises(ValueError, match="finite"):
+        s._mc_sample(mu, sigma)
+
+
+def test_mc_sample_raises_on_non_finite_sigma():
+    s = McSampler(n_samp=100, rng_seed=0)
+    mu = np.ones(4)
+    sigma = np.array([1.0, 1.0, float("inf"), 1.0])
+    with pytest.raises(ValueError, match="finite"):
+        s._mc_sample(mu, sigma)
+
+
+def test_bucket_probs_raises_on_empty_samples():
+    s = McSampler(n_samp=100, rng_seed=0)
+    with pytest.raises(ValueError, match="empty"):
+        s.bucket_probs(np.array([]), [(60.0, 80.0)])
+
+
+def test_bucket_probs_raises_on_overlapping_buckets():
+    s = McSampler(n_samp=100, rng_seed=0)
+    daily = np.full(100, 70.0)
+    with pytest.raises(ValueError, match="overlap"):
+        s.bucket_probs(daily, [(60.0, 75.0), (70.0, 85.0)])
+

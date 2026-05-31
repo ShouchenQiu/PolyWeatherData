@@ -586,3 +586,53 @@ def test_noaa_fetch_tick_mode_ignores_start_end():
             now_utc=pd.Timestamp("2026-01-01 14:00", tz="UTC"),
         )
     assert isinstance(df, pd.DataFrame)
+
+
+# ---------------------------------------------------------------------------
+# IemSource -- fallback wiring (V2V06)
+# ---------------------------------------------------------------------------
+
+def test_iem_source_accepts_fallback_kwarg():
+    """IemSource can be constructed with a fallback= parameter."""
+    fallback = NoaaFileSource()
+    src = IemSource(fallback=fallback)
+    assert src._fallback is fallback
+
+
+def test_iem_source_no_fallback_by_default():
+    """IemSource() with no fallback has _fallback=None."""
+    src = IemSource()
+    assert src._fallback is None
+
+
+def test_iem_source_calls_fallback_when_iem_empty():
+    """When IEM returns an empty DataFrame the fallback source is called."""
+    fallback = MagicMock()
+    fallback_df = pd.DataFrame({"valid_time": [pd.Timestamp("2026-01-01", tz="UTC")]})
+    fallback.fetch.return_value = fallback_df
+
+    src = IemSource(fallback=fallback)
+    start = pd.Timestamp("2026-01-01", tz="UTC")
+    end   = pd.Timestamp("2026-01-02", tz="UTC")
+
+    with patch.object(src, "_download_csv", return_value=None):
+        df = src.fetch(_STATION, start, end)
+
+    fallback.fetch.assert_called_once_with(_STATION, start, end)
+    assert len(df) == 1
+
+
+def test_iem_source_does_not_call_fallback_when_iem_has_data():
+    """When IEM returns rows, fallback is not invoked."""
+    fallback = MagicMock()
+    src = IemSource(fallback=fallback)
+
+    with patch.object(src, "_download_csv", return_value=_IEM_CSV):
+        df = src.fetch(
+            _STATION,
+            pd.Timestamp("2026-01-01", tz="UTC"),
+            pd.Timestamp("2026-01-02", tz="UTC"),
+        )
+
+    fallback.fetch.assert_not_called()
+    assert len(df) == 2
