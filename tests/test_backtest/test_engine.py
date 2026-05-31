@@ -420,7 +420,11 @@ class TestColdStartGuard:
         assert (65.0, 75.0) in called_buckets
 
     def test_backtest_skips_not_ready_inits_when_data_manager_provided(self):
-        """pipeline.run() is not called for inits rejected by DataManager.is_inference_ready."""
+        """pipeline.run() is not called for inits rejected by DataManager.inference_readiness.
+
+        Also verifies that skip reasons are recorded in engine._readiness_skips and
+        that only one inference_readiness() call is made per init (no double-read).
+        """
         from unittest.mock import MagicMock
         from data.manager import ReadinessStatus
 
@@ -429,7 +433,6 @@ class TestColdStartGuard:
         ]
         pipeline = _make_pipeline({"probs": {(65.0, 75.0): 0.70}})
         data_manager = MagicMock()
-        data_manager.is_inference_ready.return_value = False
         data_manager.inference_readiness.return_value = ReadinessStatus(
             ready=False, reason="cold_start", first_eligible_init=None
         )
@@ -442,9 +445,16 @@ class TestColdStartGuard:
         df = engine.run("2024-01-01", "2024-01-01",
                         types.SimpleNamespace(), init_hours=[6])
 
-        # All inits should be skipped; result is empty.
+        # All inits skipped; result is empty.
         assert df.empty
-        data_manager.is_inference_ready.assert_called()
+        # Exactly one inference_readiness call (not two).
+        data_manager.inference_readiness.assert_called()
+        assert data_manager.is_inference_ready.call_count == 0, (
+            "is_inference_ready() must not be called; use inference_readiness() once"
+        )
+        # Skip is recorded in the engine's skip list.
+        assert len(engine._readiness_skips) == 1
+        assert engine._readiness_skips[0]["reason"] == "cold_start"
 
     def test_backtest_uses_cold_start_gate_when_data_manager_none(self):
         """Old cold_start_hours gate is active when data_manager is None."""

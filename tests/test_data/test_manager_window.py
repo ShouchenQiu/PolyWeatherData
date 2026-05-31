@@ -292,7 +292,8 @@ def test_inference_readiness_cold_start_when_first_row_too_recent():
     short_hrrr = _make_hrrr_rows(40, window_start + pd.Timedelta(hours=32))
 
     # Historical read (before window_start) finds the very first row at
-    # init - 60h, which means first_eligible = (init - 60h) + 72h = init + 12h > init
+    # init - 60h.  With cold_start_hours=72 (Settings default),
+    # first_eligible = (init - 60h) + 72 + 72 = init + 84h > init -> cold_start.
     hist_first_ts = init - pd.Timedelta(hours=60)
     hist_hrrr = _make_hrrr_rows(1, hist_first_ts)
 
@@ -306,7 +307,7 @@ def test_inference_readiness_cold_start_when_first_row_too_recent():
 
     assert status.ready is False
     assert status.reason == "cold_start"
-    # first_eligible_init should be hist_first_ts + 72h = init + 12h
+    # first_eligible_init should be > init (cold_start_hours + encoder_hours pushes it forward)
     assert status.first_eligible_init is not None
     assert status.first_eligible_init > init
 
@@ -358,6 +359,38 @@ def test_inference_readiness_incomplete_obs_window():
     assert status.reason == "incomplete_obs_window"
 
 
+def test_inference_readiness_cold_start_first_data_in_encoder_window():
+    """Returns cold_start when all available data is inside the encoder window (typical early stage).
+
+    The typical cold-start scenario: we just started collecting data, so the
+    store has e.g. 40 rows all inside [window_start, window_end].  The
+    historical read (before window_start) returns nothing.  _estimate_first_eligible
+    must use the current_window rows to compute first_eligible.
+    """
+    init = pd.Timestamp("2026-01-10 12:00:00", tz="UTC")
+    window_start = init - pd.Timedelta(hours=72)
+
+    # All data is inside the encoder window -- no historical data before window_start
+    early_rows = _make_hrrr_rows(40, window_start + pd.Timedelta(hours=5))
+    # early_rows[0].valid_time = window_start + 5h = init - 67h
+    # With cold_start_hours=72 (default): first_eligible = (init-67h) + 72 + 72 = init+77h > init
+
+    empty_hist = pd.DataFrame()  # nothing before window_start
+
+    mgr = _make_manager_with_side_effects(
+        window_hrrr=early_rows,
+        window_obs=_make_obs_rows(72, window_start),
+        hist_hrrr=empty_hist,
+    )
+
+    status = mgr.inference_readiness(_make_station(), init, encoder_hours=72)
+
+    assert status.ready is False
+    assert status.reason == "cold_start"
+    assert status.first_eligible_init is not None
+    assert status.first_eligible_init > init
+
+
 def test_inference_readiness_missing_required_columns():
     """Returns missing_required_columns when TMP_2m is absent from HRRR window."""
     init = pd.Timestamp("2026-01-10 12:00:00", tz="UTC")
@@ -370,6 +403,24 @@ def test_inference_readiness_missing_required_columns():
     obs_df = _make_obs_rows(72, window_start)
 
     mgr, _, _ = _make_manager(hrrr_no_col, obs_df)
+
+    status = mgr.inference_readiness(_make_station(), init, encoder_hours=72)
+
+    assert status.ready is False
+    assert status.reason == "missing_required_columns"
+
+
+def test_inference_readiness_missing_valid_time_column():
+    """Returns missing_required_columns when valid_time is absent from HRRR window."""
+    init = pd.Timestamp("2026-01-10 12:00:00", tz="UTC")
+    window_start = init - pd.Timedelta(hours=72)
+
+    # HRRR without valid_time column -- _min_valid_time would return None;
+    # inference_readiness must catch this before reporting ready=True.
+    hrrr_no_vt = pd.DataFrame([{"TMP_2m": 5.0 + i} for i in range(72)])
+    obs_df = _make_obs_rows(72, window_start)
+
+    mgr, _, _ = _make_manager(hrrr_no_vt, obs_df)
 
     status = mgr.inference_readiness(_make_station(), init, encoder_hours=72)
 

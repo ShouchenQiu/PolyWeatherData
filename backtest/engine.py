@@ -115,6 +115,7 @@ class BacktestEngine:
         self.min_edge          = min_edge
         self._cold_start_hours = cold_start_hours
         self._data_manager     = data_manager
+        self._readiness_skips: list[dict] = []
         self._clob_index       = self._build_clob_index(clob_df)
 
     # ------------------------------------------------------------------
@@ -156,6 +157,7 @@ class BacktestEngine:
             hours=self._cold_start_hours
         )
         records: list[dict] = []
+        self._readiness_skips = []
         total_inits = len(dates) * len(init_hours)
         logger.info(
             "Backtest starting: {} to {} ({} inits, cold-start cutoff {})",
@@ -167,16 +169,19 @@ class BacktestEngine:
                 init_utc = day + pd.Timedelta(hours=hour)
                 if self._data_manager is not None:
                     from model.tft import MAX_ENCODER_LENGTH
-                    if not self._data_manager.is_inference_ready(
+                    status = self._data_manager.inference_readiness(
                         station, init_utc, MAX_ENCODER_LENGTH
-                    ):
-                        reason = self._data_manager.inference_readiness(
-                            station, init_utc, MAX_ENCODER_LENGTH
-                        ).reason
+                    )
+                    if not status.ready:
                         logger.debug(
                             "Backtest: readiness skip init={} reason={}",
-                            init_utc, reason,
+                            init_utc, status.reason,
                         )
+                        self._readiness_skips.append({
+                            "init_utc":           init_utc,
+                            "reason":             status.reason,
+                            "first_eligible_init": status.first_eligible_init,
+                        })
                         continue
                 elif init_utc < cold_start_cutoff:
                     logger.debug("cold-start skip: {}", init_utc)

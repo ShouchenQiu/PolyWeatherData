@@ -150,10 +150,11 @@ class BotManager:
 
         # Loops (ADR-0004: ForecastLoop writes ProbabilityStore; TradingLoop reads it)
         self.forecast_loop = ForecastLoop(
-            pipeline   = self.pipeline,
-            prob_store = self.prob_store,
-            db         = self.db,
-            station    = self.station,
+            pipeline     = self.pipeline,
+            prob_store   = self.prob_store,
+            db           = self.db,
+            station      = self.station,
+            data_manager = self.data_mgr,
         )
         self.trading_loop  = TradingLoop(
             prob_store = self.prob_store,

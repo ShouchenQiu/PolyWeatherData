@@ -492,23 +492,31 @@ class DataManager:
         )
 
         # --- Check required columns when data is present ---
-        if not hrrr_window.empty and "TMP_2m" not in hrrr_window.columns:
+        # Both valid_time and the temperature column must be present;
+        # absence of either would cause build_encoder_obs_window to fail.
+        _hrrr_required = {"valid_time", "TMP_2m"}
+        _obs_required  = {"valid_time", "raw_tmpc_tenths"}
+        if not hrrr_window.empty and not _hrrr_required.issubset(hrrr_window.columns):
             return ReadinessStatus(
                 ready=False,
                 reason="missing_required_columns",
                 first_eligible_init=None,
             )
-        if not obs_window.empty and "raw_tmpc_tenths" not in obs_window.columns:
+        if not obs_window.empty and not _obs_required.issubset(obs_window.columns):
             return ReadinessStatus(
                 ready=False,
                 reason="missing_required_columns",
                 first_eligible_init=None,
             )
 
+        cold_start = self._settings.cold_start_hours
+
         # --- Check HRRR encoder window coverage ---
         if len(hrrr_window) < encoder_hours:
             first_eligible = self._estimate_first_eligible(
-                self._forecast_store, station.station_id, window_start, encoder_hours
+                self._forecast_store, station.station_id, window_start,
+                encoder_hours, current_window=hrrr_window,
+                cold_start_hours=cold_start,
             )
             if first_eligible is None or first_eligible > init_utc:
                 return ReadinessStatus(
@@ -523,7 +531,9 @@ class DataManager:
         # --- Check obs encoder window coverage ---
         if len(obs_window) < encoder_hours:
             first_eligible = self._estimate_first_eligible(
-                self._obs_store, station.station_id, window_start, encoder_hours
+                self._obs_store, station.station_id, window_start,
+                encoder_hours, current_window=obs_window,
+                cold_start_hours=cold_start,
             )
             if first_eligible is None or first_eligible > init_utc:
                 return ReadinessStatus(
@@ -575,26 +585,50 @@ class DataManager:
 
     @staticmethod
     def _estimate_first_eligible(
-        store:         "ParquetStore",
-        station_id:    str,
-        window_start:  pd.Timestamp,
-        encoder_hours: int,
+        store:            "ParquetStore",
+        station_id:       str,
+        window_start:     pd.Timestamp,
+        encoder_hours:    int,
+        current_window:   pd.DataFrame,
+        cold_start_hours: int = 0,
     ) -> "pd.Timestamp | None":
-        """Return first_eligible_init = first_store_row_ts + encoder_hours.
+        """Return first_eligible_init = first_store_row_ts + cold_start_hours + encoder_hours.
 
-        Performs a secondary historical read from _EARLIEST_DATA_START to
-        just before window_start to find the oldest available row.
-        Combines with any in-window rows to get the absolute first timestamp.
-        Returns None when the store has no data at all.
+        Combines two data sources to find the absolute earliest available row:
+          1. Secondary historical read: ``_EARLIEST_DATA_START .. window_start - 1h``.
+          2. ``current_window``: the partial encoder-window DataFrame already read
+             by the caller.  This covers the typical cold-start shape where the
+             very first rows are *inside* the encoder window (< 72 rows collected so
+             far, so the historical range is empty but partial data exists).
+
+        ``cold_start_hours`` is the live-store burn-in addend.  Because
+        ``fetch_hrrr()`` / ``fetch_iem()`` do NOT call
+        ``Cleaner.drop_cold_start()`` before appending, the first
+        ``cold_start_hours`` rows in the store are unreliable.  The callers
+        should pass ``Settings.cold_start_hours`` (default 72) so that
+        ``first_eligible_init`` correctly requires
+        ``first_store_row + cold_start_hours + encoder_hours`` of
+        accumulated data before live inference is permitted.
+
+        Returns None when neither the historical read nor the current
+        window contains any valid_time data.
         """
         hist = store.read(
             station_id,
             _EARLIEST_DATA_START,
             window_start - pd.Timedelta(hours=1),
         )
-        if hist.empty or "valid_time" not in hist.columns:
+        frames = [
+            f for f in (hist, current_window)
+            if not f.empty and "valid_time" in f.columns
+        ]
+        if not frames:
             return None
-        first_ts = pd.to_datetime(hist["valid_time"], utc=True).min()
+        combined = pd.concat(frames, ignore_index=True)
+        try:
+            first_ts = pd.to_datetime(combined["valid_time"], utc=True).min()
+        except Exception:
+            return None
         if pd.isna(first_ts):
             return None
-        return first_ts + pd.Timedelta(hours=encoder_hours)
+        return first_ts + pd.Timedelta(hours=cold_start_hours + encoder_hours)
