@@ -7,12 +7,22 @@ description: Disciplined diagnosis loop for hard bugs, failing slice tests, and 
 
 A discipline for hard bugs. Skip phases only when explicitly justified.
 
-For this repository, `docs/issues/implementation-workflow.md` decides when to
-switch from TDD to diagnosis. This skill owns the diagnosis loop only.
+For this repository, the active implementation workflow decides when to switch
+from TDD to diagnosis:
+
+- V1 overhaul: `docs/issues/implementation-workflow.md`
+- V2 overhaul: `docs/issues/implementation-workflow-v2.md`
+
+This skill owns the diagnosis loop only.
 
 When diagnosing a slice failure, read the target slice in
-`docs/issues/proposed-slices.md`, its `Source refs`, and relevant ADRs. Do not
-expand the slice scope.
+the matching slice file, its `Source refs`, and relevant ADRs:
+
+- V1 slices: `docs/issues/proposed-slices.md`
+- V2 slices: `docs/issues/proposed-slices-v2.md`
+
+For V2 slices, also read the matching Source refs in `docs/grill-tasks-v2.md`.
+Do not expand the slice scope.
 
 ## Phase 1 — Build a feedback loop
 

@@ -1,6 +1,6 @@
 ---
 name: to-issues
-description: Break a plan, spec, or PolyWeatherBot overhaul task document into independently-grabbable issue drafts using tracer-bullet vertical slices and a coverage matrix. Use when the user wants to convert docs/grill-tasks.md or another plan into implementation tickets without losing source tasks.
+description: Break a plan, spec, or PolyWeatherBot overhaul task document into independently-grabbable issue drafts using tracer-bullet vertical slices and a coverage matrix. Use when the user wants to convert docs/grill-tasks.md, docs/grill-tasks-v2.md, or another plan into implementation tickets without losing source tasks.
 ---
 
 # To Issues
@@ -17,8 +17,9 @@ standard labels. Generate Markdown issue drafts instead.
 ### 1. Gather context
 
 Work from whatever is already in the conversation context. If the user passes a
-path such as `docs/grill-tasks.md`, read it as the source of truth. Respect
-linked ADRs and project docs when they clarify intent.
+path such as `docs/grill-tasks.md` or `docs/grill-tasks-v2.md`, read that exact
+file as the source of truth. Respect linked ADRs and project docs when they
+clarify intent.
 
 ### 2. Explore the codebase (optional)
 
@@ -31,10 +32,10 @@ ADR identifiers where relevant.
 ### 3. Build a source inventory
 
 Before drafting slices, inventory every actionable source item from the plan.
-For `docs/grill-tasks.md`, each `ADD`, `REMOVE`, `CHANGE`, `FIX`, `MOVE`, and
+For `docs/grill-tasks*.md`, each `ADD`, `REMOVE`, `CHANGE`, `FIX`, `MOVE`, and
 `WIRE` bullet is a source item. Assign each source item a stable reference:
 
-- Prefer `docs/grill-tasks.md:<line>` when line numbers are available.
+- Prefer `<source-path>:<line>` when line numbers are available.
 - Otherwise use `<heading> / <short item text>`.
 
 Every source item must end in exactly one of these states:
@@ -56,7 +57,7 @@ Slices may be 'HITL' or 'AFK'. HITL slices require human interaction, such as an
 - Each slice delivers a narrow but COMPLETE path through every layer (schema, API, UI, tests)
 - A completed slice is demoable or verifiable on its own
 - Prefer many thin slices over few thick ones
-- Do not mechanically mirror the layer order in `docs/grill-tasks.md`
+- Do not mechanically mirror the layer order in the source plan
 - Foundation slices are allowed when a shared primitive is needed before useful vertical slices can start
 </vertical-slice-rules>
 
@@ -67,8 +68,8 @@ After drafting slices, produce a coverage matrix:
 ```
 | Source item | Covered by slice | Status |
 |---|---|---|
-| docs/grill-tasks.md:40 max_open_per_token | Risk + Position Lifecycle | Covered |
-| docs/grill-tasks.md:423 DataHealthMonitor deferred | Deferred register | Deferred |
+| <source-path>:40 max_open_per_token | Risk + Position Lifecycle | Covered |
+| <source-path>:423 DataHealthMonitor deferred | Deferred register | Deferred |
 ```
 
 Run a reverse audit before presenting the result:

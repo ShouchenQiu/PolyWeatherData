@@ -461,17 +461,16 @@ Each vertical slice should be independently verifiable once its blockers are com
 - **Type**: AFK
 - **Blocked by**: V2F03, V2V04
 - **What to build**:
-  Align backtest readiness and pricing with V2 live semantics. Backtest uses the same
-  inference readiness gate and the same quote primitive when historical L2 data
-  exists; legacy mid-price rows are explicitly marked as legacy.
+  Align backtest pricing with V2 live semantics while preserving the readiness gate
+  introduced in V2V04. Backtest uses the same quote primitive when historical L2
+  data exists; legacy mid-price rows are explicitly marked as legacy.
 - **Acceptance criteria**:
-  - [ ] Backtest skips not-ready inits via DataManager readiness instead of cutoff/min-hours constants
-  - [ ] Skip reasons are logged or captured in backtest metrics
+  - [ ] Backtest readiness skip introduced in V2V04 remains covered by regression tests
   - [ ] Historical L2 rows use `compute_quote()`
   - [ ] Historical mid-only rows are stored as `legacy_mid_price`
   - [ ] `legacy_mid_price` is not passed through `compute_quote()` or labelled `clob_price`
 - **Tests**:
-  - Backtest readiness-skip test
+  - Backtest readiness-skip regression test
   - Backtest L2 quote path test
   - Backtest legacy mid fallback test
 - **Source refs**:
@@ -560,7 +559,7 @@ Each vertical slice should be independently verifiable once its blockers are com
 | `docs/grill-tasks-v2.md:434-451` live/paper exchange semantics | V2F02, V2V09 | Covered |
 | `docs/grill-tasks-v2.md:453-508` positions, PnL, risk, exit sizing | V2F05 | Covered |
 | `docs/grill-tasks-v2.md:510-532` Bot wiring | V2F02, V2V06, V2V12 | Covered |
-| `docs/grill-tasks-v2.md:538-547` Backtest readiness and L2 pricing | V2V10 | Covered |
+| `docs/grill-tasks-v2.md:538-547` Backtest readiness regression and L2 pricing | V2V10 | Covered |
 | `docs/grill-tasks-v2.md:553-581` TradingLoop arbitration/observability | V2V08 | Covered |
 | `docs/grill-tasks-v2.md:583-602` ForecastLoop V2 path | V2V04, V2V07 | Covered |
 | `docs/grill-tasks-v2.md:604-628` Settlement/RedeemLoop | V2V12 | Covered |

@@ -19,7 +19,6 @@ def test_order_can_be_recorded_and_counted(position_tracker):
 
     assert position_tracker.open_positions_by_token() == {"token-1": 1}
 ```
-```
 
 Characteristics:
 
@@ -40,7 +39,6 @@ def test_trading_loop_calls_strategy_private_helper(trading_loop, mocker):
     trading_loop.tick_once()
 
     helper.assert_called_once()
-```
 ```
 
 Red flags:
@@ -63,5 +61,4 @@ def test_record_order_inserts_row(db, position_tracker):
 def test_record_order_makes_token_open(position_tracker):
     position_tracker.record_order(...)
     assert position_tracker.open_positions_by_token()["token-1"] == 1
-```
 ```

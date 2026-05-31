@@ -1,18 +1,22 @@
 ---
 name: tdd
-description: Test-driven development with red-green-refactor loop. Use when implementing one PolyWeatherBot slice from docs/issues/proposed-slices.md, when user asks for TDD/test-first development, or when a feature/bug fix should be driven by observable behavior tests.
+description: Test-driven development with red-green-refactor loop. Use when implementing one PolyWeatherBot slice from docs/issues/proposed-slices.md or docs/issues/proposed-slices-v2.md, when user asks for TDD/test-first development, or when a feature/bug fix should be driven by observable behavior tests.
 ---
 
 # Test-Driven Development
 
 ## PolyWeatherBot Scope
 
-For this repository, `docs/issues/implementation-workflow.md` owns the overall
-execution order and skill handoffs. This skill owns only the test-first loop for
-one target slice.
+For this repository, the active implementation workflow owns the overall
+execution order and skill handoffs:
+
+- V1 overhaul: `docs/issues/implementation-workflow.md`
+- V2 overhaul: `docs/issues/implementation-workflow-v2.md`
+
+This skill owns only the test-first loop for one target slice.
 
 Before coding a slice, follow the pre-read checklist in
-`docs/issues/implementation-workflow.md` §1.
+the matching implementation workflow §1.
 
 Treat the target slice as the approved scope. Do not re-plan the overhaul, do
 not implement `Out of scope` items, and do not implement Deferred Register work.
@@ -58,8 +62,9 @@ RIGHT (vertical):
 
 When exploring the codebase, use the project's domain glossary so that test names and interface vocabulary match the project's language, and respect ADRs in the area you're touching.
 
-If the target slice is already defined in `docs/issues/proposed-slices.md`, do
-not ask the user to reconfirm its interface or behavior list. Ask only if:
+If the target slice is already defined in either `docs/issues/proposed-slices.md`
+or `docs/issues/proposed-slices-v2.md`, do not ask the user to reconfirm its
+interface or behavior list. Ask only if:
 
 - The slice conflicts with current code or tests
 - The acceptance criteria are not testable as written
@@ -119,7 +124,7 @@ Keep refactors inside the current slice's touched area. If a broader
 architecture concern appears, record it for the next architecture review instead
 of expanding the slice.
 
-If stuck, see `docs/issues/implementation-workflow.md` §3 for handoff conditions.
+If stuck, see the active implementation workflow §3 for handoff conditions.
 
 ## Checklist Per Cycle
 

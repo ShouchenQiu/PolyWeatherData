@@ -7,10 +7,15 @@ description: Review completed PolyWeatherBot slices for architectural friction, 
 
 Surface architectural friction and propose **deepening opportunities** — refactors that turn shallow modules into deep ones. The aim is testability and AI-navigability.
 
-For this repository, `docs/issues/implementation-workflow.md` owns when this
-review runs. This skill owns only the architecture review method. Routine
-reviews must not modify code, create issues, update `CONTEXT.md`, or write ADRs
-unless the user explicitly asks.
+For this repository, the active implementation workflow owns when this review
+runs:
+
+- V1 overhaul: `docs/issues/implementation-workflow.md`
+- V2 overhaul: `docs/issues/implementation-workflow-v2.md`
+
+This skill owns only the architecture review method. Routine reviews must not
+modify code, create issues, update `CONTEXT.md`, or write ADRs unless the user
+explicitly asks.
 
 ## Glossary
 
@@ -39,8 +44,11 @@ This skill is _informed_ by the project's domain model. The domain language give
 
 Read:
 
-- The completed slices being reviewed in `docs/issues/proposed-slices.md`
-- Their source refs in `docs/grill-tasks.md`
+- The completed slices being reviewed in the matching slice file:
+  `docs/issues/proposed-slices.md` for V1 or
+  `docs/issues/proposed-slices-v2.md` for V2
+- Their source refs in the matching grill task file:
+  `docs/grill-tasks.md` for V1 or `docs/grill-tasks-v2.md` for V2
 - Relevant ADRs
 - Touched code and tests
 - `CONTEXT.md` when domain language matters

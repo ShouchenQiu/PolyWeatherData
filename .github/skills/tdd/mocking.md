@@ -7,7 +7,9 @@ Mock at **system boundaries** only:
 - Time/randomness
 - File system (sometimes)
 - PolyWeatherBot live boundaries: HRRR/IEM network calls, CLOB clients, real
-  order submission, Telegram
+  order submission, redeem calls, Telegram
+- V2 Polymarket SDK boundaries: `PublicClient` for read-only market/book data and
+  `SecureClient` for live order/redeem calls
 
 Don't mock:
 
@@ -46,6 +48,11 @@ Create specific functions for each external operation instead of one generic fun
 # GOOD: each method has one shape.
 class OrderbookFetcher:
     def get_book(self, token_id: str) -> OrderBook:
+        ...
+
+
+class RedeemClient:
+    def redeem_condition(self, condition_id: str) -> RedeemResult:
         ...
 
 
