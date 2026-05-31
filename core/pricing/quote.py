@@ -5,6 +5,25 @@ Leaf module: must not import from any other project package.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TypedDict
+
+
+class BookLevel(TypedDict):
+    """A single price level in an L2 order book."""
+
+    price: float
+    size: float
+
+
+class NormalizedBook(TypedDict):
+    """Normalized L2 order book shape expected by ``compute_quote``.
+
+    Both lists may be empty (compute_quote handles this defensively).
+    compute_quote sorts the levels internally, so callers need not pre-sort.
+    """
+
+    bids: list[BookLevel]
+    asks: list[BookLevel]
 
 
 @dataclass
@@ -21,7 +40,7 @@ class Quote:
     complete_fill: bool
 
 
-def compute_quote(book: dict, side: str, size_usd: float) -> Quote:
+def compute_quote(book: NormalizedBook, side: str, size_usd: float) -> Quote:
     """Walk L2 depth for the requested side and target size.
 
     Parameters

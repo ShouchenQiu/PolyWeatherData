@@ -87,8 +87,8 @@ class DbClient:
                 size_usd         REAL,
                 price            REAL,
                 fill_price       REAL,
-                status           TEXT DEFAULT 'pending',
-                -- status domain: pending | filled | cancelled | closed | settled
+                status           TEXT DEFAULT 'pending'
+                                 CHECK (status IN ('pending', 'filled', 'cancelled', 'closed', 'settled')),
                 created_at       TEXT,
                 filled_at        TEXT,
                 closed_at        TEXT,
@@ -173,7 +173,11 @@ class DbClient:
             ).fetchone()
             return row["sql"] if row else ""
 
-        if "CHECK (is_paper IN (0, 1))" not in _ddl("orders"):
+        _orders_ddl = _ddl("orders")
+        if (
+            "CHECK (is_paper IN (0, 1))" not in _orders_ddl
+            or "CHECK (status IN (" not in _orders_ddl
+        ):
             self._conn.executescript(
                 """
                 CREATE TABLE orders_v2 (
@@ -184,7 +188,8 @@ class DbClient:
                     size_usd         REAL,
                     price            REAL,
                     fill_price       REAL,
-                    status           TEXT DEFAULT 'pending',
+                    status           TEXT DEFAULT 'pending'
+                                     CHECK (status IN ('pending', 'filled', 'cancelled', 'closed', 'settled')),
                     created_at       TEXT,
                     filled_at        TEXT,
                     closed_at        TEXT,
@@ -390,20 +395,24 @@ class DbClient:
         bucket_lo_f: float | None,
         bucket_hi_f: float | None,
         outcome: str,
+        discovery_status: str = "parsed",
     ) -> None:
         self._conn.execute(
             """
             INSERT INTO markets
-                (token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome,
+                 discovery_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(token_id) DO UPDATE SET
                 condition_id=excluded.condition_id,
                 market_slug=excluded.market_slug,
                 bucket_lo_f=excluded.bucket_lo_f,
                 bucket_hi_f=excluded.bucket_hi_f,
-                outcome=excluded.outcome
+                outcome=excluded.outcome,
+                discovery_status=excluded.discovery_status
             """,
-            (token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome),
+            (token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome,
+             discovery_status),
         )
         self._conn.commit()
 
@@ -433,6 +442,104 @@ class DbClient:
             (condition_id,),
         )
         return [dict(r) for r in cur.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Signals
+    # ------------------------------------------------------------------
+
+    def insert_signal_decision(
+        self,
+        signal_id: str,
+        yes_token_id: str,
+        no_token_id: str,
+        direction: str,
+        mc_prob: float,
+        reference_price: float,
+        edge: float,
+        final_token_id: str,
+        final_side: str,
+        executable_price: float,
+        tick_utc: str,
+        approved: int,
+        reject_reason: str | None = None,
+        computed_size: float | None = None,
+        order_id: str | None = None,
+    ) -> None:
+        """Insert one signal decision row into the signals table.
+
+        Parameters
+        ----------
+        signal_id:
+            UUID string; must be unique.
+        approved:
+            1 if approved for execution, 0 if rejected by risk/filter.
+        reject_reason:
+            Human-readable reason for rejection; None when approved=1.
+        order_id:
+            Set after order submission; None at signal creation time.
+        """
+        self._conn.execute(
+            """
+            INSERT INTO signals
+                (signal_id, yes_token_id, no_token_id, direction,
+                 mc_prob, reference_price, edge,
+                 final_token_id, final_side, executable_price,
+                 tick_utc, approved, reject_reason, computed_size, order_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id, yes_token_id, no_token_id, direction,
+                mc_prob, reference_price, edge,
+                final_token_id, final_side, executable_price,
+                tick_utc, approved, reject_reason, computed_size, order_id,
+            ),
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Redeem tasks
+    # ------------------------------------------------------------------
+
+    def create_or_update_redeem_task(
+        self,
+        condition_id: str,
+        status: str = "pending",
+        last_error: str | None = None,
+    ) -> None:
+        """Upsert a redeem_task row for *condition_id*.
+
+        On first call, creates the row with attempt_count=0.
+        On subsequent calls, increments attempt_count and updates status
+        and last_error.
+        """
+        now = _utcnow_iso()
+        self._conn.execute(
+            """
+            INSERT INTO redeem_tasks
+                (condition_id, status, last_error, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(condition_id) DO UPDATE SET
+                status=excluded.status,
+                attempt_count=attempt_count + 1,
+                last_error=excluded.last_error,
+                updated_at=excluded.updated_at
+            """,
+            (condition_id, status, last_error, now, now),
+        )
+        self._conn.commit()
+
+    def mark_redeemed(self, condition_id: str) -> None:
+        """Set redeem_task status to 'redeemed' and record redeemed_at timestamp."""
+        now = _utcnow_iso()
+        self._conn.execute(
+            """
+            UPDATE redeem_tasks
+            SET status='redeemed', redeemed_at=?, updated_at=?
+            WHERE condition_id=?
+            """,
+            (now, now, condition_id),
+        )
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Model versions

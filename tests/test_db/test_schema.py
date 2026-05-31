@@ -297,6 +297,11 @@ def test_migration_upgrades_v1_db_to_v2(tmp_dir) -> None:
     db._conn.rollback()
     with pytest.raises(_sqlite3.IntegrityError):
         db._conn.execute(
+            "INSERT INTO orders (order_id, status) VALUES ('bad-status', 'bogus')"
+        )
+    db._conn.rollback()
+    with pytest.raises(_sqlite3.IntegrityError):
+        db._conn.execute(
             "INSERT INTO markets (token_id, discovery_status) VALUES ('bad-tok', 'invalid_status')"
         )
     db._conn.rollback()
@@ -395,6 +400,30 @@ def test_markets_discovery_status_valid_non_parsed_values() -> None:
     }
     assert statuses["tok-unrecog"] == "unrecognized_slug"
     assert statuses["tok-invalid"] == "invalid_market"
+
+
+def test_orders_status_check_constraint_rejects_invalid() -> None:
+    import sqlite3 as _sqlite3
+    db = DbClient(":memory:")
+    _seed(db)
+    with pytest.raises(_sqlite3.IntegrityError):
+        db._conn.execute(
+            "INSERT INTO orders (order_id, token_id, condition_id, side, size_usd, price, status)"
+            " VALUES ('ord-bad-status', 'tok-001', 'cid-001', 'BUY', 10.0, 0.5, 'bogus')"
+        )
+        db._conn.commit()
+
+
+def test_orders_status_check_allows_valid_values() -> None:
+    db = DbClient(":memory:")
+    _seed(db)
+    for i, status in enumerate(("pending", "filled", "cancelled", "closed", "settled")):
+        db._conn.execute(
+            "INSERT INTO orders (order_id, token_id, condition_id, side, size_usd, price, status)"
+            " VALUES (?, 'tok-001', 'cid-001', 'BUY', 10.0, 0.5, ?)",
+            (f"ord-{i}", status),
+        )
+    db._conn.commit()
 
 
 def test_orders_status_default_pending() -> None:
@@ -508,3 +537,152 @@ def test_clear_data_stale() -> None:
     db.set_data_stale(None, datetime(2026, 5, 15, tzinfo=timezone.utc))
     db.clear_data_stale()
     assert db.get_data_stale() is None
+
+
+# ---------------------------------------------------------------------------
+# upsert_market with discovery_status (V2 domain method)
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_market_default_discovery_status_parsed() -> None:
+    db = DbClient(":memory:")
+    _seed(db)
+    row = db._conn.execute(
+        "SELECT discovery_status FROM markets WHERE token_id='tok-001'"
+    ).fetchone()
+    assert row["discovery_status"] == "parsed"
+
+
+def test_upsert_market_explicit_discovery_status() -> None:
+    db = DbClient(":memory:")
+    db.upsert_station(*STATION)
+    db.upsert_event(*EVENT)
+    db.upsert_market("tok-unk", "cid-001", "some-slug", None, None, "Yes",
+                     discovery_status="unrecognized_slug")
+    row = db._conn.execute(
+        "SELECT discovery_status FROM markets WHERE token_id='tok-unk'"
+    ).fetchone()
+    assert row["discovery_status"] == "unrecognized_slug"
+
+
+def test_upsert_market_updates_discovery_status_on_conflict() -> None:
+    db = DbClient(":memory:")
+    _seed(db)
+    # Initially parsed; reclassified to invalid_market
+    db.upsert_market("tok-001", "cid-001", "will-the-high-lga-yes", 88.0, 92.0, "Yes",
+                     discovery_status="invalid_market")
+    row = db._conn.execute(
+        "SELECT discovery_status FROM markets WHERE token_id='tok-001'"
+    ).fetchone()
+    assert row["discovery_status"] == "invalid_market"
+
+
+# ---------------------------------------------------------------------------
+# insert_signal_decision (V2 domain method)
+# ---------------------------------------------------------------------------
+
+
+def test_insert_signal_decision_minimal() -> None:
+    db = DbClient(":memory:")
+    _seed(db)
+    db.upsert_market("tok-001-no", "cid-001", "will-the-high-lga-no", 88.0, 92.0, "No")
+    now = "2026-05-31T12:00:00Z"
+    db.insert_signal_decision(
+        signal_id="sig-dm-001",
+        yes_token_id="tok-001",
+        no_token_id="tok-001-no",
+        direction="YES_CHEAP",
+        mc_prob=0.72,
+        reference_price=0.65,
+        edge=0.07,
+        final_token_id="tok-001",
+        final_side="BUY",
+        executable_price=0.652,
+        tick_utc=now,
+        approved=1,
+    )
+    row = db._conn.execute(
+        "SELECT * FROM signals WHERE signal_id='sig-dm-001'"
+    ).fetchone()
+    assert row["direction"] == "YES_CHEAP"
+    assert row["mc_prob"] == pytest.approx(0.72)
+    assert row["approved"] == 1
+    assert row["reject_reason"] is None
+    assert row["order_id"] is None
+
+
+def test_insert_signal_decision_rejected_with_reason() -> None:
+    db = DbClient(":memory:")
+    _seed(db)
+    db.upsert_market("tok-001-no", "cid-001", "will-the-high-lga-no", 88.0, 92.0, "No")
+    now = "2026-05-31T12:00:00Z"
+    db.insert_signal_decision(
+        signal_id="sig-dm-002",
+        yes_token_id="tok-001",
+        no_token_id="tok-001-no",
+        direction="YES_CHEAP",
+        mc_prob=0.55,
+        reference_price=0.51,
+        edge=0.04,
+        final_token_id="tok-001",
+        final_side="BUY",
+        executable_price=0.512,
+        tick_utc=now,
+        approved=0,
+        reject_reason="below_min_edge",
+        computed_size=45.0,
+    )
+    row = db._conn.execute(
+        "SELECT * FROM signals WHERE signal_id='sig-dm-002'"
+    ).fetchone()
+    assert row["approved"] == 0
+    assert row["reject_reason"] == "below_min_edge"
+    assert row["computed_size"] == pytest.approx(45.0)
+
+
+# ---------------------------------------------------------------------------
+# create_or_update_redeem_task / mark_redeemed (V2 domain methods)
+# ---------------------------------------------------------------------------
+
+
+def test_create_or_update_redeem_task_creates_row() -> None:
+    db = DbClient(":memory:")
+    db.create_or_update_redeem_task("cid-001")
+    row = db._conn.execute(
+        "SELECT * FROM redeem_tasks WHERE condition_id='cid-001'"
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["attempt_count"] == 0
+    assert row["last_error"] is None
+
+
+def test_create_or_update_redeem_task_increments_attempt_count() -> None:
+    db = DbClient(":memory:")
+    db.create_or_update_redeem_task("cid-001")
+    db.create_or_update_redeem_task("cid-001", status="failed", last_error="timeout")
+    row = db._conn.execute(
+        "SELECT * FROM redeem_tasks WHERE condition_id='cid-001'"
+    ).fetchone()
+    assert row["status"] == "failed"
+    assert row["attempt_count"] == 1
+    assert row["last_error"] == "timeout"
+
+
+def test_create_or_update_redeem_task_skipped_paper() -> None:
+    db = DbClient(":memory:")
+    db.create_or_update_redeem_task("cid-paper", status="skipped_paper")
+    row = db._conn.execute(
+        "SELECT status FROM redeem_tasks WHERE condition_id='cid-paper'"
+    ).fetchone()
+    assert row["status"] == "skipped_paper"
+
+
+def test_mark_redeemed_sets_status_and_timestamp() -> None:
+    db = DbClient(":memory:")
+    db.create_or_update_redeem_task("cid-001")
+    db.mark_redeemed("cid-001")
+    row = db._conn.execute(
+        "SELECT * FROM redeem_tasks WHERE condition_id='cid-001'"
+    ).fetchone()
+    assert row["status"] == "redeemed"
+    assert row["redeemed_at"] is not None

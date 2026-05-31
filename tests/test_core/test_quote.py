@@ -1,6 +1,6 @@
 import pytest
 
-from core.pricing.quote import Quote, compute_quote
+from core.pricing.quote import BookLevel, NormalizedBook, Quote, compute_quote
 from config.settings import Settings
 
 
@@ -240,4 +240,26 @@ def test_quote_module_is_leaf() -> None:
                 assert top not in project_packages, (
                     f"core/pricing/quote.py imports from project package '{alias.name}'"
                 )
+
+
+# ---------------------------------------------------------------------------
+# BookLevel / NormalizedBook TypedDict contract
+# ---------------------------------------------------------------------------
+
+
+def test_book_level_typeddict_usable_as_dict() -> None:
+    level: BookLevel = {"price": 0.60, "size": 100.0}
+    assert level["price"] == pytest.approx(0.60)
+    assert level["size"] == pytest.approx(100.0)
+
+
+def test_normalized_book_typeddict_accepted_by_compute_quote() -> None:
+    book: NormalizedBook = {
+        "bids": [{"price": 0.58, "size": 50.0}],
+        "asks": [{"price": 0.62, "size": 50.0}],
+    }
+    q = compute_quote(book, "BUY", 20.0)
+    assert q.complete_fill is True
+    assert q.vwap_price == pytest.approx(0.62)
+    assert q.mid_price == pytest.approx(0.60)
 
