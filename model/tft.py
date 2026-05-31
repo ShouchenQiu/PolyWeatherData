@@ -30,38 +30,22 @@ except ImportError:
 if TYPE_CHECKING:
     pass
 
+from model.features import HRRR_KNOWN_REALS, OBS_UNKNOWN_REALS
+from model.features import TARGET  # noqa: F401  (re-exported for callers)
+
 # ---------------------------------------------------------------------------
 # Column definitions (must match the training dataset exactly)
 # ---------------------------------------------------------------------------
 
-KNOWN_REALS = [
+# Time-encoding features are known at forecast time; combined with HRRR vars
+# they form the full set of time_varying_known_reals for TFT.
+KNOWN_REALS: list[str] = [
     "local_idx",
     "sin_hour", "cos_hour", "sin_doy", "cos_doy",
-    "TMP_2m",    "DPT_2m",    "RH_2m",    "TMP_sfc",
-    "TMP_850mb", "TMP_500mb",
-    "WS_10m",    "WD_sin_10m",  "WD_cos_10m",
-    "WS_80m",    "WD_sin_80m",  "WD_cos_80m",
-    "WS_500mb",  "WD_sin_500mb","WD_cos_500mb",
-    "log1p_GUST_sfc",
-    "RH_0C",  "RH_frz",
-    "DSWRF", "DLWRF", "USWRF", "ULWRF",
-    "TCDC",  "LCDC",  "MCDC",  "HCDC",
-    "log1p_PRATE", "APCP", "REFC", "PWAT",
-    "CAPE",  "CIN",
-    "HPBL", "SHTFL", "LHTFL",
-    "MSLMA", "VIS", "SNOD",
+    *HRRR_KNOWN_REALS,
 ]
 
-UNKNOWN_REALS = [
-    "raw_tmpc_tenths",
-    "raw_dwpc_tenths",  "raw_wind_spd_kt", "raw_wind_gust_kt",
-    "obs_WS",           "obs_WD_sin",      "obs_WD_cos",
-    "raw_vis_sm",       "raw_alti_inhg",
-    "skyc1",            "skyl1",
-    "p01i",             "is_rain",         "is_snow",
-]
-
-TARGET = "temp_error"
+UNKNOWN_REALS: list[str] = OBS_UNKNOWN_REALS
 
 MAX_ENCODER_LENGTH    = 72
 MAX_PREDICTION_LENGTH = 48

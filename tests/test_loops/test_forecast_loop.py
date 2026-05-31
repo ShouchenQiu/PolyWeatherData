@@ -374,9 +374,8 @@ def test_forecast_loop_tick_writes_prob_store(db, station):
     assert written == ["cid1"]
     snapshot = asyncio.run(prob_store.read("cid1", 0))
     assert (60.0, 70.0) in snapshot.buckets
-    payload = snapshot.buckets[(60.0, 70.0)]
-    assert abs(payload.mc_prob - 0.70) < 1e-9
-    assert payload.quantiles_by_fxx[1]["p50"] == pytest.approx(5.0)
+    assert abs(snapshot.buckets[(60.0, 70.0)] - 0.70) < 1e-9
+    assert snapshot.quantiles_by_fxx[1]["p50"] == pytest.approx(5.0)
 
 
 def test_forecast_loop_tick_skips_event_outside_day_offset(db, station):
@@ -526,7 +525,7 @@ def test_forecast_loop_tick_outcome_case_insensitive(db, station):
 
 
 def test_forecast_loop_tick_pipeline_last_tick_utc_used(db, station):
-    """tick() stores pipeline-returned last_tick_utc in BucketPayload."""
+    """tick() stores pipeline-returned last_tick_utc in ProbabilitySnapshot."""
     from datetime import datetime, timezone
     _seed_event_and_market(db)
     expected_ts = datetime(2026, 3, 25, 11, 45, tzinfo=timezone.utc)
@@ -546,4 +545,4 @@ def test_forecast_loop_tick_pipeline_last_tick_utc_used(db, station):
     )
     asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
     snapshot = asyncio.run(prob_store.read("cid1", 0))
-    assert snapshot.buckets[(60.0, 70.0)].last_tick_utc == expected_ts
+    assert snapshot.last_tick_utc == expected_ts

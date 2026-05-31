@@ -207,9 +207,7 @@ class TradingLoop:
             if not markets:
                 continue
 
-            probs: dict[tuple[float, float], float] = {
-                (lo, hi): p.mc_prob for (lo, hi), p in snapshot.buckets.items()
-            }
+            probs: dict[tuple[float, float], float] = dict(snapshot.buckets)
             books: dict[str, dict] = {}
             if self._orderbook is not None:
                 for mkt in markets:

@@ -3,7 +3,7 @@
 On each tick:
   1. Query active events from the DB.
   2. For each active event + station: run pipeline.run() -> probs.
-  3. Wrap probs in BucketPayload and write to ProbabilityStore.
+  3. Wrap probs in ProbabilitySnapshot and write to ProbabilityStore.
 
 Trading decisions (orderbook, strategy, risk, exchange, PositionTracker)
 are the sole responsibility of TradingLoop (ADR-0004).
@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 from loguru import logger
 
-from core.probability_store import BucketPayload, ProbabilityStore
+from core.probability_store import ProbabilitySnapshot, ProbabilityStore
 
 if TYPE_CHECKING:
     from db.schema import DbClient
@@ -120,16 +120,16 @@ class ForecastLoop:
             )
 
             last_tick = result.get("last_tick_utc") or datetime.now(timezone.utc)
-            bucket_map = {
-                (lo, hi): BucketPayload(
-                    mc_prob=prob,
-                    quantiles_by_fxx=dict(quantiles),
-                    last_tick_utc=last_tick,
-                )
-                for (lo, hi), prob in probs.items()
-            }
+            snapshot = ProbabilitySnapshot(
+                buckets={
+                    (lo, hi): prob
+                    for (lo, hi), prob in probs.items()
+                },
+                quantiles_by_fxx=dict(quantiles),
+                last_tick_utc=last_tick,
+            )
             try:
-                await self.prob_store.write(condition_id, day_offset, bucket_map)
+                await self.prob_store.write(condition_id, day_offset, snapshot)
             except Exception:
                 logger.exception(
                     "ForecastLoop: prob_store.write failed for event {}", condition_id
@@ -138,7 +138,7 @@ class ForecastLoop:
 
             logger.info(
                 "ForecastLoop: wrote {} bucket(s) for event {}",
-                len(bucket_map), condition_id,
+                len(snapshot.buckets), condition_id,
             )
             written.append(condition_id)
 

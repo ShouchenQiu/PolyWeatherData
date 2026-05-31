@@ -7,55 +7,33 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 
-@dataclass(frozen=True)
-class BucketPayload:
-    """Probability and quantile data for a single temperature bucket.
-
-    Frozen so field reassignment is prevented.  Callers must not mutate
-    the nested ``quantiles_by_fxx`` dict; ``ProbabilityStore.write()`` and
-    ``read()`` deepcopy payloads on ingress/egress to enforce isolation.
-
-    Fields
-    ------
-    mc_prob:
-        Monte-Carlo bucket probability for the YES outcome (0..1).
-    quantiles_by_fxx:
-        Dict mapping decoder hour offset (fxx) to a dict of quantile values:
-        ``{"p10": float, "p50": float, "p90": float}``.
-    last_tick_utc:
-        UTC timestamp of the ForecastLoop run that produced this payload.
-        Must be identical for every bucket in the same write() call.
-    """
-
-    mc_prob:          float
-    quantiles_by_fxx: dict[int, dict[str, float]]
-    last_tick_utc:    datetime
-
-
 # Bucket tuple: (lo_f, hi_f)
 _BucketKey = tuple[float, float]
-_BucketMap = dict[_BucketKey, BucketPayload]
+
+_VALID_DAY_OFFSETS = frozenset({0, 1, 2})
 
 
 @dataclass(frozen=True)
 class ProbabilitySnapshot:
     """A complete snapshot for one (condition_id, day_offset) key.
 
-    Returned by ProbabilityStore.read() so callers get the key-level
-    last_tick_utc as an explicit field rather than extracting it from an
-    arbitrary bucket.  All buckets in a snapshot share the same
-    last_tick_utc by construction (enforced at write time).
+    Written by ForecastLoop via ProbabilityStore.write(); read by TradingLoop
+    via ProbabilityStore.read().
 
     Fields
     ------
     buckets:
-        Mapping of (lo_f, hi_f) -> BucketPayload for this key.
+        Mapping of (lo_f, hi_f) -> mc_prob (float, 0..1) for this key.
+    quantiles_by_fxx:
+        Decoder-hour quantile output shared by all buckets in the snapshot:
+        ``{fxx: {"p10": float, "p50": float, "p90": float}}``.
     last_tick_utc:
         UTC timestamp of the ForecastLoop run that produced this snapshot.
     """
 
-    buckets:       dict[tuple[float, float], BucketPayload]
-    last_tick_utc: datetime
+    buckets:          dict[tuple[float, float], float]
+    quantiles_by_fxx: dict[int, dict[str, float]]
+    last_tick_utc:    datetime
 
     def age_minutes(self, now: datetime | None = None) -> float:
         """Return minutes elapsed since last_tick_utc.
@@ -73,20 +51,6 @@ class ProbabilitySnapshot:
         """Return True when age_minutes(now) <= threshold_min."""
         return self.age_minutes(now) <= threshold_min
 
-_VALID_DAY_OFFSETS = frozenset({0, 1, 2})
-
-
-def _validate_last_tick_utc_consistent(buckets: _BucketMap) -> None:
-    """Raise ValueError if buckets carry more than one distinct last_tick_utc."""
-    if len(buckets) <= 1:
-        return
-    ticks = {p.last_tick_utc for p in buckets.values()}
-    if len(ticks) > 1:
-        raise ValueError(
-            "All BucketPayload entries in a single write() call must share the "
-            f"same last_tick_utc, but found {len(ticks)} distinct values: {ticks}"
-        )
-
 
 class ProbabilityStore:
     """Shared in-process store keyed by (condition_id, day_offset).
@@ -99,7 +63,7 @@ class ProbabilityStore:
 
     def __init__(self) -> None:
         self._lock: asyncio.Lock = asyncio.Lock()
-        self._data: dict[tuple[str, int], _BucketMap] = {}
+        self._data: dict[tuple[str, int], ProbabilitySnapshot] = {}
 
     @staticmethod
     def _validate_day_offset(day_offset: int) -> None:
@@ -113,9 +77,9 @@ class ProbabilityStore:
         self,
         condition_id: str,
         day_offset: int,
-        buckets: _BucketMap,
+        snapshot: ProbabilitySnapshot,
     ) -> None:
-        """Replace all bucket data for (condition_id, day_offset).
+        """Replace the snapshot for (condition_id, day_offset).
 
         Parameters
         ----------
@@ -123,21 +87,19 @@ class ProbabilityStore:
             Polymarket condition/event ID.
         day_offset:
             Day offset in {0, 1, 2}.
-        buckets:
-            Mapping of (lo_f, hi_f) -> BucketPayload for this key.
+        snapshot:
+            ProbabilitySnapshot to store.  Deep-copied on ingress so
+            subsequent mutation of the caller's object has no effect.
 
         Raises
         ------
         ValueError
             If day_offset is not in {0, 1, 2}.
-        ValueError
-            If bucket payloads carry inconsistent last_tick_utc values.
         """
         self._validate_day_offset(day_offset)
-        _validate_last_tick_utc_consistent(buckets)
-        snapshot = {k: copy.deepcopy(v) for k, v in buckets.items()}
+        stored = copy.deepcopy(snapshot)
         async with self._lock:
-            self._data[(condition_id, day_offset)] = snapshot
+            self._data[(condition_id, day_offset)] = stored
 
     async def read(
         self,
@@ -155,8 +117,8 @@ class ProbabilityStore:
 
         Returns
         -------
-        ProbabilitySnapshot with buckets and last_tick_utc, or None if the
-        key has not been written yet.
+        ProbabilitySnapshot with buckets, quantiles_by_fxx, and last_tick_utc,
+        or None if the key has not been written yet.
 
         Raises
         ------
@@ -168,6 +130,4 @@ class ProbabilityStore:
             entry = self._data.get((condition_id, day_offset))
             if entry is None:
                 return None
-            buckets = {k: copy.deepcopy(v) for k, v in entry.items()}
-            last_tick_utc = next(iter(buckets.values())).last_tick_utc
-            return ProbabilitySnapshot(buckets=buckets, last_tick_utc=last_tick_utc)
+            return copy.deepcopy(entry)

@@ -11,7 +11,7 @@ from config.settings import Settings
 from config.stations import STATIONS
 from core.alerts import AlertBus, AlertEvent
 from core.positions import PositionTracker
-from core.probability_store import BucketPayload, ProbabilityStore
+from core.probability_store import ProbabilitySnapshot, ProbabilityStore
 from core.risk.fixed_fraction import FixedFraction
 from core.risk.pipeline import RiskPipeline
 from core.strategy.edge import EdgeStrategy
@@ -160,9 +160,9 @@ def test_tick_emits_data_stale_and_returns_empty_when_stale(db) -> None:
     )
 
     async def run() -> list[str]:
-        payload = BucketPayload(mc_prob=0.6, quantiles_by_fxx={},
-                                last_tick_utc=old_tick)
-        await prob_store.write("cid-stale", 0, {(60.0, 70.0): payload})
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.6},
+                                       quantiles_by_fxx={}, last_tick_utc=old_tick)
+        await prob_store.write("cid-stale", 0, snapshot)
         result = await loop.tick(now=now)
         await asyncio.sleep(0)
         return result
@@ -205,9 +205,9 @@ def test_tick_no_alert_when_fresh_no_signals(db) -> None:
     )
 
     async def run() -> list[str]:
-        payload = BucketPayload(mc_prob=0.6, quantiles_by_fxx={},
-                                last_tick_utc=fresh_tick)
-        await prob_store.write("cid-fresh", 0, {(60.0, 70.0): payload})
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.6},
+                                       quantiles_by_fxx={}, last_tick_utc=fresh_tick)
+        await prob_store.write("cid-fresh", 0, snapshot)
         result = await loop.tick(now=now)
         await asyncio.sleep(0)
         return result
@@ -258,9 +258,10 @@ def test_tick_risk_rejected_emits_alert(db) -> None:
     )
 
     async def run() -> list[str]:
-        payload = BucketPayload(mc_prob=0.7, quantiles_by_fxx={},
-                                last_tick_utc=now - timedelta(minutes=5))
-        await prob_store.write("cid-r", 0, {(60.0, 70.0): payload})
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-r", 0, snapshot)
         result = await loop.tick(now=now)
         await asyncio.sleep(0)
         return result
@@ -304,9 +305,10 @@ def test_tick_successful_submit_calls_record_order(db) -> None:
     )
 
     async def run() -> list[str]:
-        payload = BucketPayload(mc_prob=0.7, quantiles_by_fxx={},
-                                last_tick_utc=now - timedelta(minutes=5))
-        await prob_store.write("cid-s", 0, {(60.0, 70.0): payload})
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-s", 0, snapshot)
         return await loop.tick(now=now)
 
     result = asyncio.run(run())
@@ -351,9 +353,10 @@ def test_tick_failed_submit_no_record_order(db) -> None:
     )
 
     async def run() -> list[str]:
-        payload = BucketPayload(mc_prob=0.7, quantiles_by_fxx={},
-                                last_tick_utc=now - timedelta(minutes=5))
-        await prob_store.write("cid-fe", 0, {(60.0, 70.0): payload})
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-fe", 0, snapshot)
         return await loop.tick(now=now)   # must not raise
 
     result = asyncio.run(run())
@@ -397,9 +400,10 @@ def test_tick_yes_and_no_tokens_both_submitted(db) -> None:
     )
 
     async def run() -> list[str]:
-        payload = BucketPayload(mc_prob=0.7, quantiles_by_fxx={},
-                                last_tick_utc=now - timedelta(minutes=5))
-        await prob_store.write("cid-yn", 0, {(60.0, 70.0): payload})
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-yn", 0, snapshot)
         return await loop.tick(now=now)
 
     result = asyncio.run(run())
@@ -452,9 +456,10 @@ def test_tick_passes_real_exposure_and_positions_to_risk(db) -> None:
     )
 
     async def run() -> list[str]:
-        payload = BucketPayload(mc_prob=0.7, quantiles_by_fxx={},
-                                last_tick_utc=now - timedelta(minutes=5))
-        await prob_store.write("cid-exp", 0, {(60.0, 70.0): payload})
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-exp", 0, snapshot)
         return await loop.tick(now=now)
 
     asyncio.run(run())
@@ -505,9 +510,10 @@ def test_tick_empty_order_id_not_recorded(db) -> None:
     )
 
     async def run() -> list[str]:
-        payload = BucketPayload(mc_prob=0.7, quantiles_by_fxx={},
-                                last_tick_utc=now - timedelta(minutes=5))
-        await prob_store.write("cid-empty", 0, {(60.0, 70.0): payload})
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-empty", 0, snapshot)
         return await loop.tick(now=now)
 
     result = asyncio.run(run())
