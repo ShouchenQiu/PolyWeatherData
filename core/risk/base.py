@@ -38,8 +38,16 @@ class BaseRiskModel(ABC):
         signal:           "Signal",
         current_exposure: float,
         open_positions:   dict[str, int] | None = None,
+        positions:        object | None = None,
     ) -> float:
         """Return the USDC size to allocate for this signal.
 
         Must be called only after ``approve_signal()`` returns True.
+
+        Parameters
+        ----------
+        positions:
+            Optional PositionTracker used for SELL exit sizing.
+            When provided, SELL sizes are derived from
+            ``positions.position_shares()`` rather than a fixed USD amount.
         """

@@ -294,3 +294,120 @@ def test_exposure_by_condition_excludes_cancelled(tracker):
 def test_exposure_by_condition_zero_for_other_condition(tracker):
     tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.55)
     assert tracker.exposure_by_condition("cid-other") == 0.0
+
+
+# ---------------------------------------------------------------------------
+# V2F05: record_order -- is_paper and executable_price columns
+# ---------------------------------------------------------------------------
+
+def test_record_order_writes_is_paper_false_by_default(tracker, db):
+    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.55)
+    row = db._conn.execute(
+        "SELECT is_paper FROM orders WHERE order_id='ord-1'"
+    ).fetchone()
+    assert row["is_paper"] == 0
+
+
+def test_record_order_writes_is_paper_true(tracker, db):
+    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.55,
+                         is_paper=True)
+    row = db._conn.execute(
+        "SELECT is_paper FROM orders WHERE order_id='ord-1'"
+    ).fetchone()
+    assert row["is_paper"] == 1
+
+
+def test_record_order_writes_executable_price(tracker, db):
+    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.55,
+                         executable_price=0.57)
+    row = db._conn.execute(
+        "SELECT executable_price FROM orders WHERE order_id='ord-1'"
+    ).fetchone()
+    assert abs(row["executable_price"] - 0.57) < 1e-9
+
+
+def test_record_order_executable_price_defaults_none(tracker, db):
+    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.55)
+    row = db._conn.execute(
+        "SELECT executable_price FROM orders WHERE order_id='ord-1'"
+    ).fetchone()
+    assert row["executable_price"] is None
+
+
+# ---------------------------------------------------------------------------
+# V2F05: mark_filled -- shares and cash flow
+# ---------------------------------------------------------------------------
+
+def test_mark_filled_buy_writes_positive_signed_shares(tracker, db):
+    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.55)
+    tracker.mark_filled("ord-1", 0.50)
+    row = db._conn.execute(
+        "SELECT filled_shares, signed_shares, cash_flow_usd FROM orders WHERE order_id='ord-1'"
+    ).fetchone()
+    # filled_shares = size_usd / fill_price = 20 / 0.50 = 40
+    assert abs(row["filled_shares"] - 40.0) < 1e-6
+    assert abs(row["signed_shares"] - 40.0) < 1e-6   # BUY = positive
+    assert abs(row["cash_flow_usd"] - (-20.0)) < 1e-6  # BUY = outflow
+
+
+def test_mark_filled_sell_writes_negative_signed_shares(tracker, db):
+    tracker.record_order("ord-1", "tok-yes", "cid-1", "SELL", 20.0, 0.55)
+    tracker.mark_filled("ord-1", 0.50)
+    row = db._conn.execute(
+        "SELECT filled_shares, signed_shares, cash_flow_usd FROM orders WHERE order_id='ord-1'"
+    ).fetchone()
+    assert abs(row["filled_shares"] - 40.0) < 1e-6
+    assert abs(row["signed_shares"] - (-40.0)) < 1e-6  # SELL = negative
+    assert abs(row["cash_flow_usd"] - 20.0) < 1e-6     # SELL = inflow
+
+
+# ---------------------------------------------------------------------------
+# V2F05: position_shares
+# ---------------------------------------------------------------------------
+
+def test_position_shares_net_long_after_buy(tracker):
+    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.50)
+    tracker.mark_filled("ord-1", 0.50)
+    assert abs(tracker.position_shares("tok-yes") - 40.0) < 1e-6
+
+
+def test_position_shares_reduces_after_sell(tracker):
+    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.50)
+    tracker.mark_filled("ord-1", 0.50)
+    tracker.record_order("ord-2", "tok-yes", "cid-1", "SELL", 10.0, 0.60)
+    tracker.mark_filled("ord-2", 0.60)
+    # bought 40 shares, sold 10/0.60 = 16.67 shares
+    expected = 40.0 - (10.0 / 0.60)
+    assert abs(tracker.position_shares("tok-yes") - expected) < 1e-6
+
+
+def test_position_shares_zero_when_no_fills(tracker):
+    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.50)
+    # pending, not filled
+    assert tracker.position_shares("tok-yes") == pytest.approx(0.0)
+
+
+def test_position_shares_zero_for_unknown_token(tracker):
+    assert tracker.position_shares("tok-unknown") == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# V2F05: position_size_usd
+# ---------------------------------------------------------------------------
+
+def test_position_size_usd_after_buy(tracker):
+    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.50)
+    tracker.mark_filled("ord-1", 0.50)
+    assert abs(tracker.position_size_usd("tok-yes") - 20.0) < 1e-9
+
+
+def test_position_size_usd_reduces_after_sell(tracker):
+    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 30.0, 0.50)
+    tracker.mark_filled("ord-1", 0.50)
+    tracker.record_order("ord-2", "tok-yes", "cid-1", "SELL", 10.0, 0.60)
+    tracker.mark_filled("ord-2", 0.60)
+    assert abs(tracker.position_size_usd("tok-yes") - 20.0) < 1e-9
+
+
+def test_position_size_usd_zero_for_unknown_token(tracker):
+    assert tracker.position_size_usd("tok-unknown") == pytest.approx(0.0)

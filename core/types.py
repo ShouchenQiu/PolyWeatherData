@@ -34,9 +34,10 @@ class Signal:
     mc_prob:      float
     clob_price:   float
     edge:         float
-    bucket_lo_f:  float = float("-inf")
-    bucket_hi_f:  float = float("inf")
-    condition_id: str   = ""
+    bucket_lo_f:      float        = float("-inf")
+    bucket_hi_f:      float        = float("inf")
+    condition_id:     str          = ""
+    executable_price: float | None = None
 
 
 @dataclass

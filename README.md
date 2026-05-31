@@ -177,10 +177,8 @@ Create a `.env` file in the project root. The bot loads it automatically at star
 
 ```ini
 # Required for live trading only
-POLYMARKET_API_KEY=<your-api-key>
-POLYMARKET_API_SECRET=<your-secret>
-POLYMARKET_API_PASSPHRASE=<your-passphrase>
-POLYMARKET_PROXY_ADDRESS=<0x-wallet-address>   # optional, for gasless settlement
+POLYMARKET_PRIVATE_KEY=<0x-eoa-private-key>
+POLYMARKET_WALLET_ADDRESS=<0x-wallet-address>  # optional; leave blank for SDK default
 
 # Optional overrides
 TRADING_MODE=paper          # paper | live
@@ -202,7 +200,7 @@ logged or stored in the SQLite database.
 | `requests` | REST API calls (IEM, Gamma, NOMADS, sniper endpoints) |
 | `torch`, `pytorch-forecasting`, `lightning` | TFT model training and inference |
 | `python-dotenv` | `.env` loading |
-| `py-clob-client` | Polymarket CLOB order placement (optional) |
+| `polymarket-client` | Polymarket CLOB order placement via `PublicClient` / `SecureClient` (optional) |
 | `streamlit`, `plotly` | Web dashboard UI |
 | `aiohttp` | Async HTTP for snipers |
 
@@ -817,16 +815,16 @@ and updates the running net position for `token_id`.
 **`get_positions() -> list[dict]`**:
 Returns a list of `{"token_id": str, "size": float, "avg_price": float}` for all non-zero positions.
 
-### `core/exchange/clob.py` ¡ª `ClobExchange`
+### `core/exchange/clob.py` — `ClobExchange`
 
-Live Polymarket CLOB adapter. Wraps `py_clob_client`.
+Live Polymarket CLOB adapter. Wraps `polymarket_client.SecureClient`.
 
 **`place_order(token_id, side, size_usd, price) -> str`**:
-Constructs `OrderArgs` (token_id, price, size), calls `client.create_order()` ¡ú `client.post_order()`.
-Returns the exchange-assigned order ID.
+Calls `SecureClient.place_limit_order(token_id, price, size, side)`.
+Returns the exchange-assigned order ID, or empty string on rejection.
 
 **`cancel_order(order_id) -> bool`**:
-Calls `client.cancel(order_id)`. Returns `True` on success.
+Calls `SecureClient.cancel_orders(order_ids=[order_id])`. Returns `True` on success.
 
 ### `core/exchange/settlement.py` ¡ª `Settler`
 

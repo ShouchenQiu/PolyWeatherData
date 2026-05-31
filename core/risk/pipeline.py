@@ -56,6 +56,7 @@ class RiskPipeline(BaseRiskModel):
         signal:           "Signal",
         current_exposure: float,
         open_positions:   dict[str, int] | None = None,
+        positions:        object | None = None,
     ) -> float:
         """Return the minimum positive size across all sub-models.
 
@@ -63,7 +64,8 @@ class RiskPipeline(BaseRiskModel):
         """
         sizes = [
             model.compute_size(signal, current_exposure,
-                               open_positions=open_positions)
+                               open_positions=open_positions,
+                               positions=positions)
             for model in self._models
         ]
         positive = [s for s in sizes if s > 0]

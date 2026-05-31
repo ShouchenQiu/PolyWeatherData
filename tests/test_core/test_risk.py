@@ -21,6 +21,21 @@ def _signal(mc_prob: float = 0.6, clob_price: float = 0.4) -> Signal:
     )
 
 
+@pytest.fixture()
+def db_with_orders():
+    """In-memory DB with a single filled BUY: 50 shares of tok1 at 0.40."""
+    from db.schema import DbClient
+    from core.positions import PositionTracker
+    db = DbClient(":memory:")
+    db.upsert_station("K", 40.0, -70.0, "UTC")
+    db.upsert_event("cid-1", "Q", "slug", "2026-07-04", "K")
+    db.upsert_market("tok1", "cid-1", "ms", 60.0, 70.0, "YES")
+    tracker = PositionTracker(db)
+    tracker.record_order("o1", "tok1", "cid-1", "BUY", 20.0, 0.40)
+    tracker.mark_filled("o1", 0.40)
+    return db
+
+
 # -----------------------------------------------------------------------
 # compute_size
 # -----------------------------------------------------------------------
@@ -102,49 +117,87 @@ def test_zero_position_usd_never_approved():
 
 
 # -----------------------------------------------------------------------
-# FixedFraction -- duplicate-position prevention via open_positions
+# FixedFraction -- open_positions param (backward compat, no longer gates)
 # -----------------------------------------------------------------------
 
-def test_approve_signal_false_when_at_token_limit():
-    """Reject when open_positions[token_id] >= max_open_per_token."""
-    risk = FixedFraction(position_usd=20.0, max_total_usd=500.0,
-                         max_open_per_token=1)
-    sig = _signal()
-    sig = Signal(token_id="tok1", side="BUY", mc_prob=0.6,
-                 clob_price=0.4, edge=0.2)
-    open_pos = {"tok1": 1}   # already at limit
-    assert risk.approve_signal(sig, current_exposure=0.0,
-                               open_positions=open_pos) is False
-
-
-def test_approve_signal_true_when_below_token_limit():
-    risk = FixedFraction(position_usd=20.0, max_total_usd=500.0,
-                         max_open_per_token=2)
-    sig = Signal(token_id="tok1", side="BUY", mc_prob=0.6,
-                 clob_price=0.4, edge=0.2)
-    open_pos = {"tok1": 1}   # 1 open, limit is 2
-    assert risk.approve_signal(sig, current_exposure=0.0,
-                               open_positions=open_pos) is True
-
-
 def test_approve_signal_true_when_token_not_in_open_positions():
-    risk = FixedFraction(position_usd=20.0, max_total_usd=500.0,
-                         max_open_per_token=1)
+    """open_positions is accepted but no longer gates approval."""
+    risk = FixedFraction(position_usd=20.0, max_total_usd=500.0)
     sig = Signal(token_id="tok-new", side="BUY", mc_prob=0.6,
                  clob_price=0.4, edge=0.2)
-    open_pos = {"tok-other": 1}   # different token
+    open_pos = {"tok-other": 1}
     assert risk.approve_signal(sig, current_exposure=0.0,
                                open_positions=open_pos) is True
 
 
 def test_approve_signal_no_open_positions_still_passes():
-    """open_positions=None skips the per-token check (backward compat)."""
-    risk = FixedFraction(position_usd=20.0, max_total_usd=500.0,
-                         max_open_per_token=1)
+    """open_positions=None is accepted; approval depends only on USD caps."""
+    risk = FixedFraction(position_usd=20.0, max_total_usd=500.0)
     sig = Signal(token_id="tok1", side="BUY", mc_prob=0.6,
                  clob_price=0.4, edge=0.2)
     assert risk.approve_signal(sig, current_exposure=0.0,
                                open_positions=None) is True
+
+
+# -----------------------------------------------------------------------
+# FixedFraction -- SELL sizing via positions (V2F05)
+# -----------------------------------------------------------------------
+
+def test_compute_size_sell_uses_position_shares(db_with_orders):
+    """SELL size = max_exit_fraction * net_shares * clob_price."""
+    from core.positions import PositionTracker
+    tracker = PositionTracker(db_with_orders)
+    # 50 shares open from BUY at 0.40
+    risk = FixedFraction(position_usd=20.0, max_total_usd=500.0,
+                         max_exit_fraction=1.0)
+    sig = Signal(token_id="tok1", side="SELL", mc_prob=0.4,
+                 clob_price=0.60, edge=-0.2)
+    size = risk.compute_size(sig, current_exposure=0.0, positions=tracker)
+    # 1.0 * 50 * 0.60 = 30
+    assert size == pytest.approx(30.0)
+
+
+def test_compute_size_sell_partial_exit(db_with_orders):
+    """max_exit_fraction < 1 yields a partial exit."""
+    from core.positions import PositionTracker
+    tracker = PositionTracker(db_with_orders)
+    risk = FixedFraction(position_usd=20.0, max_total_usd=500.0,
+                         max_exit_fraction=0.5)
+    sig = Signal(token_id="tok1", side="SELL", mc_prob=0.4,
+                 clob_price=0.60, edge=-0.2)
+    size = risk.compute_size(sig, current_exposure=0.0, positions=tracker)
+    # 0.5 * 50 * 0.60 = 15
+    assert size == pytest.approx(15.0)
+
+
+def test_compute_size_sell_uses_executable_price_when_set(db_with_orders):
+    """executable_price overrides clob_price for SELL sizing."""
+    from core.positions import PositionTracker
+    tracker = PositionTracker(db_with_orders)
+    risk = FixedFraction(position_usd=20.0, max_total_usd=500.0)
+    sig = Signal(token_id="tok1", side="SELL", mc_prob=0.4,
+                 clob_price=0.60, edge=-0.2, executable_price=0.65)
+    size = risk.compute_size(sig, current_exposure=0.0, positions=tracker)
+    # 1.0 * 50 * 0.65 = 32.5
+    assert size == pytest.approx(32.5)
+
+
+def test_compute_size_sell_zero_when_no_positions():
+    """SELL size is 0 when no positions tracker is provided."""
+    risk = FixedFraction(position_usd=20.0, max_total_usd=500.0)
+    sig = Signal(token_id="tok1", side="SELL", mc_prob=0.4,
+                 clob_price=0.60, edge=-0.2)
+    assert risk.compute_size(sig, current_exposure=0.0) == pytest.approx(0.0)
+
+
+def test_compute_size_sell_zero_when_no_net_shares(db_with_orders):
+    """SELL size is 0 when net shares for the token are 0 or negative."""
+    from core.positions import PositionTracker
+    tracker = PositionTracker(db_with_orders)
+    risk = FixedFraction(position_usd=20.0, max_total_usd=500.0)
+    sig = Signal(token_id="tok-unknown", side="SELL", mc_prob=0.4,
+                 clob_price=0.60, edge=-0.2)
+    assert risk.compute_size(sig, current_exposure=0.0, positions=tracker) == pytest.approx(0.0)
 
 
 # -----------------------------------------------------------------------

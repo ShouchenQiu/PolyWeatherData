@@ -87,8 +87,11 @@ class Settings:
     test_end: str = "2026-04-30"
 
     # Risk
-    max_open_per_token: int = 1
-    quote_size_usd: float = 50.0
+    # max_open_per_token is retained for compatibility but is no longer read
+    # by FixedFraction.approve_signal (removed in V2F05).
+    max_open_per_token: int   = 1
+    max_exit_fraction:  float = 1.0
+    quote_size_usd:     float = 50.0
 
     # Polymarket credentials (V2: private-key wallet pair; read-only properties)
     @property

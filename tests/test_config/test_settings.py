@@ -55,6 +55,10 @@ def test_max_open_per_token():
     assert Settings().max_open_per_token == 1
 
 
+def test_max_exit_fraction_default():
+    assert Settings().max_exit_fraction == 1.0
+
+
 def test_cold_start_hours():
     assert Settings().cold_start_hours == 72
 
