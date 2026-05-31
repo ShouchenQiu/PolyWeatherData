@@ -163,3 +163,53 @@ def test_append_all_fxx_gt_1_returns_zero(tmp_dir):
     df = _make_hrrr(["2026-01-01 00:00"], range(2, 6))   # fxx 2,3,4,5 only
     n = store.append("KLGA", df)
     assert n == 0
+
+
+# ---------------------------------------------------------------------------
+# V2V03: ParquetStore hardening
+# ---------------------------------------------------------------------------
+
+
+def test_read_does_not_create_station_directory(tmp_dir):
+    """read() must not create a station directory as a side-effect. (#46)"""
+    store = ParquetStore(tmp_dir / "store")
+    _ = store.read("KLGA_missing",
+                   pd.Timestamp("2026-01-01", tz="UTC"),
+                   pd.Timestamp("2026-01-31", tz="UTC"))
+    assert not (tmp_dir / "store" / "KLGA_missing").exists()
+
+
+def test_pick_dedup_key_raises_on_bad_schema(tmp_dir):
+    """ValueError when DataFrame has neither HRRR nor obs key columns. (#47)"""
+    store = ParquetStore(tmp_dir / "store")
+    bad_df = pd.DataFrame({"some_col": [1.0, 2.0]})
+    with pytest.raises(ValueError, match="ParquetStore requires"):
+        store._pick_dedup_key(bad_df)
+
+
+def test_append_dedup_normalizes_timestamp_str_vs_timestamp(tmp_dir):
+    """Dedup key normalization prevents double-write when timestamps differ in repr. (#45)"""
+    store = ParquetStore(tmp_dir / "store")
+
+    # Write once using a Timestamp object
+    obs1 = _make_obs(["2026-01-01 00:00"])
+    store.append("KLGA_obs", obs1)
+
+    # Write again with the same logical time but as a string repr (simulates
+    # a round-trip through Parquet where UTC offset formatting may differ)
+    obs2 = pd.DataFrame([{
+        "valid_time": "2026-01-01 00:00:00+00:00",  # string repr
+        "raw_tmpc_tenths": 0.0,
+    }])
+    n = store.append("KLGA_obs", obs2)
+    assert n == 0, "duplicate row was written despite same logical timestamp"
+
+
+def test_parquet_store_write_has_concurrency_todo(tmp_dir):
+    """The _append_to_quarter / write path has a concurrency TODO comment. (#48)"""
+    import inspect
+    from data.storage import parquet_store as ps_mod
+    src = inspect.getsource(ps_mod)
+    assert "concurrent" in src.lower() or "TODO" in src, (
+        "_append_to_quarter must have a TODO about concurrent multi-process access"
+    )

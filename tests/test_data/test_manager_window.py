@@ -252,3 +252,76 @@ def test_build_encoder_obs_window_raises_when_temp_error_nan_leaves_too_few():
         MockSettings.return_value.cold_start_hours = 72
         with pytest.raises(RuntimeError, match="temp_error NaN removal left too few rows"):
             mgr.build_encoder_obs_window(station, init, n_hours=72)
+
+
+# ---------------------------------------------------------------------------
+# V2V03: DataManager._obs_is_complete -- multi-field completeness gate (#54/#56)
+# ---------------------------------------------------------------------------
+
+
+def _complete_obs_row() -> dict:
+    """A row that satisfies all completeness criteria."""
+    return {
+        "valid_time":      pd.Timestamp("2026-01-01 00:00", tz="UTC"),
+        "raw_tmpc_tenths": 5.0,
+        "obs_U":           -3.0,
+        "obs_V":            4.0,
+        "skyc1":            0.0,
+        "p01i":             0.0,
+    }
+
+
+def test_obs_is_complete_accepts_full_row():
+    df = pd.DataFrame([_complete_obs_row()])
+    assert DataManager._obs_is_complete(df) is True
+
+
+def test_obs_is_complete_rejects_temperature_only():
+    """A single-column temperature DataFrame must not pass the gate. (#54)"""
+    df = pd.DataFrame([{"raw_tmpc_tenths": 5.0}])
+    assert DataManager._obs_is_complete(df) is False
+
+
+def test_obs_is_complete_rejects_missing_wind():
+    row = _complete_obs_row()
+    del row["obs_U"]
+    del row["obs_V"]
+    df = pd.DataFrame([row])
+    assert DataManager._obs_is_complete(df) is False
+
+
+def test_obs_is_complete_accepts_obs_ws_as_wind():
+    """obs_WS (scalar wind speed) is sufficient to satisfy the wind requirement."""
+    row = _complete_obs_row()
+    del row["obs_U"]
+    del row["obs_V"]
+    row["obs_WS"] = 5.0
+    df = pd.DataFrame([row])
+    assert DataManager._obs_is_complete(df) is True
+
+
+def test_obs_is_complete_rejects_missing_skyc1():
+    row = _complete_obs_row()
+    row["skyc1"] = float("nan")
+    df = pd.DataFrame([row])
+    assert DataManager._obs_is_complete(df) is False
+
+
+def test_obs_is_complete_rejects_missing_p01i():
+    row = _complete_obs_row()
+    row["p01i"] = float("nan")
+    df = pd.DataFrame([row])
+    assert DataManager._obs_is_complete(df) is False
+
+
+def test_obs_is_complete_rejects_empty_dataframe():
+    df = pd.DataFrame(columns=["raw_tmpc_tenths", "obs_U", "obs_V", "skyc1", "p01i"])
+    assert DataManager._obs_is_complete(df) is False
+
+
+def test_obs_is_complete_accepts_zero_precip():
+    """p01i=0 (no rain) is a valid reading, not missing."""
+    row = _complete_obs_row()
+    row["p01i"] = 0.0
+    df = pd.DataFrame([row])
+    assert DataManager._obs_is_complete(df) is True

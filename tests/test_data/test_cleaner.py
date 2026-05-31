@@ -338,3 +338,38 @@ def test_drop_cold_start_zero_is_noop():
 def test_drop_cold_start_empty_df():
     result = Cleaner.drop_cold_start(pd.DataFrame(), 10)
     assert result.empty
+
+
+# ---------------------------------------------------------------------------
+# V2V03: clean_iem -- sort BEFORE fills so ffill is time-directed (#57)
+# ---------------------------------------------------------------------------
+
+
+def test_iem_ffill_is_time_directed_when_rows_arrive_unsorted():
+    """Rows out of time order must be sorted before ffill so fills go forward.
+
+    If sort comes after ffill, a row at t=02:00 (NaN) would see the NaN at
+    t=00:00 to its left and fill incorrectly.  The correct behavior is:
+      t=00:00 -> NaN   (no prior value -> should stay NaN or bfill from 01:00)
+      t=01:00 -> 3.0
+      t=02:00 -> NaN   (after t=01:00 -> ffilled to 3.0)
+    """
+    df = pd.DataFrame({
+        "valid_time": [
+            "2026-01-01 02:00:00",   # arrives first but is later
+            "2026-01-01 01:00:00",   # arrives second but is earlier
+            "2026-01-01 00:00:00",   # arrives third and is earliest
+        ],
+        "obs_U": [float("nan"), 3.0, float("nan")],
+        "obs_V": [float("nan"), 4.0, float("nan")],
+    })
+    result = Cleaner.clean_iem(df)
+
+    # After sort + ffill + bfill:
+    #   t=00:00: no prior -> bfilled from t=01:00 -> 3.0 / 4.0
+    #   t=01:00: 3.0 / 4.0 (original)
+    #   t=02:00: ffilled from t=01:00 -> 3.0 / 4.0
+    assert result["valid_time"].is_monotonic_increasing, "rows must be sorted ascending"
+    # All three rows end up at 3.0 / 4.0 due to ffill+bfill
+    assert result["obs_U"].tolist() == pytest.approx([3.0, 3.0, 3.0])
+    assert result["obs_V"].tolist() == pytest.approx([4.0, 4.0, 4.0])

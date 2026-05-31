@@ -274,10 +274,11 @@ def test_noaa_fetch_outside_window_returns_empty():
         mock_resp.raise_for_status = lambda: None
         mock_get.return_value = mock_resp
 
+        # METAR is 2026-01-01 14:53; use a narrow window on a different day
         df = src.fetch(
             _STATION,
-            pd.Timestamp("2026-01-02", tz="UTC"),   # METAR is 2026-01-01
-            pd.Timestamp("2026-01-03", tz="UTC"),
+            pd.Timestamp("2026-01-02 14:00", tz="UTC"),
+            pd.Timestamp("2026-01-02 15:00", tz="UTC"),
         )
     assert len(df) == 0
 
@@ -526,3 +527,57 @@ def test_noaa_missing_temp_logs_warning():
         _logger.remove(sink_id)
 
     assert any("temperature unavailable" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# V2V03: NoaaFileSource -- tick-only scope guard (#55)
+# ---------------------------------------------------------------------------
+
+
+def test_noaa_fetch_raises_on_window_wider_than_2h():
+    """NoaaFileSource.fetch() must reject non-tick windows wider than 2 hours. (#55)"""
+    src = NoaaFileSource()
+    start = pd.Timestamp("2026-01-01 00:00", tz="UTC")
+    end   = pd.Timestamp("2026-01-01 03:00", tz="UTC")   # 3h window
+    with pytest.raises(ValueError, match="tick"):
+        src.fetch(_STATION, start, end)
+
+
+def test_noaa_fetch_accepts_narrow_window():
+    """NoaaFileSource.fetch() allows windows of 2 hours or less."""
+    src = NoaaFileSource()
+    with patch.object(src._session, "get") as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = _NOAA_TXT
+        mock_resp.raise_for_status = lambda: None
+        mock_get.return_value = mock_resp
+
+        # 1-hour window is fine
+        df = src.fetch(
+            _STATION,
+            pd.Timestamp("2026-01-01 14:00", tz="UTC"),
+            pd.Timestamp("2026-01-01 15:00", tz="UTC"),
+        )
+    # returns something (or empty ¡ª the guard should not fire)
+    assert isinstance(df, pd.DataFrame)
+
+
+def test_noaa_fetch_tick_mode_skips_window_guard():
+    """When now_utc is provided, the wide-window guard is bypassed. (#55)"""
+    src = NoaaFileSource()
+    with patch.object(src._session, "get") as mock_get:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = _NOAA_TXT
+        mock_resp.raise_for_status = lambda: None
+        mock_get.return_value = mock_resp
+
+        # Wide start/end should be ignored when now_utc is provided
+        df = src.fetch(
+            _STATION,
+            start=pd.Timestamp("2026-01-01", tz="UTC"),
+            end=pd.Timestamp("2026-01-30", tz="UTC"),   # 29-day span -- allowed in tick mode
+            now_utc=pd.Timestamp("2026-01-01 14:00", tz="UTC"),
+        )
+    assert isinstance(df, pd.DataFrame)

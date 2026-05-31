@@ -221,10 +221,31 @@ class DataManager:
 
     @staticmethod
     def _obs_is_complete(df: pd.DataFrame) -> bool:
-        """Return True if the DataFrame has at least one valid temperature reading."""
-        if "raw_tmpc_tenths" not in df.columns:
+        """Return True if df has at least one non-null reading for each required field.
+
+        Required fields: raw_tmpc_tenths, obs_WS or (obs_U and obs_V), skyc1, p01i.
+        A single NOAA row that only contains temperature must not pass this gate.
+        """
+        if "raw_tmpc_tenths" not in df.columns or not df["raw_tmpc_tenths"].notna().any():
             return False
-        return bool(df["raw_tmpc_tenths"].notna().any())
+
+        has_wind = (
+            ("obs_WS" in df.columns and df["obs_WS"].notna().any())
+            or (
+                "obs_U" in df.columns and "obs_V" in df.columns
+                and df["obs_U"].notna().any() and df["obs_V"].notna().any()
+            )
+        )
+        if not has_wind:
+            return False
+
+        if "skyc1" not in df.columns or not df["skyc1"].notna().any():
+            return False
+
+        if "p01i" not in df.columns or not df["p01i"].notna().any():
+            return False
+
+        return True
 
     # ------------------------------------------------------------------
     # Encoder window builder

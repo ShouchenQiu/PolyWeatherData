@@ -115,6 +115,21 @@ class NoaaFileSource(BaseObsSource):
         METAR must be the H-1 :51 observation, which later rounds to the
         current whole hour during shared obs cleaning.
         """
+        if now_utc is None:
+            start_aware = (
+                start.tz_localize("UTC") if start.tzinfo is None
+                else start.tz_convert("UTC")
+            )
+            end_aware = (
+                end.tz_localize("UTC") if end.tzinfo is None
+                else end.tz_convert("UTC")
+            )
+            if end_aware - start_aware > pd.Timedelta(hours=2):
+                raise ValueError(
+                    "NoaaFileSource is a now-utc tick fallback only; "
+                    f"requested window {end_aware - start_aware} exceeds 2 hours"
+                )
+
         if now_utc is not None:
             now_utc_aware = (
                 now_utc.tz_localize("UTC") if now_utc.tzinfo is None

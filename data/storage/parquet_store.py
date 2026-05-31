@@ -22,6 +22,10 @@ class ParquetStore:
     _HRRR_KEY = ["init_time", "fxx"]
     _OBS_KEY = ["valid_time"]
 
+    # Columns that hold timestamps and must be normalised to UTC before
+    # dedup key comparison (protects against string vs Timestamp repr mismatches)
+    _TIMESTAMP_KEY_COLS: frozenset[str] = frozenset({"init_time", "valid_time"})
+
     def __init__(self, base_dir: Path) -> None:
         self._base = Path(base_dir)
         self._base.mkdir(parents=True, exist_ok=True)
@@ -69,7 +73,7 @@ class ParquetStore:
         end: pd.Timestamp,
     ) -> pd.DataFrame:
         """Read all rows with primary timestamp in [start, end]."""
-        station_dir = self._station_dir(station_id)
+        station_dir = self._station_path(station_id)
         if not station_dir.exists():
             return pd.DataFrame()
 
@@ -101,15 +105,36 @@ class ParquetStore:
         q = math.ceil(ts.month / 3)
         return f"{ts.year}-Q{q}"
 
-    def _station_dir(self, station_id: str) -> Path:
-        d = self._base / station_id
+    def _station_path(self, station_id: str) -> Path:
+        """Return the station directory path without creating it."""
+        return self._base / station_id
+
+    def _ensure_station_dir(self, station_id: str) -> Path:
+        """Return the station directory path, creating it if necessary."""
+        d = self._station_path(station_id)
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     def _pick_dedup_key(self, df: pd.DataFrame) -> list[str]:
         if all(c in df.columns for c in self._HRRR_KEY):
             return self._HRRR_KEY
-        return self._OBS_KEY
+        if self._OBS_KEY[0] in df.columns:
+            return self._OBS_KEY
+        raise ValueError(
+            "ParquetStore requires either init_time+fxx (HRRR) or valid_time (obs)"
+        )
+
+    def _make_key_tuples(
+        self, df: pd.DataFrame, dedup_key: list[str]
+    ) -> pd.Series:
+        """Build comparable key tuples, normalising timestamp columns to UTC."""
+        norm: dict[str, pd.Series] = {}
+        for k in dedup_key:
+            col = df[k]
+            if k in self._TIMESTAMP_KEY_COLS:
+                col = pd.to_datetime(col, utc=True)
+            norm[k] = col
+        return pd.DataFrame(norm).apply(lambda r: tuple(r), axis=1)
 
     def _append_to_quarter(
         self,
@@ -118,15 +143,18 @@ class ParquetStore:
         new_rows: pd.DataFrame,
         dedup_key: list[str],
     ) -> int:
-        path = self._station_dir(station_id) / f"{quarter}.parquet"
+        # TODO: _append_to_quarter is not safe for concurrent multi-process
+        # access.  If backfill scripts and the live bot ever run in parallel,
+        # replace to_parquet() with write-to-tmp + os.replace() and add a
+        # per-file lock so two writers cannot corrupt the same quarter file.
+        path = self._ensure_station_dir(station_id) / f"{quarter}.parquet"
 
         if path.exists():
             existing = pd.read_parquet(path)
-            # Identify existing keys to filter out from new_rows
-            existing_keys = existing[dedup_key].apply(
-                lambda r: tuple(r), axis=1
-            )
-            new_keys = new_rows[dedup_key].apply(lambda r: tuple(r), axis=1)
+            # Normalise timestamps before comparison to avoid string vs
+            # Timestamp repr mismatches across Parquet round-trips (#45)
+            existing_keys = self._make_key_tuples(existing, dedup_key)
+            new_keys = self._make_key_tuples(new_rows, dedup_key)
             truly_new = new_rows[~new_keys.isin(set(existing_keys))]
             if truly_new.empty:
                 return 0

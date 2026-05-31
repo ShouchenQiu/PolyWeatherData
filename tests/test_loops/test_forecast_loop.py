@@ -144,6 +144,10 @@ def test_data_manager_obs_fallback_on_incomplete_data(station):
     good.fetch.return_value = pd.DataFrame({
         "valid_time":      [pd.Timestamp("2026-03-25 12:00:00+00:00")],
         "raw_tmpc_tenths": [5.0],
+        "obs_U":           [-3.0],
+        "obs_V":           [4.0],
+        "skyc1":           [0.0],
+        "p01i":            [0.0],
     })
     store = MagicMock()
     store.append.return_value = 1
@@ -194,6 +198,8 @@ def test_data_manager_fetch_iem_stores_cleaned_data(station):
         "raw_dwpc_tenths": [3.2],
         "obs_U": [3.0],
         "obs_V": [4.0],
+        "skyc1": [0.0],
+        "p01i": [0.0],
     })
     store = MagicMock()
     store.append.return_value = 1
@@ -258,6 +264,10 @@ def test_data_manager_fetch_iem_fallback(station):
     good.fetch.return_value = pd.DataFrame({
         "valid_time":      [pd.Timestamp("2026-03-25 12:00:00+00:00")],
         "raw_tmpc_tenths": [12.8],
+        "obs_U":           [-3.0],
+        "obs_V":           [4.0],
+        "skyc1":           [0.0],
+        "p01i":            [0.0],
     })
     store = MagicMock()
     store.append.return_value = 1

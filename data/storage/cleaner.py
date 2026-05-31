@@ -87,11 +87,11 @@ class Cleaner:
         Steps applied in order:
         1. Parse valid_time to UTC-aware Timestamp and round to the
            representative whole hour.
-        2. Fill missing wind gust with wind speed.
-        3. Zero-fill accumulation/flag columns and fill sky cover.
-        4. Fill observed wind components from neighbouring rows.
-        5. Deduplicate by hourly valid_time (keep first).
-        6. Sort by valid_time.
+        2. Sort by valid_time so that forward/backward fills are time-directed.
+        3. Fill missing wind gust with wind speed.
+        4. Zero-fill accumulation/flag columns and fill sky cover.
+        5. Fill observed wind components from neighbouring rows.
+        6. Deduplicate by hourly valid_time (keep first).
         """
         df = df.copy()
 
@@ -101,13 +101,18 @@ class Cleaner:
             df["valid_time"] = pd.to_datetime(df["valid_time"], utc=True)
             df["valid_time"] = df["valid_time"].dt.round("h")
 
-        # 2. Fill missing gust with speed
+        # 2. Sort by valid_time before any fills so ffill/bfill are
+        # time-directed regardless of row arrival order.
+        if "valid_time" in df.columns:
+            df = df.sort_values("valid_time").reset_index(drop=True)
+
+        # 3. Fill missing gust with speed
         if "raw_wind_gust_kt" in df.columns and "raw_wind_spd_kt" in df.columns:
             df["raw_wind_gust_kt"] = df["raw_wind_gust_kt"].fillna(
                 df["raw_wind_spd_kt"]
             )
 
-        # 3. Zero-fill rain/snow flags and accumulation
+        # 4. Zero-fill rain/snow flags and accumulation
         for col in _IEM_ZERO_FILL:
             if col in df.columns:
                 df[col] = df[col].fillna(0.0)
@@ -115,21 +120,17 @@ class Cleaner:
         if "skyc1" in df.columns:
             df["skyc1"] = df["skyc1"].ffill().fillna(0.0)
 
-        # 4. Fill observed wind components after source parsing has preserved
+        # 5. Fill observed wind components after source parsing has preserved
         # missing/variable wind direction as NaN.
         for col in ["obs_U", "obs_V"]:
             if col in df.columns:
                 df[col] = df[col].ffill().bfill().fillna(0.0)
 
-        # 5. Hourly dedup: valid_time is already canonicalized to the hour.
+        # 6. Hourly dedup: valid_time is already canonicalized to the hour.
         if "valid_time" in df.columns:
             df = df.drop_duplicates(subset="valid_time", keep="first")
 
-        # 6. Sort
-        if "valid_time" in df.columns:
-            df = df.sort_values("valid_time").reset_index(drop=True)
-
-        return df
+        return df.reset_index(drop=True)
 
     @staticmethod
     def build_features_hrrr(df: pd.DataFrame) -> pd.DataFrame:
