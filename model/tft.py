@@ -46,8 +46,28 @@ MAX_PREDICTION_LENGTH = 48
 
 
 # ---------------------------------------------------------------------------
-# Feature engineering helpers
+# NullTftModel -- placeholder when checkpoint is not yet configured
 # ---------------------------------------------------------------------------
+
+class NullTftModel:
+    """Placeholder TFT model used when a checkpoint has not been loaded.
+
+    Satisfies the ModelPipeline interface (has a predict() method) so
+    ModelPipeline.__init__ does not reject it, but raises NotImplementedError
+    if predict() is called.  Replace with a real TftModel once a trained
+    checkpoint is available.
+    """
+
+    def predict(
+        self,
+        encoder_df: pd.DataFrame,
+        decoder_df: pd.DataFrame,
+    ) -> dict[int, dict[str, float]]:
+        raise NotImplementedError(
+            "TFT model has not been loaded. "
+            "Provide a trained TftModel checkpoint via Settings.model_store_dir."
+        )
+
 
 # ---------------------------------------------------------------------------
 # TftModel
@@ -121,6 +141,43 @@ class TftModel:
             TFT output (temp_error residuals) is un-residualised by adding
             TMP_2m from decoder_df before returning.
         """
+        # Validate time_idx presence, then sort both frames ascending.
+        if "time_idx" not in encoder_df.columns:
+            raise ValueError("encoder_df must have a 'time_idx' column")
+        if "time_idx" not in decoder_df.columns:
+            raise ValueError("decoder_df must have a 'time_idx' column")
+        encoder_df = encoder_df.sort_values("time_idx").reset_index(drop=True)
+        decoder_df = decoder_df.sort_values("time_idx").reset_index(drop=True)
+
+        # Validate row counts.
+        if len(encoder_df) != MAX_ENCODER_LENGTH:
+            raise ValueError(
+                f"encoder_df must have exactly {MAX_ENCODER_LENGTH} rows, "
+                f"got {len(encoder_df)}"
+            )
+        if len(decoder_df) != MAX_PREDICTION_LENGTH:
+            raise ValueError(
+                f"decoder_df must have exactly {MAX_PREDICTION_LENGTH} rows, "
+                f"got {len(decoder_df)}"
+            )
+
+        # Validate decoder fxx completeness.
+        if "fxx" not in decoder_df.columns:
+            raise ValueError("decoder_df must have a 'fxx' column")
+        actual_fxx = set(decoder_df["fxx"].astype(int).tolist())
+        expected_fxx = set(range(1, MAX_PREDICTION_LENGTH + 1))
+        if actual_fxx != expected_fxx:
+            raise ValueError(
+                f"decoder_df fxx must be exactly {{1..{MAX_PREDICTION_LENGTH}}}, "
+                f"got {sorted(actual_fxx)}"
+            )
+
+        # Validate TMP_2m in decoder: must be present and contain no NaN values.
+        if "TMP_2m" not in decoder_df.columns:
+            raise ValueError("decoder_df must have a 'TMP_2m' column")
+        if decoder_df["TMP_2m"].isna().any():
+            raise ValueError("decoder_df 'TMP_2m' must not contain NaN values")
+
         self._ensure_loaded()
 
         combined = pd.concat(
@@ -138,21 +195,26 @@ class TftModel:
         )
 
         preds_q = self._tft.predict(loader, mode="quantiles")
-        # preds_q shape: (1, 48, 3)  -> quantiles [p10, p50, p90]
+        # preds_q shape: (1, 48, n_quantiles) -> quantiles [p10, p50, p90]
         arr = preds_q[0].cpu().numpy() if hasattr(preds_q[0], "cpu") else preds_q[0]
-        # arr shape: (48, 3) -- temp_error residuals in degC
+
+        # Validate output shape: must be (MAX_PREDICTION_LENGTH, n_quantiles).
+        if arr.ndim != 2 or arr.shape[0] != MAX_PREDICTION_LENGTH:
+            raise ValueError(
+                f"TFT output shape must be ({MAX_PREDICTION_LENGTH}, n_quantiles), "
+                f"got {arr.shape}"
+            )
 
         # Un-residualise: add TMP_2m (HRRR forecast) back to get absolute temperature.
-        # decoder_df is sorted by fxx 1..48; index 0 corresponds to fxx=1.
-        decoder_sorted = decoder_df.sort_values("fxx").reset_index(drop=True)
-        if "TMP_2m" in decoder_sorted.columns:
-            tmp2m_vec = decoder_sorted["TMP_2m"].fillna(0.0).values.astype(float)
-        else:
-            tmp2m_vec = np.zeros(48, dtype=float)
-        arr = arr + tmp2m_vec[:, None]  # broadcast: (48, 3)
+        # decoder_df is sorted by time_idx; sort by fxx to align index 0 -> fxx=1.
+        tmp2m_vec = (
+            decoder_df.sort_values("fxx").reset_index(drop=True)["TMP_2m"]
+            .values.astype(float)
+        )
+        arr = arr + tmp2m_vec[:, None]  # broadcast: (48, n_quantiles)
 
         result: dict[int, dict[str, float]] = {}
-        for i, fxx in enumerate(range(1, 49)):
+        for i, fxx in enumerate(range(1, MAX_PREDICTION_LENGTH + 1)):
             result[fxx] = {
                 "p10": float(arr[i, 0]),
                 "p50": float(arr[i, 1]),

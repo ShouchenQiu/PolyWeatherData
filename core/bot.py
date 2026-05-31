@@ -69,6 +69,7 @@ class BotManager:
         from loops.trading_loop import TradingLoop
         from model.mc import McSampler
         from model.pipeline import ModelPipeline
+        from model.tft import NullTftModel
         from snipers.awc import AwcSniper
         from snipers.sniper_manager import SniperManager
         from snipers.noaa import NoaaSniper
@@ -94,7 +95,7 @@ class BotManager:
 
         # Model
         self.mc         = McSampler(settings)
-        self.pipeline   = ModelPipeline(tft=None, mc=self.mc,
+        self.pipeline   = ModelPipeline(tft=NullTftModel(), mc=self.mc,
                                         data_mgr=self.data_mgr)
 
         # Station (default KLGA)

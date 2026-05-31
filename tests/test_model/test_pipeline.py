@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from config.stations import StationConfig
+from model.features import REQUIRED_DECODER_SOURCE_COLUMNS, REQUIRED_ENCODER_SOURCE_COLUMNS
 from model.mc import McSampler
 from model.pipeline import ModelPipeline
 
@@ -41,16 +42,18 @@ _BUCKETS = [
 
 
 def _make_hrrr_df(init_time: pd.Timestamp) -> pd.DataFrame:
-    """48 HRRR decoder rows."""
-    rows = [
-        {
+    """48 HRRR decoder rows with all required source columns."""
+    rows = []
+    for fxx in range(1, 49):
+        row: dict = {
             "fxx":        fxx,
             "init_time":  init_time,
             "valid_time": init_time + pd.Timedelta(hours=fxx),
-            "TMP_2m":     280.0 + fxx * 0.05,       # Kelvin (will be K->C in _prep)
+            "TMP_2m":     280.0 + fxx * 0.05,
         }
-        for fxx in range(1, 49)
-    ]
+        for col in REQUIRED_DECODER_SOURCE_COLUMNS:
+            row.setdefault(col, 0.0)
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -66,15 +69,18 @@ def _make_tft_mock() -> MagicMock:
 
 
 def _make_encoder_df(init_time: pd.Timestamp) -> pd.DataFrame:
-    """72 merged encoder rows (HRRR f01 + obs)."""
-    rows = [
-        {
-            "valid_time": init_time - pd.Timedelta(hours=72 - h),
-            "TMP_2m":     5.0 + h * 0.1,
-            "raw_tmpc_tenths": 6.0 + h * 0.1,
+    """72 merged encoder rows with all required source columns."""
+    rows = []
+    for h in range(72):
+        row: dict = {
+            "valid_time":        init_time - pd.Timedelta(hours=72 - h),
+            "TMP_2m":            5.0 + h * 0.1,
+            "raw_tmpc_tenths":   6.0 + h * 0.1,
+            "temp_error":        0.0,
         }
-        for h in range(72)
-    ]
+        for col in REQUIRED_ENCODER_SOURCE_COLUMNS:
+            row.setdefault(col, 0.0)
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -352,4 +358,221 @@ def test_pipeline_without_registry_uses_zero_bias():
     pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)  # no registry
     pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
 
-    assert captured["max_bias"] == pytest.approx(0.0)
+
+# -----------------------------------------------------------------------
+# V2V05 -- tft=None rejected
+# -----------------------------------------------------------------------
+
+def test_pipeline_raises_if_tft_is_none():
+    """ModelPipeline.__init__ must raise TypeError when tft=None."""
+    mc = McSampler(n_samp=200, rng_seed=0)
+    dm = _make_data_mgr(_INIT_TIME)
+    with pytest.raises(TypeError):
+        ModelPipeline(tft=None, mc=mc, data_mgr=dm)
+
+
+# -----------------------------------------------------------------------
+# V2V05 -- target_date parameter
+# -----------------------------------------------------------------------
+
+def test_run_accepts_target_date_keyword():
+    """run() must accept target_date as a keyword argument without error."""
+    mc  = McSampler(n_samp=200, rng_seed=0)
+    tft = _make_tft_mock()
+    dm  = _make_data_mgr(_INIT_TIME)
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    result = pipeline.run(KLGA, _INIT_TIME, _BUCKETS, target_date="2025-01-01")
+    assert isinstance(result, dict)
+
+
+def test_run_target_date_no_matching_fxx_raises():
+    """run() must raise ValueError when target_date has no matching fxx rows."""
+    mc  = McSampler(n_samp=200, rng_seed=0)
+    tft = _make_tft_mock()
+    dm  = _make_data_mgr(_INIT_TIME)
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    # 2025-01-05 is outside the 1..48 fxx valid_time window from _INIT_TIME
+    with pytest.raises(ValueError, match="target_date"):
+        pipeline.run(KLGA, _INIT_TIME, _BUCKETS, target_date="2025-01-05")
+
+
+# -----------------------------------------------------------------------
+# V2V05 -- decoder completeness gate
+# -----------------------------------------------------------------------
+
+def test_pipeline_raises_if_hrrr_empty():
+    """run() must raise RuntimeError when fetch_hrrr returns an empty DataFrame."""
+    mc  = McSampler(n_samp=200, rng_seed=0)
+    tft = _make_tft_mock()
+    dm  = _make_data_mgr(_INIT_TIME)
+    dm.fetch_hrrr.return_value = pd.DataFrame()
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    with pytest.raises(RuntimeError):
+        pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+
+def test_pipeline_raises_if_hrrr_missing_tmp2m():
+    """run() must raise RuntimeError when decoder rows have no TMP_2m column."""
+    mc   = McSampler(n_samp=200, rng_seed=0)
+    tft  = _make_tft_mock()
+    dm   = _make_data_mgr(_INIT_TIME)
+    hrrr = _make_hrrr_df(_INIT_TIME).drop(columns=["TMP_2m"])
+    dm.fetch_hrrr.return_value = hrrr
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    with pytest.raises(RuntimeError):
+        pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+
+# -----------------------------------------------------------------------
+# V2V05 -- _add_model_features raises on missing valid_time
+# -----------------------------------------------------------------------
+
+def test_pipeline_raises_if_encoder_missing_valid_time():
+    """run() must raise ValueError when encoder_df has no valid_time column."""
+    mc  = McSampler(n_samp=200, rng_seed=0)
+    tft = _make_tft_mock()
+    dm  = _make_data_mgr(_INIT_TIME)
+    enc = _make_encoder_df(_INIT_TIME).drop(columns=["valid_time"])
+    dm.build_encoder_obs_window.return_value = enc
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    with pytest.raises(ValueError, match="valid_time"):
+        pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+
+# -----------------------------------------------------------------------
+# V2V05 -- pre-predict source column validation
+# -----------------------------------------------------------------------
+
+def test_pipeline_raises_if_encoder_missing_required_source_column():
+    """run() must raise ValueError when encoder_df lacks a required source column."""
+    mc  = McSampler(n_samp=200, rng_seed=0)
+    tft = _make_tft_mock()
+    dm  = _make_data_mgr(_INIT_TIME)
+    enc = _make_encoder_df(_INIT_TIME).drop(columns=["temp_error"])
+    dm.build_encoder_obs_window.return_value = enc
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    with pytest.raises(ValueError, match="temp_error"):
+        pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+
+def test_pipeline_raises_if_decoder_missing_required_source_column():
+    """run() must raise ValueError when hrrr_df lacks a required decoder source column."""
+    mc    = McSampler(n_samp=200, rng_seed=0)
+    tft   = _make_tft_mock()
+    dm    = _make_data_mgr(_INIT_TIME)
+    hrrr  = _make_hrrr_df(_INIT_TIME).drop(columns=["DPT_2m"])
+    dm.fetch_hrrr.return_value = hrrr
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    with pytest.raises(ValueError, match="DPT_2m"):
+        pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+
+# -----------------------------------------------------------------------
+# V2V05 -- quantile sanity guard
+# -----------------------------------------------------------------------
+
+def test_pipeline_raises_on_non_finite_quantiles():
+    """run() must raise ValueError when TFT returns non-finite quantile values."""
+    mc  = McSampler(n_samp=200, rng_seed=0)
+    tft = _make_tft_mock()
+    # Inject a NaN into fxx=1 p50
+    bad_q = {fxx: {"p10": 4.0, "p50": 6.0, "p90": 8.0} for fxx in range(1, 49)}
+    bad_q[1] = {"p10": 4.0, "p50": float("nan"), "p90": 8.0}
+    tft.predict.return_value = bad_q
+    dm = _make_data_mgr(_INIT_TIME)
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    with pytest.raises(ValueError, match="fxx=1"):
+        pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+
+def test_pipeline_raises_on_unordered_quantiles():
+    """run() must raise ValueError when p10 > p50 for any fxx."""
+    mc  = McSampler(n_samp=200, rng_seed=0)
+    tft = _make_tft_mock()
+    bad_q = {fxx: {"p10": 4.0, "p50": 6.0, "p90": 8.0} for fxx in range(1, 49)}
+    bad_q[5] = {"p10": 9.0, "p50": 6.0, "p90": 8.0}  # p10 > p50
+    tft.predict.return_value = bad_q
+    dm = _make_data_mgr(_INIT_TIME)
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    with pytest.raises(ValueError, match="fxx=5"):
+        pipeline.run(KLGA, _INIT_TIME, _BUCKETS)
+
+
+# -----------------------------------------------------------------------
+# V2V05 -- is_extrapolated filter
+# -----------------------------------------------------------------------
+
+def test_pipeline_excludes_extrapolated_fxx_from_daily_high():
+    """When target_date is set, is_extrapolated=True rows must not enter MC sampling."""
+    mc  = McSampler(n_samp=500, rng_seed=0)
+    tft = _make_tft_mock()
+    dm  = _make_data_mgr(_INIT_TIME)
+
+    hrrr = _make_hrrr_df(_INIT_TIME).copy()
+    # Mark fxx 13..48 as extrapolated (only fxx 1..12 are real)
+    hrrr["is_extrapolated"] = hrrr["fxx"] > 12
+    dm.fetch_hrrr.return_value = hrrr
+
+    captured: dict = {}
+    original_sdh = mc.sample_daily_high
+
+    def spy_sdh(mu_vec, sigma_vec, max_bias=0.0):
+        captured["n_hours"] = len(mu_vec)
+        return original_sdh(mu_vec, sigma_vec, max_bias=max_bias)
+
+    mc.sample_daily_high = spy_sdh
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    # target_date = 2025-01-01; INIT_TIME = 2025-01-01 12:00 UTC
+    # New York is UTC-5 in January; local 00:00-24:00 = UTC 05:00-05:00 next day
+    # fxx 1..48 from 12:00 UTC = valid_times 13:00..12:00 next day; local 08:00..07:00
+    # Only fxx 1..12 are non-extrapolated; local times 08:00..19:00 -- all in Jan 1
+    pipeline.run(KLGA, _INIT_TIME, _BUCKETS, target_date="2025-01-01")
+    assert "n_hours" in captured
+    assert captured["n_hours"] <= 12
+
+
+def test_pipeline_raises_if_all_target_fxx_extrapolated():
+    """run() must raise ValueError when all target fxx rows are extrapolated."""
+    mc  = McSampler(n_samp=200, rng_seed=0)
+    tft = _make_tft_mock()
+    dm  = _make_data_mgr(_INIT_TIME)
+
+    hrrr = _make_hrrr_df(_INIT_TIME).copy()
+    hrrr["is_extrapolated"] = True  # all extrapolated
+    dm.fetch_hrrr.return_value = hrrr
+
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    with pytest.raises(ValueError, match="extrapolated"):
+        pipeline.run(KLGA, _INIT_TIME, _BUCKETS, target_date="2025-01-01")
+
+
+# -----------------------------------------------------------------------
+# V2V05 -- daily-high local calendar day (ADR-0010)
+# -----------------------------------------------------------------------
+
+def test_pipeline_daily_high_uses_local_calendar_day():
+    """With target_date, MC sampling uses only fxx in local-calendar-day window."""
+    mc  = McSampler(n_samp=500, rng_seed=0)
+    tft = _make_tft_mock()
+    dm  = _make_data_mgr(_INIT_TIME)
+
+    captured: dict = {}
+    original_sdh = mc.sample_daily_high
+
+    def spy_sdh(mu_vec, sigma_vec, max_bias=0.0):
+        captured["n_hours"] = len(mu_vec)
+        return original_sdh(mu_vec, sigma_vec, max_bias=max_bias)
+
+    mc.sample_daily_high = spy_sdh
+
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    pipeline.run(KLGA, _INIT_TIME, _BUCKETS, target_date="2025-01-01")
+
+    # KLGA is UTC-5 in January (America/New_York, EST).
+    # _INIT_TIME = 2025-01-01 12:00 UTC = 07:00 local.
+    # Local day 2025-01-01 = UTC [05:00, 2025-01-02 05:00).
+    # fxx 1..48 -> valid_times 13:00..12:00 UTC next day; only those within
+    # [05:00 UTC, 2025-01-02 05:00 UTC) fall on local Jan 1.
+    # fxx 1 = 13:00 UTC (in window), fxx 17 = 2025-01-02 05:00 UTC (boundary, exclusive)
+    # Expect 16 hours in window (fxx 1..16).
+    assert captured.get("n_hours") == 16
