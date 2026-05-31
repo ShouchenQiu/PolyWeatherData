@@ -111,17 +111,19 @@ class BaseGribSource(BaseForecastSource):
         The .idx format is:
             msgnum:byte_offset:d=YYYYMMDDHHZ:VAR:LEVEL:FCST:...
 
-        Uses exact VAR field matching (parts[3]) to prevent prefix matches
-        (e.g. MAXTMP must not match a TMP search).
+        Uses exact VAR+LEVEL two-field match to prevent prefix collisions
+        (e.g. MAXTMP must not match TMP) and level cross-matches (e.g.
+        TMP:surface must not match TMP:2 m above ground).
 
         Raises
         ------
         ValueError
             If more than one .idx row maps to the same target column name.
+            The error message includes the matched VAR:LEVEL fields.
         """
         offsets: list[int] = []
         var_fields: list[str] = []
-        raw_texts: list[str] = []
+        level_fields: list[str] = []
 
         for ln in idx_text.strip().splitlines():
             parts = ln.split(":")
@@ -129,24 +131,28 @@ class BaseGribSource(BaseForecastSource):
                 try:
                     offsets.append(int(parts[1]))
                     var_fields.append(parts[3])
-                    raw_texts.append(":".join(parts[3:]))
+                    level_fields.append(parts[4])
                 except ValueError:
                     pass
 
         targets: list[tuple[int, int | None, str]] = []
         seen_colnames: set[str] = set()
 
-        for i, (off, var_field, txt) in enumerate(zip(offsets, var_fields, raw_texts)):
+        for i, (off, var_field, level_field) in enumerate(
+            zip(offsets, var_fields, level_fields)
+        ):
             # For the last message use None (open-ended Range request bytes={start}-)
             end: int | None = offsets[i + 1] - 1 if i + 1 < len(offsets) else None
             for search, colname in HRRR_SEARCHES:
-                s_var = search.split(":")[0]
-                # Exact VAR field match prevents prefix collisions (MAXTMP vs TMP)
-                if var_field == s_var and search in txt:
+                search_parts = search.split(":", 1)
+                s_var = search_parts[0]
+                s_level = search_parts[1] if len(search_parts) > 1 else ""
+                # Exact VAR+LEVEL match prevents prefix and level cross-matches
+                if var_field == s_var and level_field == s_level:
                     if colname in seen_colnames:
                         raise ValueError(
                             f"_grib_source: duplicate .idx rows for column "
-                            f"'{colname}' -- ambiguous byte range"
+                            f"'{colname}' -- matched '{var_field}:{level_field}'"
                         )
                     seen_colnames.add(colname)
                     targets.append((off, end, colname))
@@ -204,6 +210,44 @@ class BaseGribSource(BaseForecastSource):
                     timeout=60,
                 )
                 if resp.status_code == 206:
+                    # Validate Content-Range header before trusting the payload.
+                    cr = resp.headers.get("Content-Range", "")
+                    if not cr:
+                        logger.error(
+                            "_grib_source: 206 response missing Content-Range header; "
+                            "url={} start={} end={}",
+                            grib_url, start, end,
+                        )
+                        return None
+                    # Parse "bytes {cr_start}-{cr_end}/{total}"
+                    try:
+                        cr_body = cr.split(" ", 1)[1]          # "{start}-{end}/{total}"
+                        cr_range, _total = cr_body.split("/", 1)
+                        cr_start_str, cr_end_str = cr_range.split("-", 1)
+                        cr_start = int(cr_start_str)
+                    except Exception:
+                        logger.error(
+                            "_grib_source: 206 response with unparseable "
+                            "Content-Range={!r}; url={}",
+                            cr, grib_url,
+                        )
+                        return None
+                    if cr_start != start:
+                        logger.error(
+                            "_grib_source: 206 Content-Range start mismatch; "
+                            "expected={} got={} Content-Range={!r} url={}",
+                            start, cr_start, cr, grib_url,
+                        )
+                        return None
+                    if end is not None:
+                        expected = end - start + 1
+                        if len(resp.content) != expected:
+                            logger.error(
+                                "_grib_source: 206 byte count mismatch; "
+                                "expected={} got={} Content-Range={!r} url={}",
+                                expected, len(resp.content), cr, grib_url,
+                            )
+                            return None
                     return resp.content
                 if resp.status_code == 200:
                     # Server ignored Range header -- validate Content-Range header

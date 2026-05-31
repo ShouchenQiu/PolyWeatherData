@@ -80,8 +80,13 @@ class BotManager:
         # Data layer
         forecast_store  = ParquetStore(settings.data_store_dir / "hrrr")
         self.obs_store  = ParquetStore(settings.data_store_dir / "obs")
+        s3_base     = f"https://{settings.hrrr_s3_bucket}.s3.amazonaws.com"
+        nomads_base = settings.hrrr_nomads_base
         self.data_mgr   = DataManager(
-            forecast_sources = [HrrrS3Source(), HrrrNomadsSource()],
+            forecast_sources = [
+                HrrrS3Source(base_url=s3_base),
+                HrrrNomadsSource(base_url=nomads_base),
+            ],
             obs_sources      = [IemSource()],
             forecast_store   = forecast_store,
             obs_store        = self.obs_store,

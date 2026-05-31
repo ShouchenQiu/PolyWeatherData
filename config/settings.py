@@ -35,8 +35,12 @@ class Settings:
     max_total_usd: float = 500.0
 
     # HRRR source
-    hrrr_s3_bucket: str = "noaa-hrrr-bdp-pds"
-    hrrr_zarr_bucket: str = "hrrrzarr"
+    hrrr_s3_bucket: str = field(
+        default_factory=lambda: os.environ.get("HRRR_S3_BUCKET", "noaa-hrrr-bdp-pds")
+    )
+    hrrr_zarr_bucket: str = field(
+        default_factory=lambda: os.environ.get("HRRR_ZARR_BUCKET", "hrrrzarr")
+    )
     hrrr_source_priority: list[str] = field(
         default_factory=lambda: ["s3", "nomads"]
     )

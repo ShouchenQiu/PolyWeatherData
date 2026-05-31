@@ -151,12 +151,13 @@ def test_fetch_range_header_format():
         resp = MagicMock()
         resp.status_code = 206
         resp.content = b"\x00" * 10
+        resp.headers = {"Content-Range": "bytes 100-109/5000"}
         return resp
 
     src._session.get = fake_get
-    result = src._fetch_range("https://example.com/file.grib2", 100, 999)
+    result = src._fetch_range("https://example.com/file.grib2", 100, 109)
     assert result == b"\x00" * 10
-    assert captured["headers"] == {"Range": "bytes=100-999"}
+    assert captured["headers"] == {"Range": "bytes=100-109"}
 
 
 def test_fetch_range_open_ended_uses_no_end_byte():
@@ -169,12 +170,61 @@ def test_fetch_range_open_ended_uses_no_end_byte():
         resp = MagicMock()
         resp.status_code = 206
         resp.content = b"\xff" * 20
+        resp.headers = {"Content-Range": "bytes 500-519/5000"}
         return resp
 
     src._session.get = fake_get
     result = src._fetch_range("https://example.com/file.grib2", 500, None)
     assert result == b"\xff" * 20
     assert captured["headers"] == {"Range": "bytes=500-"}
+
+
+def test_fetch_range_206_missing_content_range_rejects():
+    """206 response without Content-Range header is rejected (returns None)."""
+    src = HrrrS3Source()
+
+    def fake_get(url, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.status_code = 206
+        resp.content = b"\x00" * 10
+        resp.headers = {}
+        return resp
+
+    src._session.get = fake_get
+    result = src._fetch_range("https://example.com/file.grib2", 100, 109)
+    assert result is None
+
+
+def test_fetch_range_206_wrong_byte_count_rejects():
+    """206 response with byte count != end-start+1 is rejected."""
+    src = HrrrS3Source()
+
+    def fake_get(url, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.status_code = 206
+        resp.content = b"\x00" * 5          # should be 10 bytes (100-109)
+        resp.headers = {"Content-Range": "bytes 100-109/5000"}
+        return resp
+
+    src._session.get = fake_get
+    result = src._fetch_range("https://example.com/file.grib2", 100, 109)
+    assert result is None
+
+
+def test_fetch_range_206_malformed_content_range_rejects():
+    """206 response with unparseable Content-Range header is rejected."""
+    src = HrrrS3Source()
+
+    def fake_get(url, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.status_code = 206
+        resp.content = b"\x00" * 10
+        resp.headers = {"Content-Range": "not-a-valid-value"}
+        return resp
+
+    src._session.get = fake_get
+    result = src._fetch_range("https://example.com/file.grib2", 100, 109)
+    assert result is None
 
 
 def test_fetch_range_rejects_200_without_content_range():

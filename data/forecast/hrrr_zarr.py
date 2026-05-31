@@ -239,6 +239,7 @@ class HrrrZarrSource(BaseForecastSource):
                     "returning non-MAJOR data only",
                     nearest_major_init,
                 )
+                non_major_df["is_extrapolated"] = False
                 return {station.station_id: non_major_df}
 
             try:

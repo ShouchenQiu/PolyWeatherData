@@ -161,3 +161,50 @@ def test_zarr_base_url_override():
     from data.forecast.hrrr_zarr import HrrrZarrSource
     src = HrrrZarrSource(base_url="https://custom-zarr.example.com/sfc")
     assert src._base_url == "https://custom-zarr.example.com/sfc"
+
+
+# ---------------------------------------------------------------------------
+# Non-MAJOR nearest-fail: is_extrapolated must still be present
+# ---------------------------------------------------------------------------
+
+
+def test_zarr_non_major_nearest_fail_has_is_extrapolated():
+    """When nearest MAJOR fetch fails, non-MAJOR fallback DataFrame has is_extrapolated=False.
+
+    The non-MAJOR path opens z_anl/z_fcst for the 03Z init (open_group calls
+    1 and 2), then recursively calls self.fetch() for the nearest MAJOR run
+    which tries open_group again (call 3).  We raise on call 3 to simulate an
+    unavailable MAJOR store, triggering the early return.  The returned
+    DataFrame must carry is_extrapolated=False.
+    """
+    import data.forecast.hrrr_zarr as _mod
+
+    z_anl, z_fcst, navigate_fn = _make_zarr_mocks()
+
+    with (
+        patch.object(_mod, "_zarr", MagicMock()),
+        patch.object(_mod, "_fsspec", MagicMock()),
+        patch.object(_mod, "_navigate", navigate_fn),
+    ):
+        open_calls = [0]
+
+        def open_group_side(mapper, mode="r"):
+            open_calls[0] += 1
+            if open_calls[0] == 1:
+                return z_anl   # non-MAJOR anl store
+            if open_calls[0] == 2:
+                return z_fcst  # non-MAJOR fcst store
+            raise RuntimeError("nearest MAJOR store unavailable")
+
+        _mod._zarr.open_group.side_effect = open_group_side
+
+        src = _mod.HrrrZarrSource()
+        result = src.fetch(
+            pd.Timestamp("2026-01-01 03:00", tz="UTC"),
+            range(0, 5),
+            _STATION,
+        )
+
+    df = result["KLGA"]
+    assert "is_extrapolated" in df.columns
+    assert (df["is_extrapolated"] == False).all()  # noqa: E712

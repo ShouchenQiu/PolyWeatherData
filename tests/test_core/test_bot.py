@@ -177,3 +177,57 @@ def test_bot_module_has_no_py_clob_client_import():
     import core.bot as mod
     src = inspect.getsource(mod)
     assert "py_clob_client" not in src
+
+
+# ---------------------------------------------------------------------------
+# V2V02 fix: HRRR sources inherit base URL from BotManager settings
+# ---------------------------------------------------------------------------
+
+
+def test_bot_wiring_hrrr_s3_base_from_settings(tmp_path):
+    """HrrrS3Source in DataManager uses base URL from settings.hrrr_s3_bucket."""
+    from data.forecast.hrrr_s3 import HrrrS3Source
+
+    settings = Settings(
+        data_store_dir=tmp_path / "data",
+        hrrr_s3_bucket="custom-s3-bucket",
+    )
+    bot = BotManager(settings, db_path=str(tmp_path / "bot.db"))
+
+    s3_sources = [
+        s for s in bot.data_mgr._forecast_sources if isinstance(s, HrrrS3Source)
+    ]
+    assert s3_sources, "No HrrrS3Source found in DataManager"
+    expected = "https://custom-s3-bucket.s3.amazonaws.com"
+    assert s3_sources[0]._base_url == expected
+
+
+def test_bot_wiring_hrrr_nomads_base_from_settings(tmp_path):
+    """HrrrNomadsSource in DataManager uses base URL from settings.hrrr_nomads_base."""
+    from data.forecast.hrrr_nomads import HrrrNomadsSource
+
+    settings = Settings(
+        data_store_dir=tmp_path / "data",
+        hrrr_nomads_base="https://custom-nomads.example.com/hrrr",
+    )
+    bot = BotManager(settings, db_path=str(tmp_path / "bot.db"))
+
+    nomads_sources = [
+        s for s in bot.data_mgr._forecast_sources if isinstance(s, HrrrNomadsSource)
+    ]
+    assert nomads_sources, "No HrrrNomadsSource found in DataManager"
+    assert nomads_sources[0]._base_url == "https://custom-nomads.example.com/hrrr"
+
+
+def test_hrrr_s3_bucket_env_overrides_default(monkeypatch):
+    """Settings.hrrr_s3_bucket is overridden by HRRR_S3_BUCKET env var."""
+    monkeypatch.setenv("HRRR_S3_BUCKET", "env-override-bucket")
+    s = Settings()
+    assert s.hrrr_s3_bucket == "env-override-bucket"
+
+
+def test_hrrr_zarr_bucket_env_overrides_default(monkeypatch):
+    """Settings.hrrr_zarr_bucket is overridden by HRRR_ZARR_BUCKET env var."""
+    monkeypatch.setenv("HRRR_ZARR_BUCKET", "env-zarr-bucket")
+    s = Settings()
+    assert s.hrrr_zarr_bucket == "env-zarr-bucket"
