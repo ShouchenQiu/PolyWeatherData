@@ -304,6 +304,7 @@ def test_get_markets_for_event_empty(db):
 
 def test_update_event_status(db):
     db.upsert_event("cid1", "q", "slug", "2026-04-01", next(iter(STATIONS)))
+    db.upsert_market("tok1", "cid1", "klga-60-70f", 60.0, 70.0, "YES")
     db.update_event_status("cid1", "active")
     rows = db.get_active_events()
     assert len(rows) == 1

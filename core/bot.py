@@ -133,7 +133,7 @@ class BotManager:
             )
 
         # Events
-        self.discovery  = EventDiscovery(self.db, settings)
+        self.discovery  = EventDiscovery(self.db, settings, alert_bus=self.alert_bus)
         self.lifecycle  = EventLifecycle()
 
         # Snipers
@@ -162,7 +162,12 @@ class BotManager:
             orderbook  = self.orderbook,
             is_paper   = (settings.trading_mode != "live"),
         )
-        self.discovery_loop  = DiscoveryLoop(self.discovery)
+        self.discovery_loop  = DiscoveryLoop(
+            self.discovery,
+            interval_seconds = settings.discovery_loop_interval_s,
+            db               = self.db,
+            lifecycle        = self.lifecycle,
+        )
         self.settlement_loop = SettlementLoop(
             lifecycle  = self.lifecycle,
             positions  = self.positions,

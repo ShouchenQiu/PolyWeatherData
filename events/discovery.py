@@ -184,9 +184,10 @@ class EventDiscovery:
 
             # Dedup: event metadata already persisted -- only sync missing markets.
             if self._db.event_exists(condition_id):
-                added = self._sync_missing_markets(
+                added, unrecog_new = self._sync_missing_markets(
                     ev.get("markets", []), condition_id
                 )
+                n_unrecog += unrecog_new
                 if added:
                     n_updated += 1
                     logger.info(
@@ -274,17 +275,26 @@ class EventDiscovery:
 
     def _sync_missing_markets(
         self, markets: list[dict], condition_id: str
-    ) -> list[dict]:
+    ) -> tuple[list[dict], int]:
         """Upsert markets whose token_id is not yet in the DB.
 
         Called when the parent event already exists.  Only adds genuinely
         new tokens; existing token rows are not touched.
+
+        Applies the same validation as _process_markets (V2V01):
+        - token/outcome length mismatch -> log ERROR + skip
+        - unrecognized slug -> upsert with discovery_status='unrecognized_slug'
+          + emit discovery_warn alert
+
+        Returns
+        -------
+        (added, unrecog_count)
         """
         added: list[dict] = []
+        unrecog_count = 0
+
         for mkt in markets:
-            market_slug   = mkt.get("slug") or mkt.get("market_slug") or ""
-            result        = parse_slug(market_slug)
-            lo_f, hi_f    = result if result is not None else (None, None)
+            market_slug = mkt.get("slug") or mkt.get("market_slug") or ""
 
             token_ids_raw = mkt.get("clobTokenIds") or "[]"
             if isinstance(token_ids_raw, str):
@@ -304,26 +314,40 @@ class EventDiscovery:
             else:
                 outcomes = list(outcomes_raw)
 
-            for idx, token_id in enumerate(token_ids):
+            # V2V01: length parity check -- same rule as _process_markets
+            if len(token_ids) != len(outcomes):
+                logger.error(
+                    "EventDiscovery: token/outcome length mismatch for market {} "
+                    "(tokens={}, outcomes={}); skipping",
+                    market_slug, len(token_ids), len(outcomes),
+                )
+                continue
+
+            result           = parse_slug(market_slug)
+            lo_f, hi_f       = result if result is not None else (None, None)
+            discovery_status = "parsed" if result is not None else "unrecognized_slug"
+
+            if result is None:
+                unrecog_count += 1
+                self._emit_discovery_warn(market_slug, condition_id)
+
+            for token_id, outcome in zip(token_ids, outcomes):
                 if not token_id:
                     continue
                 if self._db.market_exists(token_id):
                     continue
-                outcome = outcomes[idx] if idx < len(outcomes) else "YES"
-                result     = parse_slug(market_slug)
-                lo_f, hi_f = result if result is not None else (None, None)
-                discovery_status = "parsed" if result is not None else "unrecognized_slug"
                 self._db.upsert_market(
-                    token_id         = token_id,
+                    token_id         = str(token_id),
                     condition_id     = condition_id,
                     market_slug      = market_slug,
                     bucket_lo_f      = lo_f,
                     bucket_hi_f      = hi_f,
-                    outcome          = outcome,
+                    outcome          = str(outcome),
                     discovery_status = discovery_status,
                 )
-                added.append({"token_id": token_id, "outcome": outcome})
-        return added
+                added.append({"token_id": str(token_id), "outcome": str(outcome)})
+
+        return added, unrecog_count
 
     def _process_markets(
         self, markets: list[dict], condition_id: str

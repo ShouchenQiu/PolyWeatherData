@@ -315,8 +315,22 @@ class DbClient:
         self._conn.commit()
 
     def get_active_events(self) -> list[dict]:
+        """Return events in 'active' status that have at least one parsed market.
+
+        Applies the V2V01 hard gate: only events with discovery_status='parsed'
+        AND non-null bucket_lo_f / bucket_hi_f are returned.  This prevents
+        callers from receiving events whose markets have never been successfully
+        parsed.
+        """
         cur = self._conn.execute(
-            "SELECT * FROM events WHERE status NOT IN ('resolved', 'cancelled')"
+            """
+            SELECT DISTINCT e.* FROM events e
+            JOIN markets m ON m.condition_id = e.condition_id
+            WHERE e.status = 'active'
+              AND m.discovery_status = 'parsed'
+              AND m.bucket_lo_f IS NOT NULL
+              AND m.bucket_hi_f IS NOT NULL
+            """
         )
         return [dict(r) for r in cur.fetchall()]
 

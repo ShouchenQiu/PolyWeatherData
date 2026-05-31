@@ -78,16 +78,37 @@ def test_market_fk_violation_raises(tmp_db: sqlite3.Connection) -> None:
 
 
 def test_get_active_events_excludes_resolved(tmp_db: sqlite3.Connection) -> None:
+    """V2V01: get_active_events returns only active events with a parsed market."""
     db = DbClient(":memory:")
     db.upsert_station(*STATION)
     db.upsert_event("cid-001", "Q1", "slug1", "2026-07-04", "KLGA", "active")
     db.upsert_event("cid-002", "Q2", "slug2", "2026-07-05", "KLGA", "resolved")
     db.upsert_event("cid-003", "Q3", "slug3", "2026-07-06", "KLGA", "cancelled")
+    # Only cid-001 gets a parsed market -- cid-002/003 are filtered by status
+    db.upsert_market("tok-001", "cid-001", "klga-high-60-70f", 60.0, 70.0, "YES")
     active = db.get_active_events()
     ids = [r["condition_id"] for r in active]
     assert "cid-001" in ids
     assert "cid-002" not in ids
     assert "cid-003" not in ids
+
+
+def test_get_active_events_excludes_event_without_parsed_market(tmp_db: sqlite3.Connection) -> None:
+    """V2V01 hard gate: active event with only unrecognized_slug market not returned."""
+    db = DbClient(":memory:")
+    db.upsert_station(*STATION)
+    db.upsert_event("cid-good", "Q", "slug", "2026-07-04", "KLGA", "active")
+    db.upsert_event("cid-bad",  "Q", "slug", "2026-07-05", "KLGA", "active")
+    db.upsert_market("tok-good", "cid-good", "klga-60-70f", 60.0, 70.0, "YES")
+    db._conn.execute(
+        "INSERT INTO markets (token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome, discovery_status)"
+        " VALUES ('tok-bad', 'cid-bad', 'unrecog', NULL, NULL, 'YES', 'unrecognized_slug')"
+    )
+    db._conn.commit()
+    active = db.get_active_events()
+    ids = [r["condition_id"] for r in active]
+    assert "cid-good" in ids
+    assert "cid-bad" not in ids
 
 
 # ---------------------------------------------------------------------------

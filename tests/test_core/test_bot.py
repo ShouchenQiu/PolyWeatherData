@@ -34,6 +34,29 @@ def test_bot_manager_forecast_loop_shares_prob_store(tmp_path):
     assert bot.trading_loop._prob_store is bot.prob_store
 
 
+def test_bot_wires_discovery_loop_with_db_lifecycle_interval_and_alert_bus(tmp_path):
+    """V2V01: DiscoveryLoop receives db, lifecycle, interval, and EventDiscovery gets alert_bus."""
+    from events.discovery import EventDiscovery
+    from events.lifecycle import EventLifecycle
+    from loops.discovery_loop import DiscoveryLoop
+
+    settings = Settings(
+        data_store_dir=tmp_path / "data",
+        discovery_loop_interval_s=120,
+    )
+    bot = BotManager(settings, db_path=str(tmp_path / "bot.db"))
+
+    # EventDiscovery must receive the shared alert_bus
+    assert bot.discovery._alert_bus is bot.alert_bus
+
+    # DiscoveryLoop must receive db, lifecycle, and the configured interval
+    loop = bot.discovery_loop
+    assert isinstance(loop, DiscoveryLoop)
+    assert loop._db is bot.db
+    assert isinstance(loop._lifecycle, EventLifecycle)
+    assert loop._interval_seconds == 120.0
+
+
 class _RunStub:
     def __init__(self, name: str, calls: list[str], cancel: bool = False) -> None:
         self.name = name

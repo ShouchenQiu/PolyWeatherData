@@ -144,9 +144,8 @@ def test_discover_upserts_event(mem_db):
     with patch.object(disc, "_fetch_events", return_value=response):
         disc.discover()
 
-    events = mem_db.get_active_events()
-    assert len(events) == 1
-    assert events[0]["condition_id"] == "cond-001"
+    # Use event_exists -- discover() inserts with status='discovered', not 'active'
+    assert mem_db.event_exists("cond-001")
 
 
 def test_discover_upserts_markets(mem_db):
@@ -243,8 +242,11 @@ def test_discover_idempotent(mem_db):
         disc.discover()
         disc.discover()
 
-    events = mem_db.get_active_events()
-    assert len(events) == 1
+    # Exactly one event row regardless of how many times discover() ran
+    count = mem_db._conn.execute(
+        "SELECT COUNT(*) FROM events WHERE condition_id='cond-001'"
+    ).fetchone()[0]
+    assert count == 1
 
 
 def test_discover_dedup_second_call_returns_empty(mem_db):
