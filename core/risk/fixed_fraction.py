@@ -60,12 +60,18 @@ class FixedFraction(BaseRiskModel):
         current_exposure: float,
         open_positions:   dict[str, int] | None = None,
     ) -> bool:
-        """Return False unless there is headroom for a full position_usd trade.
+        """Return False unless the signal passes position-level checks.
 
-        Rejects when:
+        BUY signals are rejected when:
         - position_usd <= 0
         - current_exposure + position_usd > max_total_usd
+
+        SELL signals bypass the exposure gate entirely; they are always
+        approved here.  compute_size() returns 0.0 if there are no net
+        shares to sell, which prevents a zero-size order downstream.
         """
+        if signal.side == "SELL":
+            return True
         if self.position_usd <= 0:
             return False
         if current_exposure + self.position_usd > self.max_total_usd:

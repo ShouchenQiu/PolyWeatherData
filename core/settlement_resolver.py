@@ -77,6 +77,11 @@ class SettlementResolver:
             if entry is not None:
                 lo, hi, outcome = entry
                 in_bucket = lo <= actual_max_temp < hi
+                # TODO(V2V12): payout should be filled_shares (not size_usd) for
+                # YES tokens.  After V2F05 a $20 @ 0.40 BUY holds 50 shares;
+                # the winning payout is 50 USDC, not 20.  Fix in the Redeem Loop
+                # slice so that PnLCalculator.realized_pnl() reflects correct
+                # settlement values.
                 payout = size_usd if (outcome == "YES") == in_bucket else 0.0
             else:
                 logger.warning(

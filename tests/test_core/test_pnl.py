@@ -219,3 +219,27 @@ def test_pnl_by_event_groups_by_condition(tracker, calc):
     assert by_event["cid-1"] == pytest.approx(10.0)
     # cid-2: open fill: 25*0.50 + (-10) = 2.5
     assert by_event["cid-2"] == pytest.approx(2.5)
+
+
+def test_pnl_by_event_is_paper_filter_excludes_other_type(tracker, calc):
+    """Events that only have live orders do not appear in is_paper=True results."""
+    # paper order on cid-1
+    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.40,
+                         is_paper=True)
+    tracker.mark_filled("ord-1", 0.40)
+    # live order on cid-2
+    tracker.record_order("ord-2", "tok-yes-2", "cid-2", "BUY", 10.0, 0.40,
+                         is_paper=False)
+    tracker.mark_filled("ord-2", 0.40)
+
+    by_event_paper = calc.pnl_by_event({"tok-yes": 0.60, "tok-yes-2": 0.50},
+                                        is_paper=True)
+    # cid-1 (paper) should appear; cid-2 (live) must NOT appear
+    assert "cid-1" in by_event_paper
+    assert "cid-2" not in by_event_paper
+
+    by_event_live = calc.pnl_by_event({"tok-yes": 0.60, "tok-yes-2": 0.50},
+                                       is_paper=False)
+    assert "cid-2" in by_event_live
+    assert "cid-1" not in by_event_live
+

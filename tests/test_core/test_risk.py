@@ -116,6 +116,22 @@ def test_zero_position_usd_never_approved():
     assert risk.approve_signal(_signal(), current_exposure=0.0) is False
 
 
+def test_approve_signal_sell_bypasses_exposure_gate():
+    """SELL signals are approved even when BUY headroom is exhausted."""
+    risk = FixedFraction(position_usd=20.0, max_total_usd=100.0)
+    sell_sig = Signal(token_id="tok1", side="SELL", mc_prob=0.4,
+                      clob_price=0.60, edge=-0.2)
+    assert risk.approve_signal(sell_sig, current_exposure=100.0) is True
+
+
+def test_approve_signal_sell_bypasses_zero_position_usd_gate():
+    """position_usd=0 blocks BUY but must not block SELL."""
+    risk = FixedFraction(position_usd=0.0, max_total_usd=500.0)
+    sell_sig = Signal(token_id="tok1", side="SELL", mc_prob=0.4,
+                      clob_price=0.60, edge=-0.2)
+    assert risk.approve_signal(sell_sig, current_exposure=0.0) is True
+
+
 # -----------------------------------------------------------------------
 # FixedFraction -- open_positions param (backward compat, no longer gates)
 # -----------------------------------------------------------------------

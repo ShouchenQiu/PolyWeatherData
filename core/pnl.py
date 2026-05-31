@@ -177,9 +177,12 @@ class PnLCalculator:
         Returns ``{condition_id: total_pnl}`` for every condition that has
         at least one non-pending, non-cancelled fill.
         """
+        paper_sql, pap_p = self._paper_clause(is_paper)
         cid_rows = self._db.query(
             "SELECT DISTINCT condition_id FROM orders"
-            " WHERE cash_flow_usd IS NOT NULL OR status='filled'"
+            " WHERE (cash_flow_usd IS NOT NULL OR status='filled')"
+            + paper_sql,
+            tuple(pap_p),
         )
         result: dict[str, float] = {}
         for row in cid_rows:

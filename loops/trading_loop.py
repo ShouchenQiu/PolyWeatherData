@@ -237,6 +237,7 @@ class TradingLoop:
                     signal,
                     current_exposure=current_exposure,
                     open_positions=open_positions,
+                    positions=self._positions,
                 )
                 try:
                     order_id = self._exchange.place_order(
