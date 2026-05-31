@@ -1,0 +1,105 @@
+"""L2 VWAP pricing primitive.
+
+Leaf module: must not import from any other project package.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass
+class Quote:
+    """Result of walking L2 book depth for a given side and size."""
+
+    vwap_price: float
+    max_fillable_usd: float
+    filled_shares: float
+    slippage_bps: float
+    best_bid: float | None
+    best_ask: float | None
+    mid_price: float | None
+    complete_fill: bool
+
+
+def compute_quote(book: dict, side: str, size_usd: float) -> Quote:
+    """Walk L2 depth for the requested side and target size.
+
+    Parameters
+    ----------
+    book:
+        Dict with ``"bids"`` and ``"asks"`` keys, each a list of
+        ``{"price": float, "size": float}`` dicts where size is in shares.
+        Both lists are sorted defensively inside this function (asks
+        ascending, bids descending) so callers need not pre-sort.
+    side:
+        ``"BUY"`` (consume asks ascending) or ``"SELL"`` (consume bids
+        descending).
+    size_usd:
+        Target trade size in USD.
+
+    Returns
+    -------
+    Quote
+        When depth is insufficient to fill ``size_usd``, ``complete_fill``
+        is ``False`` and ``max_fillable_usd < size_usd``.  Callers must
+        skip or cancel in that case; no partial fills are executed in v1.
+    """
+    bids: list[dict] = sorted(
+        book.get("bids", []),
+        key=lambda x: float(x["price"]),
+        reverse=True,
+    )
+    asks: list[dict] = sorted(
+        book.get("asks", []),
+        key=lambda x: float(x["price"]),
+    )
+
+    best_bid: float | None = float(bids[0]["price"]) if bids else None
+    best_ask: float | None = float(asks[0]["price"]) if asks else None
+    if best_bid is not None and best_ask is not None:
+        mid_price: float | None = (best_bid + best_ask) / 2.0
+    else:
+        mid_price = best_bid if best_bid is not None else best_ask
+
+    levels = asks if side == "BUY" else bids
+
+    remaining = size_usd
+    filled_shares = 0.0
+    total_cost = 0.0
+
+    for level in levels:
+        price = float(level["price"])
+        avail_shares = float(level["size"])
+        usd_at_level = price * avail_shares
+        usd_to_spend = min(remaining, usd_at_level)
+        shares_taken = usd_to_spend / price
+
+        filled_shares += shares_taken
+        total_cost += usd_to_spend
+        remaining -= usd_to_spend
+
+        if remaining <= 1e-9:
+            break
+
+    max_fillable_usd = total_cost
+    complete_fill = remaining <= 1e-9
+
+    vwap_price = total_cost / filled_shares if filled_shares > 0 else 0.0
+
+    if side == "BUY" and best_ask is not None and filled_shares > 0:
+        slippage_bps = (vwap_price - best_ask) / best_ask * 10_000.0
+    elif side == "SELL" and best_bid is not None and filled_shares > 0:
+        slippage_bps = (best_bid - vwap_price) / best_bid * 10_000.0
+    else:
+        slippage_bps = 0.0
+
+    return Quote(
+        vwap_price=vwap_price,
+        max_fillable_usd=max_fillable_usd,
+        filled_shares=filled_shares,
+        slippage_bps=slippage_bps,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        mid_price=mid_price,
+        complete_fill=complete_fill,
+    )

@@ -88,6 +88,7 @@ class Settings:
 
     # Risk
     max_open_per_token: int = 1
+    quote_size_usd: float = 50.0
 
     # Polymarket credentials (read-only properties)
     @property
