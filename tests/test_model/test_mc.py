@@ -388,3 +388,37 @@ def test_sample_daily_high_accepts_hour_indices():
     out = s.sample_daily_high(mu, sigma, hour_indices=indices)
     assert out.shape == (100,)
 
+
+# -----------------------------------------------------------------------
+# hour_indices defensive validation (Batch 4 review)
+# -----------------------------------------------------------------------
+
+def test_mc_sample_raises_when_hour_indices_length_mismatches_mu():
+    """_mc_sample raises ValueError when hour_indices length != len(mu_vec)."""
+    s = McSampler(n_samp=100, rng_seed=0)
+    rng = np.random.default_rng(0)
+    A = rng.standard_normal((48, 48))
+    s.set_cov(A @ A.T + np.eye(48))
+    mu = np.zeros(4)
+    sigma = np.ones(4)
+    with pytest.raises(ValueError, match="hour_indices"):
+        s._mc_sample(mu, sigma, hour_indices=[0, 1, 2])   # length 3 != 4
+
+
+def test_mc_sample_raises_when_hour_indices_has_negative_index():
+    """_mc_sample raises ValueError when any hour_index is negative."""
+    s = McSampler(n_samp=100, rng_seed=0)
+    mu = np.zeros(3)
+    sigma = np.ones(3)
+    with pytest.raises(ValueError, match="hour_indices"):
+        s._mc_sample(mu, sigma, hour_indices=[0, 1, -1])
+
+
+def test_mc_sample_raises_when_hour_indices_has_duplicates():
+    """_mc_sample raises ValueError when hour_indices contains duplicate entries."""
+    s = McSampler(n_samp=100, rng_seed=0)
+    mu = np.zeros(3)
+    sigma = np.ones(3)
+    with pytest.raises(ValueError, match="hour_indices"):
+        s._mc_sample(mu, sigma, hour_indices=[0, 1, 1])
+

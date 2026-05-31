@@ -546,15 +546,34 @@ class DataManager:
             )
 
         # --- Both windows are sufficient ---
-        # first_eligible_init derived from the earliest row in the encoder window
-        # (approximate; the true first global row may be earlier, but this is
-        # always <= init_time when the window is full).
-        hrrr_ts = self._min_valid_time(hrrr_window)
-        obs_ts  = self._min_valid_time(obs_window)
-        if hrrr_ts is not None and obs_ts is not None:
-            first_eligible = max(hrrr_ts, obs_ts) + pd.Timedelta(hours=encoder_hours)
+        # Enforce cold-start gate based on the absolute first row in the full
+        # store, not just the encoder-window min.  When data collection started
+        # fewer than cold_start_hours + encoder_hours ago, the encoder window may
+        # be full (exactly 72 rows) even though burn-in is not complete.
+        first_hrrr = self._estimate_first_eligible(
+            self._forecast_store, station.station_id, window_start,
+            encoder_hours, current_window=hrrr_window,
+            cold_start_hours=cold_start,
+        )
+        first_obs = self._estimate_first_eligible(
+            self._obs_store, station.station_id, window_start,
+            encoder_hours, current_window=obs_window,
+            cold_start_hours=cold_start,
+        )
+        if first_hrrr is not None and first_obs is not None:
+            first_eligible = max(first_hrrr, first_obs)
+        elif first_hrrr is not None:
+            first_eligible = first_hrrr
+        elif first_obs is not None:
+            first_eligible = first_obs
         else:
             first_eligible = None
+
+        if first_eligible is not None and init_utc < first_eligible:
+            return ReadinessStatus(
+                ready=False, reason="cold_start",
+                first_eligible_init=first_eligible,
+            )
         return ReadinessStatus(ready=True, reason="ok", first_eligible_init=first_eligible)
 
     def is_inference_ready(

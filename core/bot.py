@@ -111,7 +111,7 @@ class BotManager:
         if cov is not None:
             self.mc.set_cov(cov)
         self.pipeline = ModelPipeline(tft=tft, mc=self.mc,
-                                      data_mgr=self.data_mgr)
+                                      data_mgr=self.data_mgr, registry=registry)
 
         # Station (default KLGA)
         self.station    = next(iter(STATIONS.values()))

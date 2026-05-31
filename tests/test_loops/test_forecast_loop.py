@@ -608,3 +608,23 @@ def test_forecast_loop_runs_pipeline_when_data_manager_none(db, station):
 
     pipeline.run.assert_called_once()
     assert written == ["cid1"]
+
+
+def test_forecast_loop_tick_passes_target_date_to_pipeline(db, station):
+    """tick() forwards event_end_date as target_date kwarg to pipeline.run()."""
+    _seed_event_and_market(db)
+
+    pipeline = MagicMock()
+    pipeline.run.return_value = {"probs": {}, "quantiles": {}}
+    loop = ForecastLoop(
+        pipeline     = pipeline,
+        prob_store   = ProbabilityStore(),
+        db           = db,
+        station      = station,
+        data_manager = None,
+    )
+
+    asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
+
+    _, kwargs = pipeline.run.call_args
+    assert kwargs.get("target_date") == "2026-03-25"

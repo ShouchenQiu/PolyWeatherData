@@ -21,8 +21,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-import numpy as np
-
 if TYPE_CHECKING:
     from db.schema import DbClient
     from model.tft import TftModel
@@ -308,55 +306,12 @@ class ModelRegistry:
             )
             return None
 
-        return np.load(str(cov_path))
-
-    # ------------------------------------------------------------------
-    # Covariance
-    # ------------------------------------------------------------------
-
-    def load_covariance(
-        self,
-        version: str | None = None,
-    ) -> "np.ndarray | None":
-        """Load the empirical covariance matrix for the given model version.
-
-        Looks for a ``covariance.npy`` file in the version directory alongside
-        the model checkpoint.  If no version is specified the currently active
-        version is used.
-
-        Parameters
-        ----------
-        version:
-            Version string to load from.  When None the active version is used.
-
-        Returns
-        -------
-        (n_hours, n_hours) ndarray when present, otherwise None.  A WARNING is
-        logged when the file is absent; the caller (bot.py) will fall back to the
-        diagonal covariance built from per-hour sigma_vec.
-        """
-        from loguru import logger
-
-        if version is None:
-            version = self._read_active_version()
-            if version is None:
-                row = self._db_latest_row()
-                version = row["version"] if row else None
-
-        if version is None:
-            logger.warning(
-                "ModelRegistry: no active version -- "
-                "covariance.npy not found; MC will use diagonal (uncorrelated) assumption"
+        cov = np.load(str(cov_path))
+        _COV_DIM = 48
+        if cov.shape != (_COV_DIM, _COV_DIM):
+            raise ValueError(
+                f"covariance.npy at {cov_path} has shape {cov.shape}; "
+                f"expected ({_COV_DIM}, {_COV_DIM}). "
+                "Re-run fit_cov() with a 48-hour residual window and re-publish."
             )
-            return None
-
-        cov_path = self.store_dir / version / "covariance.npy"
-        if not cov_path.exists():
-            logger.warning(
-                "ModelRegistry: covariance.npy not found at {} -- "
-                "MC will use diagonal (uncorrelated) assumption",
-                cov_path,
-            )
-            return None
-
-        return np.load(str(cov_path))
+        return cov

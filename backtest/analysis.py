@@ -67,19 +67,19 @@ class BacktestAnalysis:
         DataFrame returned by ``BacktestEngine.run()``.  Must contain
         columns: edge, pnl_if_yes, pnl_if_no, halfspread,
         actual_outcome, mc_prob, clob_price, coverage_type,
-        lead_hours_to_4pm, init_utc, init_est (UTC-parseable string).
+        lead_hours_to_4pm, init_utc, init_local (UTC-parseable string).
     """
 
     def __init__(self, results_df: pd.DataFrame) -> None:
         self._df = results_df.copy()
-        # Pre-add lead_bin and init_est_hour for repeated calls
+        # Pre-add lead_bin and init_local_hour for repeated calls
         if "lead_bin" not in self._df.columns:
             self._df["lead_bin"] = self._df["lead_hours_to_4pm"].apply(
                 _lead_bin
             )
-        if "init_est_hour" not in self._df.columns and "init_est" in self._df.columns:
-            self._df["init_est_hour"] = pd.to_datetime(
-                self._df["init_est"]
+        if "init_local_hour" not in self._df.columns and "init_local" in self._df.columns:
+            self._df["init_local_hour"] = pd.to_datetime(
+                self._df["init_local"]
             ).dt.hour
 
     # ------------------------------------------------------------------
@@ -171,19 +171,19 @@ class BacktestAnalysis:
     ) -> pd.DataFrame:
         """P&L metrics grouped by init EST hour.
 
-        Returns a DataFrame with one row per (init_est_hour, threshold).
+        Returns a DataFrame with one row per (init_local_hour, threshold).
         """
         if thresholds is None:
             thresholds = [0.05, 0.10, 0.15, 0.20]
-        if "init_est_hour" not in self._df.columns:
+        if "init_local_hour" not in self._df.columns:
             return pd.DataFrame()
         rows = []
-        for hr in sorted(self._df["init_est_hour"].unique()):
-            sub = self._df[self._df["init_est_hour"] == hr]
+        for hr in sorted(self._df["init_local_hour"].unique()):
+            sub = self._df[self._df["init_local_hour"] == hr]
             for thr in thresholds:
                 r = _pnl_summary(sub, thr)
                 if r and r["N_total"] > 0:
-                    rows.append({"init_est_hour": hr, **r})
+                    rows.append({"init_local_hour": hr, **r})
         return pd.DataFrame(rows)
 
     # ------------------------------------------------------------------

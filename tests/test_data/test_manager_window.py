@@ -244,25 +244,65 @@ def _make_manager_with_side_effects(
 
 
 def test_inference_readiness_ok_when_full_window():
-    """Returns ready=True and reason='ok' when both windows are fully populated."""
+    """Returns ready=True and reason='ok' when both windows are fully populated and
+    store has data back at least cold_start_hours + encoder_hours (144 h) before init.
+    """
     init = pd.Timestamp("2026-01-10 12:00:00", tz="UTC")
     window_start = init - pd.Timedelta(hours=72)
 
-    hrrr_df = _make_hrrr_rows(72, window_start)
-    obs_df  = _make_obs_rows(72, window_start)
-    mgr = DataManager([], [], *[_s := MagicMock(), _s2 := MagicMock()])
-    # Rebuild properly
-    fc_store = MagicMock()
-    ob_store = MagicMock()
-    fc_store.read.return_value = hrrr_df
-    ob_store.read.return_value = obs_df
-    mgr = DataManager([], [], fc_store, ob_store)
+    hrrr_window = _make_hrrr_rows(72, window_start)
+    obs_window  = _make_obs_rows(72, window_start)
+
+    # Historical data starts at init - 144h so that:
+    # first_ts = init - 144h
+    # first_eligible = (init - 144h) + 72 + 72 = init -> not > init -> ready=True
+    hist_start = init - pd.Timedelta(hours=144)
+    hist_hrrr  = _make_hrrr_rows(1, hist_start)
+    hist_obs   = _make_obs_rows(1, hist_start)
+
+    mgr = _make_manager_with_side_effects(
+        window_hrrr=hrrr_window,
+        window_obs=obs_window,
+        hist_hrrr=hist_hrrr,
+        hist_obs=hist_obs,
+    )
 
     status = mgr.inference_readiness(_make_station(), init, encoder_hours=72)
 
     assert status.ready is True
     assert status.reason == "ok"
     assert status.first_eligible_init is not None
+
+
+def test_inference_readiness_cold_start_even_with_full_window():
+    """Returns cold_start even when encoder window has 72 rows but store is too young.
+
+    When data collection started only 72h ago, the encoder window is full but
+    the cold-start burn-in period has not elapsed.  The fix ensures that
+    _estimate_first_eligible() is called even for the "both windows full" path.
+    """
+    init = pd.Timestamp("2026-01-10 12:00:00", tz="UTC")
+    window_start = init - pd.Timedelta(hours=72)
+
+    hrrr_window = _make_hrrr_rows(72, window_start)
+    obs_window  = _make_obs_rows(72, window_start)
+
+    # No historical data before window_start (store started at init - 72h)
+    empty_hist = pd.DataFrame()
+
+    mgr = _make_manager_with_side_effects(
+        window_hrrr=hrrr_window,
+        window_obs=obs_window,
+        hist_hrrr=empty_hist,
+        hist_obs=empty_hist,
+    )
+
+    status = mgr.inference_readiness(_make_station(), init, encoder_hours=72)
+
+    assert status.ready is False
+    assert status.reason == "cold_start"
+    assert status.first_eligible_init is not None
+    assert status.first_eligible_init > init
 
 
 def test_inference_readiness_cold_start_when_no_data():
@@ -433,9 +473,19 @@ def test_is_inference_ready_returns_bool():
     init = pd.Timestamp("2026-01-10 12:00:00", tz="UTC")
     window_start = init - pd.Timedelta(hours=72)
 
-    hrrr_df = _make_hrrr_rows(72, window_start)
-    obs_df  = _make_obs_rows(72, window_start)
-    mgr, _, _ = _make_manager(hrrr_df, obs_df)
+    hrrr_window = _make_hrrr_rows(72, window_start)
+    obs_window  = _make_obs_rows(72, window_start)
+
+    hist_start = init - pd.Timedelta(hours=144)
+    hist_hrrr  = _make_hrrr_rows(1, hist_start)
+    hist_obs   = _make_obs_rows(1, hist_start)
+
+    mgr = _make_manager_with_side_effects(
+        window_hrrr=hrrr_window,
+        window_obs=obs_window,
+        hist_hrrr=hist_hrrr,
+        hist_obs=hist_obs,
+    )
 
     result = mgr.is_inference_ready(_make_station(), init, encoder_hours=72)
     assert result is True

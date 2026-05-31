@@ -134,6 +134,21 @@ class McSampler:
             raise ValueError("_mc_sample: sigma_vec contains non-finite values")
         if not np.all(sigma_vec > 0):
             raise ValueError("_mc_sample: sigma_vec must contain strictly positive values")
+        if hour_indices is not None:
+            idx = list(hour_indices)
+            if len(idx) != len(mu_vec):
+                raise ValueError(
+                    f"_mc_sample: hour_indices length {len(idx)} != "
+                    f"mu_vec length {len(mu_vec)}"
+                )
+            if any(i < 0 for i in idx):
+                raise ValueError(
+                    "_mc_sample: hour_indices must be non-negative integers"
+                )
+            if len(set(idx)) != len(idx):
+                raise ValueError(
+                    "_mc_sample: hour_indices must not contain duplicates"
+                )
         n = len(mu_vec)
 
         if self._cov is not None:

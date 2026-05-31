@@ -34,6 +34,11 @@ def _make_strategy():
     return types.SimpleNamespace()
 
 
+def _make_station(timezone: str = "America/New_York"):
+    """Fake StationConfig with a timezone attribute."""
+    return types.SimpleNamespace(timezone=timezone)
+
+
 def _clob_row(
     event_date: str,
     ts_utc: str,
@@ -115,7 +120,7 @@ class TestBacktestEnginePnL:
         clob_df = _make_clob_df(clob_rows)
         engine = BacktestEngine(pipeline, strategy, clob_df, actual_highs,
                                 min_edge=0.0, cold_start_hours=0)
-        df = engine.run("2024-01-01", "2024-01-01", types.SimpleNamespace(), init_hours=[6])
+        df = engine.run("2024-01-01", "2024-01-01", _make_station(), init_hours=[6])
         return df
 
     def test_pnl_if_yes_correct(self):
@@ -175,7 +180,7 @@ class TestClobWindowSelection:
                                 _make_clob_df(rows), actual_highs,
                                 cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
-                        types.SimpleNamespace(), init_hours=[6])
+                        _make_station(), init_hours=[6])
         assert not df.empty
         assert df.iloc[0]["clob_price"] == pytest.approx(0.55, abs=1e-5)
         assert df.iloc[0]["clob_quality"] == "real"
@@ -191,7 +196,7 @@ class TestClobWindowSelection:
                                 _make_clob_df(rows), actual_highs,
                                 cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
-                        types.SimpleNamespace(), init_hours=[6])
+                        _make_station(), init_hours=[6])
         assert not df.empty
         assert df.iloc[0]["clob_quality"] == "filled"
 
@@ -207,7 +212,7 @@ class TestClobWindowSelection:
                                 _make_clob_df(rows), actual_highs,
                                 cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
-                        types.SimpleNamespace(), init_hours=[6])
+                        _make_station(), init_hours=[6])
         assert df.empty
 
 
@@ -230,7 +235,7 @@ class TestCutoffAndCoverage:
                                 cold_start_hours=0)
         # init at 21:00 UTC on same target day -> cutoff hit
         df = engine.run("2024-01-01", "2024-01-01",
-                        types.SimpleNamespace(), init_hours=[21])
+                        _make_station(), init_hours=[21])
         assert df.empty
 
     def test_partial_coverage_detected(self):
@@ -247,7 +252,7 @@ class TestCutoffAndCoverage:
                                 _make_clob_df(rows), actual_highs,
                                 cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
-                        types.SimpleNamespace(), init_hours=[18])
+                        _make_station(), init_hours=[18])
         if not df.empty:
             row = df[df["target_date"] == "2024-01-02"]
             if not row.empty:
@@ -272,7 +277,7 @@ class TestMinEdge:
                                 _make_clob_df(rows), actual_highs,
                                 min_edge=0.05, cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
-                        types.SimpleNamespace(), init_hours=[6])
+                        _make_station(), init_hours=[6])
         assert df.empty
 
     def test_min_edge_keeps_large_edges(self):
@@ -286,7 +291,7 @@ class TestMinEdge:
                                 _make_clob_df(rows), actual_highs,
                                 min_edge=0.05, cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
-                        types.SimpleNamespace(), init_hours=[6])
+                        _make_station(), init_hours=[6])
         assert not df.empty
 
 
@@ -303,7 +308,7 @@ class TestEmptyClob:
                                 _make_clob_df([]), actual_highs,
                                 cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
-                        types.SimpleNamespace(), init_hours=[6])
+                        _make_station(), init_hours=[6])
         assert df.empty
 
 
@@ -324,7 +329,7 @@ class TestMissingActualHighs:
                                 _make_clob_df(rows), {},
                                 cold_start_hours=0)
         df = engine.run("2024-01-01", "2024-01-01",
-                        types.SimpleNamespace(), init_hours=[6])
+                        _make_station(), init_hours=[6])
         assert df.empty
 
 
@@ -359,7 +364,7 @@ class TestColdStartGuard:
             cold_start_hours=72,
         )
         df = engine.run("2024-01-01", "2024-01-04",
-                        types.SimpleNamespace(), init_hours=[6])
+                        _make_station(), init_hours=[6])
 
         if not df.empty:
             # All recorded init_utc must be >= start_date + 72h
@@ -382,7 +387,7 @@ class TestColdStartGuard:
             cold_start_hours=0,
         )
         df = engine.run("2024-01-01", "2024-01-01",
-                        types.SimpleNamespace(), init_hours=[6])
+                        _make_station(), init_hours=[6])
         assert not df.empty
 
     def test_default_cold_start_is_72(self):
@@ -406,7 +411,7 @@ class TestColdStartGuard:
         rows = [
             _clob_row("2024-01-02", "2024-01-01 06:00:00", "slug", 65.0, 75.0, 0.55),
         ]
-        station = types.SimpleNamespace()
+        station = _make_station()
         engine = BacktestEngine(
             pipeline, _make_strategy(), _make_clob_df(rows), actual_highs,
             cold_start_hours=0,
@@ -444,7 +449,7 @@ class TestColdStartGuard:
             data_manager=data_manager,
         )
         df = engine.run("2024-01-01", "2024-01-01",
-                        types.SimpleNamespace(), init_hours=[6])
+                        _make_station(), init_hours=[6])
 
         # All inits skipped; result is empty.
         assert df.empty
@@ -471,7 +476,7 @@ class TestColdStartGuard:
             data_manager=None,
         )
         df = engine.run("2024-01-01", "2024-01-01",
-                        types.SimpleNamespace(), init_hours=[6])
+                        _make_station(), init_hours=[6])
         # Init is within cold_start window; must be skipped.
         assert df.empty
 
@@ -493,7 +498,7 @@ def _sample_results_df(n: int = 20, seed: int = 42) -> pd.DataFrame:
     return pd.DataFrame({
         "target_date":        ["2024-01-02"] * n,
         "init_utc":           inits,
-        "init_est":           inits,
+        "init_local":           inits,
         "n_hours":            [24] * n,
         "coverage_type":      ["full"] * n,
         "lead_hours_to_4pm":  leads,
@@ -549,7 +554,7 @@ class TestBacktestAnalysisSummary:
         df = pd.DataFrame({
             "target_date":       ["2024-01-02"] * n,
             "init_utc":          ["2024-01-01 06:00"] * n,
-            "init_est":          ["2024-01-01 01:00"] * n,
+            "init_local":          ["2024-01-01 01:00"] * n,
             "n_hours":           [24] * n,
             "coverage_type":     ["full"] * n,
             "lead_hours_to_4pm": [12.0] * n,

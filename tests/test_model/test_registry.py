@@ -166,6 +166,20 @@ def test_load_covariance_specific_version(registry, db, tmp_path):
     assert result.shape == (48, 48)
 
 
+def test_load_covariance_raises_on_wrong_shape(registry, db, tmp_path):
+    """load_covariance() raises ValueError when covariance.npy is not (48, 48)."""
+    ckpt = tmp_path / "model.ckpt"
+    ckpt.write_text("fake", encoding="ascii")
+    registry.publish("v1", ckpt, {"train_mae": 0.5, "test_mae": 0.6})
+
+    # Save a 24x24 matrix instead of 48x48
+    bad_cov = np.eye(24)
+    np.save(registry.store_dir / "v1" / "covariance.npy", bad_cov)
+
+    with pytest.raises(ValueError, match="48"):
+        registry.load_covariance()
+
+
 # -----------------------------------------------------------------------
 # load_latest -- ckpt_path.exists() guard (V2V06 fix 3)
 # -----------------------------------------------------------------------

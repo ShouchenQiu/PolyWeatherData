@@ -35,10 +35,9 @@ if TYPE_CHECKING:
 # Matching _sniper_analysis.py: average half-spread cost in probability pts
 HALFSPREAD_DRAG: float = -1.27 / 100.0   # -0.0127 as a fraction of $1
 
-_TZ_OFFSET_HOURS  = -5    # EST = UTC - 5 h
-_MIN_HOURS        = 8     # minimum target-day EST hours
-_CUTOFF_EST_HOUR  = 16    # no new signals at or after 16:00 EST
-_CLOB_WIN_MIN     = 30    # CLOB look-up half-window in minutes
+_MIN_HOURS         = 8   # minimum target-day local hours
+_CUTOFF_LOCAL_HOUR = 16  # no new signals at or after 16:00 local time
+_CLOB_WIN_MIN      = 30  # CLOB look-up half-window in minutes
 
 
 def _bucket_outcome(actual_f: float, lo: float, hi: float) -> float:
@@ -143,7 +142,7 @@ class BacktestEngine:
         Returns
         -------
         DataFrame with one row per (init_time, bucket) signal, columns:
-          target_date, init_utc, init_est, n_hours, coverage_type,
+          target_date, init_utc, init_local, n_hours, coverage_type,
           lead_hours_to_4pm, bucket_lo_f, bucket_hi_f, market_slug,
           mc_prob, clob_price, estimated_spread, halfspread,
           clob_quality, edge, actual_max_f, actual_outcome,
@@ -252,11 +251,14 @@ class BacktestEngine:
         """Run pipeline for one init time and append rows to records."""
         from collections import Counter
 
-        init_est = init_utc + pd.Timedelta(hours=_TZ_OFFSET_HOURS)
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(station.timezone)
+        init_local = init_utc.to_pydatetime().astimezone(tz)
 
-        # EST dates covered by this init's 48 forecast hours
+        # Local dates covered by this init's 48 forecast hours
         fxx_dates = [
-            (init_utc + pd.Timedelta(hours=h + _TZ_OFFSET_HOURS)).date()
+            (init_utc + pd.Timedelta(hours=h)).to_pydatetime().astimezone(tz).date()
             for h in range(1, 49)
         ]
         date_count: Counter = Counter(fxx_dates)
@@ -269,8 +271,13 @@ class BacktestEngine:
             if n_hours < _MIN_HOURS:
                 continue
 
-            # Cutoff: 21:00 UTC == 16:00 EST on target day
-            cutoff_utc = pd.Timestamp(target_str, tz="UTC") + pd.Timedelta(hours=21)
+            # Cutoff: 16:00 local time on target day
+            cutoff_utc = pd.Timestamp(
+                _dt.datetime(
+                    target_date.year, target_date.month, target_date.day,
+                    _CUTOFF_LOCAL_HOUR, tzinfo=tz,
+                )
+            ).tz_convert("UTC")
             if init_utc >= cutoff_utc:
                 continue
 
@@ -325,7 +332,7 @@ class BacktestEngine:
                 records.append({
                     "target_date":        target_str,
                     "init_utc":           str(init_utc)[:16],
-                    "init_est":           str(init_est)[:16],
+                    "init_local":         str(init_local)[:16],
                     "n_hours":            n_hours,
                     "coverage_type":      coverage_type,
                     "lead_hours_to_4pm":  round(lead_hours, 2),

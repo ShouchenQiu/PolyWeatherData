@@ -133,7 +133,10 @@ class ForecastLoop:
                     continue
 
             try:
-                result = self.pipeline.run(self.station, init_utc, buckets)
+                result = self.pipeline.run(
+                    self.station, init_utc, buckets,
+                    target_date=event["event_end_date"],
+                )
             except Exception:
                 logger.exception("Pipeline failed for event {}", condition_id)
                 continue
