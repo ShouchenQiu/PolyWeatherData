@@ -25,6 +25,7 @@ class DbClient:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._create_tables()
+        self._migrate_v2_schema()
 
     # ------------------------------------------------------------------
     # Schema
@@ -50,39 +51,54 @@ class DbClient:
             );
 
             CREATE TABLE IF NOT EXISTS markets (
-                token_id      TEXT PRIMARY KEY,
-                condition_id  TEXT REFERENCES events(condition_id),
-                market_slug   TEXT,
-                bucket_lo_f   REAL,
-                bucket_hi_f   REAL,
-                outcome       TEXT
+                token_id          TEXT PRIMARY KEY,
+                condition_id      TEXT REFERENCES events(condition_id),
+                market_slug       TEXT,
+                bucket_lo_f       REAL,
+                bucket_hi_f       REAL,
+                outcome           TEXT,
+                discovery_status  TEXT NOT NULL DEFAULT 'parsed'
+                                  CHECK (discovery_status IN ('parsed', 'unrecognized_slug', 'invalid_market'))
             );
 
             CREATE TABLE IF NOT EXISTS signals (
-                signal_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp  TEXT,
-                token_id   TEXT REFERENCES markets(token_id),
-                mc_prob    REAL,
-                clob_price REAL,
-                edge       REAL,
-                side       TEXT
+                signal_id        TEXT PRIMARY KEY,
+                yes_token_id     TEXT REFERENCES markets(token_id),
+                no_token_id      TEXT REFERENCES markets(token_id),
+                direction        TEXT,
+                mc_prob          REAL,
+                reference_price  REAL,
+                edge             REAL,
+                final_token_id   TEXT REFERENCES markets(token_id),
+                final_side       TEXT,
+                executable_price REAL,
+                tick_utc         TEXT,
+                approved         INTEGER NOT NULL DEFAULT 0 CHECK (approved IN (0, 1)),
+                reject_reason    TEXT,
+                computed_size    REAL,
+                order_id         TEXT REFERENCES orders(order_id)
             );
 
             CREATE TABLE IF NOT EXISTS orders (
-                order_id       TEXT PRIMARY KEY,
-                token_id       TEXT REFERENCES markets(token_id),
-                condition_id   TEXT REFERENCES events(condition_id),
-                side           TEXT,
-                size_usd       REAL,
-                price          REAL,
-                fill_price     REAL,
-                status         TEXT DEFAULT 'pending',
+                order_id         TEXT PRIMARY KEY,
+                token_id         TEXT REFERENCES markets(token_id),
+                condition_id     TEXT REFERENCES events(condition_id),
+                side             TEXT,
+                size_usd         REAL,
+                price            REAL,
+                fill_price       REAL,
+                status           TEXT DEFAULT 'pending',
                 -- status domain: pending | filled | cancelled | closed | settled
-                created_at     TEXT,
-                filled_at      TEXT,
-                closed_at      TEXT,
-                cancelled_at   TEXT,
-                settled_payout REAL
+                created_at       TEXT,
+                filled_at        TEXT,
+                closed_at        TEXT,
+                cancelled_at     TEXT,
+                settled_payout   REAL,
+                is_paper         INTEGER NOT NULL DEFAULT 0 CHECK (is_paper IN (0, 1)),
+                executable_price REAL,
+                filled_shares    REAL,
+                signed_shares    REAL,
+                cash_flow_usd    REAL
             );
 
             CREATE TABLE IF NOT EXISTS model_versions (
@@ -103,8 +119,69 @@ class DbClient:
                 value_text TEXT,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS redeem_tasks (
+                condition_id  TEXT PRIMARY KEY,
+                status        TEXT NOT NULL DEFAULT 'pending'
+                              CHECK (status IN ('pending', 'redeemed', 'failed', 'skipped_paper')),
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error    TEXT,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL,
+                redeemed_at   TEXT
+            );
             """
         )
+        self._conn.commit()
+
+    def _migrate_v2_schema(self) -> None:
+        """Apply additive V2 schema changes to existing databases.
+
+        Uses try/except on OperationalError so migrations are idempotent --
+        "duplicate column name" is silently swallowed; other errors propagate.
+        For the signals table, a full DROP + recreate is safe because signals
+        are observability data, not trading state.
+        """
+        additive_migrations = [
+            "ALTER TABLE orders ADD COLUMN is_paper         INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE orders ADD COLUMN executable_price REAL",
+            "ALTER TABLE orders ADD COLUMN filled_shares    REAL",
+            "ALTER TABLE orders ADD COLUMN signed_shares    REAL",
+            "ALTER TABLE orders ADD COLUMN cash_flow_usd    REAL",
+            "ALTER TABLE markets ADD COLUMN discovery_status TEXT NOT NULL DEFAULT 'parsed'",
+        ]
+        for stmt in additive_migrations:
+            try:
+                self._conn.execute(stmt)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc):
+                    raise
+        # Replace V1 signals table with V2 shape if it still has the old schema.
+        cur = self._conn.execute("PRAGMA table_info(signals)")
+        existing_cols = {row["name"] for row in cur.fetchall()}
+        if "tick_utc" not in existing_cols:
+            self._conn.executescript(
+                """
+                DROP TABLE IF EXISTS signals;
+                CREATE TABLE IF NOT EXISTS signals (
+                    signal_id        TEXT PRIMARY KEY,
+                    yes_token_id     TEXT REFERENCES markets(token_id),
+                    no_token_id      TEXT REFERENCES markets(token_id),
+                    direction        TEXT,
+                    mc_prob          REAL,
+                    reference_price  REAL,
+                    edge             REAL,
+                    final_token_id   TEXT REFERENCES markets(token_id),
+                    final_side       TEXT,
+                    executable_price REAL,
+                    tick_utc         TEXT,
+                    approved         INTEGER NOT NULL DEFAULT 0 CHECK (approved IN (0, 1)),
+                    reject_reason    TEXT,
+                    computed_size    REAL,
+                    order_id         TEXT REFERENCES orders(order_id)
+                );
+                """
+            )
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -282,29 +359,6 @@ class DbClient:
             (condition_id,),
         )
         return [dict(r) for r in cur.fetchall()]
-
-    # ------------------------------------------------------------------
-    # Signals
-    # ------------------------------------------------------------------
-
-    def insert_signal(
-        self,
-        timestamp: str,
-        token_id: str,
-        mc_prob: float,
-        clob_price: float,
-        edge: float,
-        side: str,
-    ) -> int:
-        cur = self._conn.execute(
-            """
-            INSERT INTO signals (timestamp, token_id, mc_prob, clob_price, edge, side)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (timestamp, token_id, mc_prob, clob_price, edge, side),
-        )
-        self._conn.commit()
-        return cur.lastrowid  # type: ignore[return-value]
 
     # ------------------------------------------------------------------
     # Model versions
