@@ -298,3 +298,93 @@ def test_bucket_probs_raises_on_overlapping_buckets():
     with pytest.raises(ValueError, match="overlap"):
         s.bucket_probs(daily, [(60.0, 75.0), (70.0, 85.0)])
 
+
+# -----------------------------------------------------------------------
+# V2V06 post-review fixes
+# -----------------------------------------------------------------------
+
+# -- Fix 4: McSampler validation gaps --
+
+def test_mc_sample_raises_on_mismatched_lengths():
+    """_mc_sample raises ValueError when mu_vec and sigma_vec have different lengths."""
+    s = McSampler(n_samp=100, rng_seed=0)
+    with pytest.raises(ValueError, match="length"):
+        s._mc_sample(np.ones(5), np.ones(6))
+
+
+def test_mc_sample_raises_on_non_positive_sigma():
+    """_mc_sample raises ValueError when any sigma value is <= 0."""
+    s = McSampler(n_samp=100, rng_seed=0)
+    with pytest.raises(ValueError, match="positive"):
+        s._mc_sample(np.ones(4), np.array([1.0, 1.0, 0.0, 1.0]))
+
+
+def test_bucket_probs_raises_on_malformed_bucket():
+    """bucket_probs raises ValueError when lo >= hi."""
+    s = McSampler(n_samp=100, rng_seed=0)
+    daily = np.full(100, 70.0)
+    with pytest.raises(ValueError, match="malformed"):
+        s.bucket_probs(daily, [(80.0, 70.0)])
+
+
+def test_bucket_probs_raises_on_equal_bounds():
+    """bucket_probs raises ValueError when lo == hi (zero-width bucket)."""
+    s = McSampler(n_samp=100, rng_seed=0)
+    daily = np.full(100, 70.0)
+    with pytest.raises(ValueError, match="malformed"):
+        s.bucket_probs(daily, [(70.0, 70.0)])
+
+
+# -- Fix 2: Covariance submatrix selection --
+
+def test_mc_sample_uses_submatrix_when_hour_indices_provided():
+    """When hour_indices provided and _cov is full, the submatrix is extracted."""
+    s = McSampler(n_samp=200, rng_seed=0)
+    rng = np.random.default_rng(1)
+    A = rng.standard_normal((48, 48))
+    s.set_cov(A @ A.T + np.eye(48) * 2.0)
+
+    indices = list(range(12, 28))  # 16 hours (0-indexed, fxx 13..28)
+    mu = np.zeros(16)
+    sigma = np.ones(16)
+    out = s._mc_sample(mu, sigma, hour_indices=indices)
+    assert out.shape == (200, 16)
+
+
+def test_mc_sample_submatrix_differs_from_diagonal():
+    """Samples drawn from submatrix differ from diagonal-only samples (statistical)."""
+    rng_np = np.random.default_rng(0)
+    A = rng_np.standard_normal((48, 48))
+    full_cov = A @ A.T + np.eye(48) * 10.0
+
+    s_sub  = McSampler(n_samp=2000, rng_seed=7)
+    s_diag = McSampler(n_samp=2000, rng_seed=7)
+    s_sub.set_cov(full_cov)
+
+    indices = list(range(0, 16))
+    mu = np.zeros(16)
+    sigma = np.sqrt(np.diag(full_cov[:16, :16]))
+
+    out_sub  = s_sub._mc_sample(mu, sigma, hour_indices=indices)
+    out_diag = s_diag._mc_sample(mu, sigma)  # no _cov, uses diagonal
+
+    # Covariance structures should differ: off-diagonal elements will be non-zero
+    # in out_sub. The sample covariance matrices will differ.
+    cov_sub  = np.cov(out_sub.T)
+    cov_diag = np.cov(out_diag.T)
+    assert not np.allclose(cov_sub, cov_diag, atol=0.5)
+
+
+def test_sample_daily_high_accepts_hour_indices():
+    """sample_daily_high accepts and passes through hour_indices without error."""
+    s = McSampler(n_samp=100, rng_seed=0)
+    rng = np.random.default_rng(1)
+    A = rng.standard_normal((48, 48))
+    s.set_cov(A @ A.T + np.eye(48))
+
+    indices = list(range(12, 28))
+    mu = np.zeros(16)
+    sigma = np.ones(16)
+    out = s.sample_daily_high(mu, sigma, hour_indices=indices)
+    assert out.shape == (100,)
+

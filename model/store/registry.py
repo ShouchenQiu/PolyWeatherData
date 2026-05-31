@@ -134,6 +134,12 @@ class ModelRegistry:
         meta = self._load_meta(version)
         ckpt_path = Path(meta["checkpoint_path"])
 
+        if not ckpt_path.exists():
+            raise FileNotFoundError(
+                f"model.ckpt not found at {ckpt_path}. "
+                "The checkpoint was deleted or moved after publication."
+            )
+
         pkl_path  = ckpt_path.parent / "training_dataset.pkl"
         if not pkl_path.exists():
             raise FileNotFoundError(

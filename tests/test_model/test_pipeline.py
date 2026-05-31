@@ -327,9 +327,9 @@ def test_pipeline_loads_max_bias_from_registry():
     captured: dict = {}
     original_sdh = mc.sample_daily_high
 
-    def spy_sdh(mu_vec, sigma_vec, max_bias=0.0):
+    def spy_sdh(mu_vec, sigma_vec, max_bias=0.0, **kwargs):
         captured["max_bias"] = max_bias
-        return original_sdh(mu_vec, sigma_vec, max_bias=max_bias)
+        return original_sdh(mu_vec, sigma_vec, max_bias=max_bias, **kwargs)
 
     mc.sample_daily_high = spy_sdh
 
@@ -349,9 +349,9 @@ def test_pipeline_without_registry_uses_zero_bias():
     captured: dict = {}
     original_sdh = mc.sample_daily_high
 
-    def spy_sdh(mu_vec, sigma_vec, max_bias=0.0):
+    def spy_sdh(mu_vec, sigma_vec, max_bias=0.0, **kwargs):
         captured["max_bias"] = max_bias
-        return original_sdh(mu_vec, sigma_vec, max_bias=max_bias)
+        return original_sdh(mu_vec, sigma_vec, max_bias=max_bias, **kwargs)
 
     mc.sample_daily_high = spy_sdh
 
@@ -516,9 +516,9 @@ def test_pipeline_excludes_extrapolated_fxx_from_daily_high():
     captured: dict = {}
     original_sdh = mc.sample_daily_high
 
-    def spy_sdh(mu_vec, sigma_vec, max_bias=0.0):
+    def spy_sdh(mu_vec, sigma_vec, max_bias=0.0, **kwargs):
         captured["n_hours"] = len(mu_vec)
-        return original_sdh(mu_vec, sigma_vec, max_bias=max_bias)
+        return original_sdh(mu_vec, sigma_vec, max_bias=max_bias, **kwargs)
 
     mc.sample_daily_high = spy_sdh
     pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
@@ -559,9 +559,9 @@ def test_pipeline_daily_high_uses_local_calendar_day():
     captured: dict = {}
     original_sdh = mc.sample_daily_high
 
-    def spy_sdh(mu_vec, sigma_vec, max_bias=0.0):
+    def spy_sdh(mu_vec, sigma_vec, max_bias=0.0, **kwargs):
         captured["n_hours"] = len(mu_vec)
-        return original_sdh(mu_vec, sigma_vec, max_bias=max_bias)
+        return original_sdh(mu_vec, sigma_vec, max_bias=max_bias, **kwargs)
 
     mc.sample_daily_high = spy_sdh
 
@@ -576,3 +576,29 @@ def test_pipeline_daily_high_uses_local_calendar_day():
     # fxx 1 = 13:00 UTC (in window), fxx 17 = 2025-01-02 05:00 UTC (boundary, exclusive)
     # Expect 16 hours in window (fxx 1..16).
     assert captured.get("n_hours") == 16
+
+
+def test_pipeline_passes_hour_indices_to_sample_daily_high():
+    """pipeline.run() passes 0-based hour_indices to mc.sample_daily_high (ADR-0002 submatrix)."""
+    mc  = McSampler(n_samp=200, rng_seed=0)
+    tft = _make_tft_mock()
+    dm  = _make_data_mgr(_INIT_TIME)
+
+    captured: dict = {}
+    original_sdh = mc.sample_daily_high
+
+    def spy_sdh(mu_vec, sigma_vec, max_bias=0.0, hour_indices=None, **kwargs):
+        captured["hour_indices"] = hour_indices
+        return original_sdh(mu_vec, sigma_vec, max_bias=max_bias,
+                            hour_indices=hour_indices, **kwargs)
+
+    mc.sample_daily_high = spy_sdh
+
+    pipeline = ModelPipeline(tft=tft, mc=mc, data_mgr=dm)
+    pipeline.run(KLGA, _INIT_TIME, _BUCKETS, target_date="2025-01-01")
+
+    # fxx 1..16 -> 0-based indices 0..15
+    assert captured.get("hour_indices") is not None
+    assert all(isinstance(i, int) for i in captured["hour_indices"])
+    assert min(captured["hour_indices"]) == 0
+    assert max(captured["hour_indices"]) == 15

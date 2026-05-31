@@ -254,7 +254,10 @@ class ModelPipeline:
             if self.registry is not None
             else 0.0
         )
-        daily_highs = self.mc.sample_daily_high(mu_vec, sigma_vec, max_bias=max_bias)
+        daily_highs = self.mc.sample_daily_high(
+            mu_vec, sigma_vec, max_bias=max_bias,
+            hour_indices=[f - 1 for f in target_fxx],
+        )
 
         # 8. Convert to bucket probabilities + extract sample quantiles
         raw       = self.mc.bucket_probs(daily_highs, buckets)

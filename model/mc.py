@@ -95,18 +95,27 @@ class McSampler:
         self,
         mu_vec: np.ndarray,
         sigma_vec: np.ndarray,
+        hour_indices: "list[int] | None" = None,
     ) -> np.ndarray:
         """Draw correlated temperature samples.
 
-        Uses the empirical covariance stored by fit_cov() when available.
-        Falls back to a diagonal covariance built from sigma_vec otherwise.
+        Uses the empirical covariance stored by fit_cov() / set_cov() when
+        available.  When ``hour_indices`` is provided and the stored covariance
+        is larger than (n, n), the appropriate submatrix is extracted so that
+        partial-day target windows still benefit from empirical correlation
+        (ADR-0002).  Falls back to a diagonal covariance when no stored
+        covariance covers the requested indices.
 
         Parameters
         ----------
         mu_vec:
             (n_hours,) mean temperature in degC for each forecast hour.
         sigma_vec:
-            (n_hours,) per-hour standard deviation in degC (already clipped).
+            (n_hours,) per-hour standard deviation in degC.  Must be positive.
+        hour_indices:
+            0-based positions into the full 48-hour covariance matrix.  When
+            provided, the (n, n) submatrix is extracted instead of requiring
+            the stored covariance to be exactly (n, n).
 
         Returns
         -------
@@ -114,13 +123,27 @@ class McSampler:
         """
         if len(mu_vec) == 0:
             raise ValueError("_mc_sample: mu_vec and sigma_vec must not be empty")
+        if len(mu_vec) != len(sigma_vec):
+            raise ValueError(
+                f"_mc_sample: mu_vec length {len(mu_vec)} != "
+                f"sigma_vec length {len(sigma_vec)}"
+            )
         if not np.all(np.isfinite(mu_vec)):
             raise ValueError("_mc_sample: mu_vec contains non-finite values")
         if not np.all(np.isfinite(sigma_vec)):
             raise ValueError("_mc_sample: sigma_vec contains non-finite values")
+        if not np.all(sigma_vec > 0):
+            raise ValueError("_mc_sample: sigma_vec must contain strictly positive values")
         n = len(mu_vec)
-        if self._cov is not None and self._cov.shape == (n, n):
-            Sigma = self._cov.copy()
+
+        if self._cov is not None:
+            if hour_indices is not None:
+                idx = list(hour_indices)
+                Sigma = self._cov[np.ix_(idx, idx)].copy()
+            elif self._cov.shape == (n, n):
+                Sigma = self._cov.copy()
+            else:
+                Sigma = np.diag(sigma_vec ** 2)
         else:
             Sigma = np.diag(sigma_vec ** 2)
 
@@ -140,6 +163,7 @@ class McSampler:
         mu_vec: np.ndarray,
         sigma_vec: np.ndarray,
         max_bias: float = 0.0,
+        hour_indices: "list[int] | None" = None,
     ) -> np.ndarray:
         """Sample daily high temperatures (degF) with max_bias correction.
 
@@ -153,15 +177,21 @@ class McSampler:
             Per-station bias correction (degF) subtracted from the daily
             high samples.  Load from ModelRegistry.load_max_bias() before
             each call.  Defaults to 0.0 (no correction).
+        hour_indices:
+            0-based positions into the full 48-hour covariance matrix.  Pass
+            this when mu_vec/sigma_vec are derived from a target-date fxx
+            subset so the empirical covariance submatrix is used instead of
+            diagonal fallback (ADR-0002).
 
         Returns
         -------
         (n_samp,) daily high temperature samples in degF, bias-corrected.
         """
-        sigma_safe  = np.clip(sigma_vec, 0.01, None)
-        samples_c   = self._mc_sample(mu_vec, sigma_safe)  # (n_samp, n_hours)
-        daily_high_c = samples_c.max(axis=1)               # (n_samp,)
-        daily_high_f = daily_high_c * 1.8 + 32.0          # -> degF
+        sigma_safe   = np.clip(sigma_vec, 0.01, None)
+        samples_c    = self._mc_sample(mu_vec, sigma_safe,
+                                       hour_indices=hour_indices)
+        daily_high_c = samples_c.max(axis=1)       # (n_samp,)
+        daily_high_f = daily_high_c * 1.8 + 32.0  # -> degF
         return daily_high_f - float(max_bias)
 
     # ------------------------------------------------------------------
@@ -193,8 +223,12 @@ class McSampler:
         """
         if len(daily_highs) == 0:
             raise ValueError("bucket_probs: daily_highs sample array must not be empty")
-        # Check for overlapping buckets
-        finite_buckets = [(lo, hi) for lo, hi in buckets if lo != float("-inf") and hi != float("inf")]
+        # Check for malformed and overlapping buckets
+        for lo, hi in buckets:
+            if lo >= hi:
+                raise ValueError(
+                    f"bucket_probs: malformed bucket ({lo}, {hi}): lo must be < hi"
+                )
         sorted_b = sorted(buckets, key=lambda t: t[0])
         for i in range(len(sorted_b) - 1):
             _, hi_a = sorted_b[i]

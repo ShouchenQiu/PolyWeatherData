@@ -154,7 +154,7 @@ class IemSource(BaseObsSource):
         csv_text = self._download_csv(params)
         if not csv_text:
             if self._fallback is not None:
-                return self._fallback.fetch(station, start, end)
+                return self._fallback.fetch(station, start, end, now_utc=now_utc)
             return self._empty_df()
 
         df = self._parse_csv(csv_text)

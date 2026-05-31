@@ -618,7 +618,7 @@ def test_iem_source_calls_fallback_when_iem_empty():
     with patch.object(src, "_download_csv", return_value=None):
         df = src.fetch(_STATION, start, end)
 
-    fallback.fetch.assert_called_once_with(_STATION, start, end)
+    fallback.fetch.assert_called_once_with(_STATION, start, end, now_utc=None)
     assert len(df) == 1
 
 
@@ -636,3 +636,23 @@ def test_iem_source_does_not_call_fallback_when_iem_has_data():
 
     fallback.fetch.assert_not_called()
     assert len(df) == 2
+
+
+def test_iem_source_passes_now_utc_to_fallback():
+    """When IEM download fails in tick mode, fallback is called WITH now_utc."""
+    fallback = MagicMock()
+    fallback.fetch.return_value = pd.DataFrame()
+
+    src = IemSource(fallback=fallback)
+    now_utc = pd.Timestamp("2026-01-01 14:00", tz="UTC")
+
+    with patch.object(src, "_download_csv", return_value=None):
+        src.fetch(
+            _STATION,
+            pd.Timestamp("2026-01-01", tz="UTC"),
+            pd.Timestamp("2026-01-02", tz="UTC"),
+            now_utc=now_utc,
+        )
+
+    _, call_kwargs = fallback.fetch.call_args
+    assert call_kwargs.get("now_utc") is now_utc

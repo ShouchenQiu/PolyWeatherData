@@ -164,3 +164,20 @@ def test_load_covariance_specific_version(registry, db, tmp_path):
     result = registry.load_covariance(version="v2")
     assert result is not None
     assert result.shape == (48, 48)
+
+
+# -----------------------------------------------------------------------
+# load_latest -- ckpt_path.exists() guard (V2V06 fix 3)
+# -----------------------------------------------------------------------
+
+def test_load_latest_raises_when_ckpt_deleted_from_disk(registry, tmp_path):
+    """load_latest() raises FileNotFoundError when model.ckpt was removed post-publish."""
+    ckpt = tmp_path / "model.ckpt"
+    ckpt.write_text("fake", encoding="ascii")
+    registry.publish("v1", ckpt, {"train_mae": 0.5, "test_mae": 0.6})
+
+    # Simulate the checkpoint file being deleted after publication
+    (registry.store_dir / "v1" / "model.ckpt").unlink()
+
+    with pytest.raises(FileNotFoundError, match="model.ckpt"):
+        registry.load_latest()
