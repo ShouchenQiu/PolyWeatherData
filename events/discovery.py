@@ -1,23 +1,30 @@
-"""Polymarket event discovery via the Gamma API.
+"""Polymarket event discovery via the Gamma API (V2V01).
 
-Fetches active weather-temperature events, parses their bucket slugs into
-(lo_f, hi_f) pairs, and upserts them into the local database.
+Fetches active weather-temperature events using the PublicClient SDK
+paginator (ADR-0009), parses their bucket slugs into (lo_f, hi_f) pairs,
+and upserts them into the local database.
 
-Reference: py-clob-client-main/list_feb20_markets.py
-           Herbie-main/mc_helpers.py  (parse_slug)
+Slug semantics (V2V01):
+    parse_slug() requires BOTH a station token AND a temperature-range
+    token in the slug.  A slug matching only one component is treated as
+    unrecognized and persisted with discovery_status='unrecognized_slug'.
+
+Station inference (V2V01):
+    _infer_station() uses the slug_aliases list on each StationConfig.
+    Raises ValueError if no alias matches.
 """
 from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-import numpy as np
-import requests
 from loguru import logger
 
 if TYPE_CHECKING:
     from config.settings import Settings
+    from core.alerts import AlertBus
     from db.schema import DbClient
 
 
@@ -67,14 +74,31 @@ def parse_slug(slug: str) -> tuple[float, float] | None:
     - ``55f-or-below``  / ``55forbelow``  / ``be-55f-or-below``  -> (-inf, 55)
     - ``60-70f``  (range)                                        -> (60, 70)
 
-    Returns None and logs a WARNING if no pattern matches.
+    V2V01: returns None unless the slug also contains a recognizable station
+    token (ICAO identifier or alias from config.stations.STATIONS).  Slugs
+    matching only the temperature pattern are treated as unrecognized.
+
+    Returns None and logs a WARNING if no pattern matches or no station found.
     """
+    from config.stations import STATIONS
+
     s = slug.lower()
+
+    # Check for at least one station alias in the slug
+    has_station = any(
+        alias in s
+        for st in STATIONS.values()
+        for alias in (st.slug_aliases or [st.station_id.lower()])
+    )
+    if not has_station:
+        logger.warning("parse_slug: no station token found in slug {!r}", slug)
+        return None
+
     for pattern, handler in _SLUG_REGISTRY:
         m = pattern.search(s)
         if m:
             return handler(m)
-    logger.warning("parse_slug: no pattern matched slug {!r}", slug)
+    logger.warning("parse_slug: no temperature pattern matched slug {!r}", slug)
     return None
 
 
@@ -85,12 +109,16 @@ def parse_slug(slug: str) -> tuple[float, float] | None:
 class EventDiscovery:
     """Discover weather temperature events from the Polymarket Gamma API.
 
-    Workflow
-    --------
-    1. GET ``<gamma_api_url>/events`` with optional ``slug_pattern`` filter.
+    Workflow (V2V01)
+    ----------------
+    1. Call ``PublicClient.list_events(live=True, tag_slug="weather")`` via the
+       SDK paginator (ADR-0009).  Falls back to raw ``requests.get`` when the
+       SDK is not available (tests / offline mode).
     2. For each event whose slug matches the configured pattern, iterate its
        markets and parse each market slug into (lo_f, hi_f).
-    3. Upsert events + markets into the local DB.
+    3. Markets with unparseable slugs are upserted with
+       ``discovery_status="unrecognized_slug"`` and a ``discovery_warn`` alert
+       is emitted.
     4. Return the list of newly-discovered event dicts.
 
     Parameters
@@ -103,6 +131,8 @@ class EventDiscovery:
         Substring that event slugs must contain to be considered weather
         temperature events.  Defaults to ``"temperature"`` when None is
         passed.
+    alert_bus:
+        Optional AlertBus for emitting ``discovery_warn`` events.
     """
 
     DEFAULT_SLUG_PATTERN = "temperature"
@@ -113,11 +143,13 @@ class EventDiscovery:
         db: "DbClient",
         settings: "Settings",
         slug_pattern: str | None = None,
+        alert_bus: "AlertBus | None" = None,
     ) -> None:
         self._db             = db
         self._settings       = settings
         self._slug_pattern   = (slug_pattern or self.DEFAULT_SLUG_PATTERN).lower()
         self._gamma_api_url  = settings.gamma_api_url.rstrip("/")
+        self._alert_bus      = alert_bus
 
     # ------------------------------------------------------------------
     # Public API
@@ -134,10 +166,13 @@ class EventDiscovery:
 
         Returns
         -------
-        List of event dicts that were discovered (new or updated).
+        List of event dicts that were newly discovered (not previously stored).
         """
         events = self._fetch_events(params or {})
         discovered: list[dict] = []
+        n_updated    = 0
+        n_skipped    = 0
+        n_unrecog    = 0
         logger.debug("EventDiscovery: {} events from Gamma API", len(events))
 
         for ev in events:
@@ -145,7 +180,7 @@ class EventDiscovery:
             if self._slug_pattern not in slug:
                 continue
 
-            condition_id   = ev.get("conditionId") or ev.get("id") or slug
+            condition_id = ev.get("conditionId") or ev.get("id") or slug
 
             # Dedup: event metadata already persisted -- only sync missing markets.
             if self._db.event_exists(condition_id):
@@ -153,11 +188,13 @@ class EventDiscovery:
                     ev.get("markets", []), condition_id
                 )
                 if added:
+                    n_updated += 1
                     logger.info(
                         "EventDiscovery: synced {} new market(s) for existing event {}",
                         len(added), condition_id,
                     )
                 else:
+                    n_skipped += 1
                     logger.debug(
                         "EventDiscovery: no new markets for existing event {}",
                         condition_id,
@@ -167,7 +204,12 @@ class EventDiscovery:
             question       = ev.get("title") or ev.get("question") or slug
             event_slug     = ev.get("slug") or ""
             event_end_date = ev.get("endDate") or ev.get("end_date_iso") or ""
-            station_id     = self._infer_station(slug)
+            try:
+                station_id = self._infer_station(slug)
+            except ValueError as exc:
+                logger.error("EventDiscovery: {}", exc)
+                n_skipped += 1
+                continue
 
             self._db.upsert_event(
                 condition_id   = condition_id,
@@ -178,9 +220,10 @@ class EventDiscovery:
                 status         = "discovered",
             )
 
-            markets_parsed = self._process_markets(
+            markets_parsed, unrecog_count = self._process_markets(
                 ev.get("markets", []), condition_id
             )
+            n_unrecog += unrecog_count
             logger.info(
                 "Discovered event: {} end={} station={} markets={}",
                 condition_id, event_end_date, station_id, len(markets_parsed),
@@ -194,6 +237,10 @@ class EventDiscovery:
                 "markets":        markets_parsed,
             })
 
+        logger.info(
+            "EventDiscovery poll complete: new={} updated={} skipped={} unrecognized_slug={}",
+            len(discovered), n_updated, n_skipped, n_unrecog,
+        )
         return discovered
 
     # ------------------------------------------------------------------
@@ -201,12 +248,26 @@ class EventDiscovery:
     # ------------------------------------------------------------------
 
     def _fetch_events(self, extra_params: dict) -> list[dict]:
+        """Fetch events from the Gamma API.
+
+        Uses ``PublicClient.list_events(live=True, tag_slug="weather")`` when
+        the SDK is available (ADR-0009).  Falls back to a raw ``requests.get``
+        call when the SDK is not installed (offline / test mode).
+        """
+        try:
+            from polymarket_client import PublicClient  # type: ignore[import-untyped]
+            client = PublicClient()
+            return list(client.list_events(live=True, tag_slug="weather"))
+        except ImportError:
+            pass
+
+        import requests
         url = self._gamma_api_url + self._EVENTS_ENDPOINT
         try:
             resp = requests.get(url, params=extra_params, timeout=15)
             resp.raise_for_status()
             return resp.json()
-        except (requests.RequestException, json.JSONDecodeError) as exc:
+        except Exception as exc:
             raise RuntimeError(
                 f"Gamma API request failed: {exc}"
             ) from exc
@@ -249,26 +310,36 @@ class EventDiscovery:
                 if self._db.market_exists(token_id):
                     continue
                 outcome = outcomes[idx] if idx < len(outcomes) else "YES"
+                result     = parse_slug(market_slug)
+                lo_f, hi_f = result if result is not None else (None, None)
+                discovery_status = "parsed" if result is not None else "unrecognized_slug"
                 self._db.upsert_market(
-                    token_id     = token_id,
-                    condition_id = condition_id,
-                    market_slug  = market_slug,
-                    bucket_lo_f  = lo_f,
-                    bucket_hi_f  = hi_f,
-                    outcome      = outcome,
+                    token_id         = token_id,
+                    condition_id     = condition_id,
+                    market_slug      = market_slug,
+                    bucket_lo_f      = lo_f,
+                    bucket_hi_f      = hi_f,
+                    outcome          = outcome,
+                    discovery_status = discovery_status,
                 )
                 added.append({"token_id": token_id, "outcome": outcome})
         return added
 
     def _process_markets(
         self, markets: list[dict], condition_id: str
-    ) -> list[dict]:
-        """Parse each market's slug and upsert into DB."""
+    ) -> tuple[list[dict], int]:
+        """Parse each market slug and upsert into DB.
+
+        Returns
+        -------
+        (parsed_list, unrecog_count) where unrecog_count is the number of
+        markets that had unparseable slugs.
+        """
         parsed: list[dict] = []
+        unrecog_count = 0
+
         for mkt in markets:
             market_slug = mkt.get("slug") or mkt.get("market_slug") or ""
-            result       = parse_slug(market_slug)
-            lo_f, hi_f   = result if result is not None else (None, None)
 
             # clobTokenIds is typically a JSON-encoded list: '["tok1","tok2"]'
             token_ids_raw = mkt.get("clobTokenIds") or "[]"
@@ -289,39 +360,76 @@ class EventDiscovery:
             else:
                 outcomes = list(outcomes_raw)
 
+            # V2V01: assert length parity; skip without truncation on mismatch
+            if len(token_ids) != len(outcomes):
+                logger.error(
+                    "EventDiscovery: token/outcome length mismatch for market {} "
+                    "(tokens={}, outcomes={}); skipping",
+                    market_slug, len(token_ids), len(outcomes),
+                )
+                continue
+
+            result     = parse_slug(market_slug)
+            lo_f, hi_f = result if result is not None else (None, None)
+
+            if result is None:
+                # Unrecognized slug: persist with discovery_status flag + alert
+                discovery_status = "unrecognized_slug"
+                unrecog_count += 1
+                self._emit_discovery_warn(market_slug, condition_id)
+            else:
+                discovery_status = "parsed"
+
             for tok, outcome in zip(token_ids, outcomes):
                 self._db.upsert_market(
-                    token_id     = str(tok),
-                    condition_id = condition_id,
-                    market_slug  = market_slug,
-                    bucket_lo_f  = lo_f,
-                    bucket_hi_f  = hi_f,
-                    outcome      = str(outcome),
+                    token_id         = str(tok),
+                    condition_id     = condition_id,
+                    market_slug      = market_slug,
+                    bucket_lo_f      = lo_f,
+                    bucket_hi_f      = hi_f,
+                    outcome          = str(outcome),
+                    discovery_status = discovery_status,
                 )
 
             parsed.append({
-                "market_slug": market_slug,
-                "lo_f":        lo_f,
-                "hi_f":        hi_f,
-                "token_ids":   token_ids,
-                "outcomes":    outcomes,
+                "market_slug":       market_slug,
+                "lo_f":              lo_f,
+                "hi_f":              hi_f,
+                "token_ids":         token_ids,
+                "outcomes":          outcomes,
+                "discovery_status":  discovery_status,
             })
 
-        return parsed
+        return parsed, unrecog_count
+
+    def _emit_discovery_warn(self, market_slug: str, condition_id: str) -> None:
+        """Emit a discovery_warn AlertEvent when a slug is unrecognized."""
+        if self._alert_bus is None:
+            return
+        try:
+            from core.alerts import AlertEvent
+            self._alert_bus.emit_nowait(AlertEvent(
+                alert_type  = "discovery_warn",
+                station     = None,
+                message     = f"Unrecognized slug: {market_slug!r} (condition: {condition_id})",
+                occurred_at = datetime.now(timezone.utc),
+                context     = {"slug": market_slug, "condition_id": condition_id},
+            ))
+        except Exception:
+            logger.exception("EventDiscovery: failed to emit discovery_warn alert")
 
     def _infer_station(self, slug: str) -> str:
-        """Attempt to extract a station ID from the event slug.
+        """Return the station_id that owns *slug* based on slug_aliases.
 
-        Falls back to the first configured station if no match found.
+        Raises ValueError if no station alias matches the slug.
         """
         from config.stations import STATIONS
-
-        slug_up = slug.upper()
-        for station_id in STATIONS:
-            if station_id.upper() in slug_up:
-                return station_id
-
-        # Default to first station (KLGA)
-        if STATIONS:
-            return next(iter(STATIONS))
-        return "KLGA"
+        s = slug.lower()
+        for st in STATIONS.values():
+            aliases = st.slug_aliases or [st.station_id.lower()]
+            for alias in aliases:
+                if alias.lower() in s:
+                    return st.station_id
+        raise ValueError(
+            f"no station alias matched slug {slug!r}"
+        )

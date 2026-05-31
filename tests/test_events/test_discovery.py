@@ -16,19 +16,19 @@ from events.discovery import EventDiscovery, parse_slug
 
 @pytest.mark.parametrize("slug, expected", [
     # open high end -- or-higher variants
-    ("highest-temperature-in-nyc-70f-or-higher", (70.0, float("inf"))),
+    ("klga-highest-temperature-70f-or-higher", (70.0, float("inf"))),
     ("klga-high-75forhigher", (75.0, float("inf"))),
-    ("be-80f-or-higher-daily-high", (80.0, float("inf"))),
+    ("klga-be-80f-or-higher-daily-high", (80.0, float("inf"))),
     # open high end -- or-above variants
     ("klga-high-70f-or-above", (70.0, float("inf"))),
     ("klga-high-70forabove", (70.0, float("inf"))),
-    ("be-70f-or-above-daily-high", (70.0, float("inf"))),
+    ("klga-be-70f-or-above-daily-high", (70.0, float("inf"))),
     # open low end -- or-below variants
     ("klga-high-55forbelow", (float("-inf"), 55.0)),
     ("klga-high-55f-or-below", (float("-inf"), 55.0)),
-    ("be-55f-or-below", (float("-inf"), 55.0)),
+    ("klga-be-55f-or-below", (float("-inf"), 55.0)),
     # range
-    ("high-temperature-60-70f-nyc", (60.0, 70.0)),
+    ("klga-high-temperature-60-70f-nyc", (60.0, 70.0)),
     ("klga-daily-high-46-47f", (46.0, 47.0)),
 ])
 def test_parse_slug(slug, expected):
@@ -64,6 +64,16 @@ def test_parse_slug_case_insensitive():
     assert hi == 60.0
 
 
+def test_parse_slug_no_station_returns_none():
+    """Slug without a station alias is treated as unrecognized per V2V01."""
+    assert parse_slug("highest-temperature-70f-or-higher") is None
+
+
+def test_parse_slug_no_temp_pattern_returns_none():
+    """Slug with only station but no temperature range is unrecognized per V2V01."""
+    assert parse_slug("klga-daily-weather-observation") is None
+
+
 # -----------------------------------------------------------------------
 # Fixtures
 # -----------------------------------------------------------------------
@@ -89,18 +99,18 @@ def _gamma_response(slug_pattern: str = "highest-temperature") -> list[dict]:
         {
             "id":            "cond-001",
             "conditionId":   "cond-001",
-            "slug":          f"highest-temperature-in-nyc-2025-03-20",
-            "title":         "Highest Temperature in NYC on 2025-03-20",
+            "slug":          "highest-temperature-klga-nyc-2025-03-20",
+            "title":         "Highest Temperature at KLGA on 2025-03-20",
             "endDate":       "2025-03-20",
             "markets": [
                 {
-                    "slug":          "highest-temperature-in-nyc-2025-03-20-60-70f",
+                    "slug":          "klga-highest-temperature-60-70f-2025-03-20",
                     "conditionId":   "cond-001",
                     "clobTokenIds":  json.dumps(["tok-yes-1", "tok-no-1"]),
                     "outcomes":      json.dumps(["Yes", "No"]),
                 },
                 {
-                    "slug":          "highest-temperature-in-nyc-2025-03-20-70f-or-higher",
+                    "slug":          "klga-highest-temperature-70f-or-higher-2025-03-20",
                     "conditionId":   "cond-001",
                     "clobTokenIds":  json.dumps(["tok-yes-2", "tok-no-2"]),
                     "outcomes":      json.dumps(["Yes", "No"]),
@@ -163,8 +173,8 @@ def test_discover_parses_buckets(mem_db):
     markets = result[0]["markets"]
     slugs_to_buckets = {m["market_slug"]: (m["lo_f"], m["hi_f"]) for m in markets}
 
-    key60 = "highest-temperature-in-nyc-2025-03-20-60-70f"
-    key70 = "highest-temperature-in-nyc-2025-03-20-70f-or-higher"
+    key60 = "klga-highest-temperature-60-70f-2025-03-20"
+    key70 = "klga-highest-temperature-70f-or-higher-2025-03-20"
 
     assert key60 in slugs_to_buckets
     assert slugs_to_buckets[key60] == (60.0, 70.0)
@@ -287,3 +297,195 @@ def test_discover_result_has_required_keys(mem_db):
     for key in ("condition_id", "event_slug", "event_end_date",
                 "station_id", "markets"):
         assert key in ev, f"Missing key: {key}"
+
+
+# ---------------------------------------------------------------------------
+# V2V01 -- _infer_station: alias lookup
+# ---------------------------------------------------------------------------
+
+def _make_settings_with_stations(gamma_url: str = "https://gamma-api.polymarket.com"):
+    """Settings mock that forwards real STATIONS for alias tests."""
+    settings = MagicMock()
+    settings.gamma_api_url = gamma_url
+    return settings
+
+
+def test_infer_station_matches_alias(mem_db):
+    """Slug containing an alias returns the matching station_id."""
+    disc = EventDiscovery(db=mem_db, settings=_make_settings())
+    # KLGA has alias 'klga'
+    station = disc._infer_station("will-the-high-temp-at-klga-exceed-75f")
+    assert station == "KLGA"
+
+
+def test_infer_station_matches_alias_case_insensitive(mem_db):
+    """Alias matching is case-insensitive."""
+    disc = EventDiscovery(db=mem_db, settings=_make_settings())
+    station = disc._infer_station("KLGA-DAILY-HIGH-75-80F")
+    assert station == "KLGA"
+
+
+def test_infer_station_matches_laguardia_alias(mem_db):
+    """'laguardia' alias maps to KLGA."""
+    disc = EventDiscovery(db=mem_db, settings=_make_settings())
+    station = disc._infer_station("highest-temp-at-laguardia-2026-06-01")
+    assert station == "KLGA"
+
+
+def test_infer_station_raises_on_no_match(mem_db):
+    """ValueError raised when no alias matches the slug."""
+    disc = EventDiscovery(db=mem_db, settings=_make_settings())
+    with pytest.raises(ValueError, match="station"):
+        disc._infer_station("highest-temp-at-chicago-ohare-2026-06-01")
+
+
+# ---------------------------------------------------------------------------
+# V2V01 -- _process_markets: token/outcome length check
+# ---------------------------------------------------------------------------
+
+def test_process_markets_skips_mismatched_length(mem_db):
+    """Market with len(tokens) != len(outcomes) is skipped without DB write."""
+    settings = _make_settings()
+    disc     = EventDiscovery(db=mem_db, settings=settings)
+
+    bad_market = {
+        "slug":         "will-the-high-temp-at-klga-60-70f",
+        "conditionId":  "cid-bad",
+        "clobTokenIds": json.dumps(["tok-yes-only"]),  # 1 token
+        "outcomes":     json.dumps(["Yes", "No"]),     # 2 outcomes
+    }
+    result, unrecog = disc._process_markets([bad_market], "cid-bad")
+    assert result == []  # market skipped
+    assert unrecog == 0
+    rows = mem_db._conn.execute("SELECT * FROM markets").fetchall()
+    assert len(rows) == 0
+
+
+def test_process_markets_upserts_matched_market(mem_db):
+    """Market where len(tokens) == len(outcomes) is upserted normally."""
+    settings = _make_settings()
+    disc     = EventDiscovery(db=mem_db, settings=settings)
+    mem_db.upsert_event("cid-ok", "q", "klga-slug", "2026-06-01", "KLGA")
+
+    good_market = {
+        "slug":         "will-the-high-temp-at-klga-60-70f",
+        "conditionId":  "cid-ok",
+        "clobTokenIds": json.dumps(["tok-yes", "tok-no"]),
+        "outcomes":     json.dumps(["Yes", "No"]),
+    }
+    result, unrecog = disc._process_markets([good_market], "cid-ok")
+    assert len(result) == 1
+    rows = mem_db._conn.execute("SELECT * FROM markets").fetchall()
+    assert len(rows) == 2
+
+
+# ---------------------------------------------------------------------------
+# V2V01 -- unrecognized slug: upsert with discovery_status + discovery_warn
+# ---------------------------------------------------------------------------
+
+def test_discover_unrecognized_slug_upserts_market(mem_db):
+    """Market with unparseable slug is upserted with discovery_status='unrecognized_slug'."""
+    settings = _make_settings()
+    disc     = EventDiscovery(db=mem_db, settings=settings)
+    disc._alert_bus = MagicMock()
+
+    bad_slug_event = {
+        "id":          "cid-unrecog",
+        "conditionId": "cid-unrecog",
+        "slug":        "highest-temperature-in-nyc-klga-2026-06-01",
+        "title":       "Some temperature event",
+        "endDate":     "2026-06-01",
+        "markets": [
+            {
+                "slug":         "this-is-not-a-temperature-bucket",
+                "conditionId":  "cid-unrecog",
+                "clobTokenIds": json.dumps(["tok-a", "tok-b"]),
+                "outcomes":     json.dumps(["Yes", "No"]),
+            }
+        ],
+    }
+    with patch.object(disc, "_fetch_events", return_value=[bad_slug_event]):
+        disc.discover()
+
+    row = mem_db._conn.execute(
+        "SELECT discovery_status FROM markets WHERE token_id='tok-a'"
+    ).fetchone()
+    assert row is not None
+    assert row["discovery_status"] == "unrecognized_slug"
+
+
+def test_discover_unrecognized_slug_emits_alert(mem_db):
+    """AlertBus receives a discovery_warn event for unrecognized slugs."""
+    from core.alerts import AlertBus, AlertEvent
+
+    settings  = _make_settings()
+    disc      = EventDiscovery(db=mem_db, settings=settings)
+    bus       = AlertBus()
+    received: list[AlertEvent] = []
+
+    import asyncio
+
+    async def handler(e: AlertEvent) -> None:
+        received.append(e)
+
+    bus.subscribe(handler)
+    disc._alert_bus = bus
+
+    bad_slug_event = {
+        "id":          "cid-warn",
+        "conditionId": "cid-warn",
+        "slug":        "highest-temperature-in-nyc-klga-2026-06-01",
+        "title":       "Some temperature event",
+        "endDate":     "2026-06-01",
+        "markets": [
+            {
+                "slug":         "completely-unrelated-slug",
+                "conditionId":  "cid-warn",
+                "clobTokenIds": json.dumps(["tok-x", "tok-y"]),
+                "outcomes":     json.dumps(["Yes", "No"]),
+            }
+        ],
+    }
+    with patch.object(disc, "_fetch_events", return_value=[bad_slug_event]):
+        disc.discover()
+
+    asyncio.run(asyncio.sleep(0))  # flush async handlers
+    alert_types = [e.alert_type for e in received]
+    assert "discovery_warn" in alert_types
+
+
+# ---------------------------------------------------------------------------
+# V2V01 -- discovery_status hard gate (tradeable/active queries)
+# ---------------------------------------------------------------------------
+
+def test_get_tradeable_events_excludes_unrecognized_slug(mem_db):
+    """get_tradeable_events returns only markets with discovery_status='parsed'."""
+    # Insert an event with an unrecognized-slug market
+    mem_db.upsert_event("cid-u", "q", "slug", "2026-06-05", "KLGA", status="active")
+    mem_db._conn.execute(
+        "INSERT INTO markets (token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome, discovery_status)"
+        " VALUES ('tok-u', 'cid-u', 'some-slug', NULL, NULL, 'YES', 'unrecognized_slug')"
+    )
+    mem_db._conn.commit()
+
+    events = mem_db.get_tradeable_events("2026-06-05")
+    cids = [e["condition_id"] for e in events]
+    assert "cid-u" not in cids
+
+
+def test_get_markets_for_event_excludes_null_bucket_markets(mem_db):
+    """get_markets_for_event only returns parsed markets with non-null buckets."""
+    mem_db.upsert_event("cid-m", "q", "slug", "2026-06-05", "KLGA", status="active")
+    # good market
+    mem_db.upsert_market("tok-good", "cid-m", "60-70f-slug", 60.0, 70.0, "YES")
+    # null-bucket market
+    mem_db._conn.execute(
+        "INSERT INTO markets (token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome, discovery_status)"
+        " VALUES ('tok-null', 'cid-m', 'unrecog', NULL, NULL, 'YES', 'unrecognized_slug')"
+    )
+    mem_db._conn.commit()
+
+    markets = mem_db.get_markets_for_event("cid-m")
+    token_ids = [m["token_id"] for m in markets]
+    assert "tok-good" in token_ids
+    assert "tok-null" not in token_ids

@@ -132,3 +132,11 @@ def test_test_start():
 
 def test_test_end():
     assert Settings().test_end == "2026-04-30"
+
+
+# ---------------------------------------------------------------------------
+# V2V01 -- discovery_loop_interval_s
+# ---------------------------------------------------------------------------
+
+def test_discovery_loop_interval_s_default():
+    assert Settings().discovery_loop_interval_s == 300

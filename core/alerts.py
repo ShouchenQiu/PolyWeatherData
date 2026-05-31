@@ -28,7 +28,7 @@ class AlertEvent:
         Consumed by downstream subscribers such as Telegram or dashboard.
     """
 
-    alert_type:  Literal["data_stale", "order_failure", "risk_rejected", "book_fetch_failure"]
+    alert_type:  Literal["data_stale", "order_failure", "risk_rejected", "book_fetch_failure", "discovery_warn"]
     station:     str | None
     message:     str
     occurred_at: datetime
@@ -66,6 +66,27 @@ class AlertBus:
         for handler in self._handlers:
             task = loop.create_task(self._call(handler, event))
             task.add_done_callback(lambda t: None)  # prevent GC warning
+
+    def emit_nowait(self, event: AlertEvent) -> None:
+        """Emit *event* from sync context.
+
+        If a running event loop exists, schedules tasks normally.  Otherwise
+        dispatches handlers synchronously via ``asyncio.run`` on the first
+        available handler, which is suitable for background threads and
+        discovery polling (which runs in an executor thread).
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None:
+            for handler in self._handlers:
+                task = loop.create_task(self._call(handler, event))
+                task.add_done_callback(lambda t: None)
+        else:
+            for handler in self._handlers:
+                asyncio.run(self._call(handler, event))
 
     @staticmethod
     async def _call(handler: Handler, event: AlertEvent) -> None:

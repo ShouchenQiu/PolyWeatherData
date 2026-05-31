@@ -2,7 +2,7 @@
 # STATIONS is the single source of truth for all supported weather stations.
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -16,6 +16,7 @@ class StationConfig:
     hrrr_grid_col_zarr: int
     iem_network: str
     slug_pattern: str
+    slug_aliases: list[str] = field(default_factory=list)
 
 
 STATIONS: dict[str, StationConfig] = {
@@ -29,5 +30,6 @@ STATIONS: dict[str, StationConfig] = {
         hrrr_grid_col_zarr=1556,
         iem_network="NY_ASOS",
         slug_pattern=r"will-the-high.*lga",
+        slug_aliases=["klga", "new-york-lga", "laguardia"],
     ),
 }

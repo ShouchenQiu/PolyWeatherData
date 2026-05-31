@@ -348,14 +348,19 @@ class DbClient:
     def get_tradeable_events(self, now_date: str) -> list[dict]:
         """Return events that are in 'active' status and within the 0..2-day window.
 
-        These are candidates for order submission.
+        Only events that have at least one market with discovery_status='parsed'
+        AND non-null bucket_lo_f / bucket_hi_f are returned (V2V01 hard gate).
         """
         cur = self._conn.execute(
             """
-            SELECT * FROM events
-            WHERE status = 'active'
-              AND event_end_date >= ?
-              AND event_end_date <= date(?, '+2 days')
+            SELECT DISTINCT e.* FROM events e
+            JOIN markets m ON m.condition_id = e.condition_id
+            WHERE e.status = 'active'
+              AND e.event_end_date >= ?
+              AND e.event_end_date <= date(?, '+2 days')
+              AND m.discovery_status = 'parsed'
+              AND m.bucket_lo_f IS NOT NULL
+              AND m.bucket_hi_f IS NOT NULL
             """,
             (now_date, now_date),
         )
@@ -365,6 +370,17 @@ class DbClient:
         """Return events awaiting settlement (status = 'pending_settle')."""
         cur = self._conn.execute(
             "SELECT * FROM events WHERE status = 'pending_settle'"
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_non_terminal_events(self) -> list[dict]:
+        """Return all events that have not reached a terminal state.
+
+        Terminal states are ``settled`` and ``cancelled``.  Used by
+        DiscoveryLoop to drive the lifecycle advance pass.
+        """
+        cur = self._conn.execute(
+            "SELECT * FROM events WHERE status NOT IN ('settled', 'cancelled')"
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -418,7 +434,13 @@ class DbClient:
 
     def get_markets_for_event(self, condition_id: str) -> list[dict]:
         cur = self._conn.execute(
-            "SELECT * FROM markets WHERE condition_id=?",
+            """
+            SELECT * FROM markets
+            WHERE condition_id=?
+              AND discovery_status='parsed'
+              AND bucket_lo_f IS NOT NULL
+              AND bucket_hi_f IS NOT NULL
+            """,
             (condition_id,),
         )
         return [dict(r) for r in cur.fetchall()]

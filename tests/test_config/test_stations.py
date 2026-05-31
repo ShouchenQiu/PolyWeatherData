@@ -45,3 +45,21 @@ def test_hrrr_grid_values():
     st = STATIONS["KLGA"]
     assert st.hrrr_grid_row_zarr == 698
     assert st.hrrr_grid_col_zarr == 1556
+
+
+# ---------------------------------------------------------------------------
+# V2V01 -- slug_aliases
+# ---------------------------------------------------------------------------
+
+def test_klga_has_slug_aliases():
+    """StationConfig must have a slug_aliases list (non-empty for KLGA)."""
+    st = STATIONS["KLGA"]
+    assert hasattr(st, "slug_aliases")
+    assert isinstance(st.slug_aliases, list)
+    assert len(st.slug_aliases) >= 1
+
+
+def test_klga_slug_aliases_include_icao():
+    """'klga' must appear in the aliases so _infer_station finds it."""
+    aliases = [a.lower() for a in STATIONS["KLGA"].slug_aliases]
+    assert "klga" in aliases

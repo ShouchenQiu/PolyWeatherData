@@ -58,3 +58,101 @@ def test_discovery_loop_run_calls_discover():
 
     asyncio.run(_run_one_tick())
     discovery.discover.assert_called()
+
+
+# -----------------------------------------------------------------------
+# V2V01 -- lifecycle advance pass
+# -----------------------------------------------------------------------
+
+def test_discovery_loop_accepts_db_and_lifecycle():
+    """DiscoveryLoop.__init__ must accept optional db and lifecycle parameters."""
+    discovery = MagicMock()
+    db        = MagicMock()
+    lifecycle = MagicMock()
+    loop = DiscoveryLoop(discovery, interval_seconds=0.0, db=db, lifecycle=lifecycle)
+    assert loop._db is db
+    assert loop._lifecycle is lifecycle
+
+
+def test_discovery_loop_advance_pass_called_after_discover():
+    """run() calls lifecycle.advance for each non-terminal event after discover()."""
+    from datetime import datetime, timezone
+
+    discovery = MagicMock()
+    lifecycle = MagicMock()
+    lifecycle.advance.return_value = "active"
+
+    db = MagicMock()
+    db.get_non_terminal_events.return_value = [
+        {"condition_id": "cid-1", "status": "active",     "event_end_date": "2026-06-01"},
+        {"condition_id": "cid-2", "status": "discovered", "event_end_date": "2025-01-01"},
+    ]
+
+    loop = DiscoveryLoop(discovery, interval_seconds=0.0, db=db, lifecycle=lifecycle)
+
+    async def _run_one_tick():
+        task = asyncio.create_task(loop.run())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run_one_tick())
+    assert lifecycle.advance.call_count >= 2
+
+
+def test_discovery_loop_writes_status_change_to_db():
+    """When lifecycle.advance returns a new status, db.update_event_status is called."""
+    from events.lifecycle import EventLifecycle
+
+    discovery = MagicMock()
+    lifecycle = MagicMock()
+    # advance returns 'pending_settle' for the expired event
+    lifecycle.advance.return_value = "pending_settle"
+
+    db = MagicMock()
+    db.get_non_terminal_events.return_value = [
+        {"condition_id": "cid-1", "status": "active", "event_end_date": "2025-01-01"},
+    ]
+
+    loop = DiscoveryLoop(discovery, interval_seconds=0.0, db=db, lifecycle=lifecycle)
+
+    async def _run_one_tick():
+        task = asyncio.create_task(loop.run())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run_one_tick())
+    db.update_event_status.assert_called_with("cid-1", "pending_settle")
+
+
+def test_discovery_loop_no_status_change_skips_db_write():
+    """When lifecycle.advance returns same status (no transition), db.update_event_status is NOT called."""
+    discovery = MagicMock()
+    lifecycle = MagicMock()
+    lifecycle.advance.return_value = "active"  # same as current status -- no change
+
+    db = MagicMock()
+    db.get_non_terminal_events.return_value = [
+        {"condition_id": "cid-1", "status": "active", "event_end_date": "2026-06-05"},
+    ]
+
+    loop = DiscoveryLoop(discovery, interval_seconds=0.0, db=db, lifecycle=lifecycle)
+
+    async def _run_one_tick():
+        task = asyncio.create_task(loop.run())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run_one_tick())
+    db.update_event_status.assert_not_called()
