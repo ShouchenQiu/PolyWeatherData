@@ -18,6 +18,8 @@ def test_imports_are_available() -> None:
         REQUIRED_DECODER_SOURCE_COLUMNS,
         REQUIRED_ENCODER_SOURCE_COLUMNS,
         TARGET,
+        TFT_KNOWN_REALS,
+        TFT_UNKNOWN_REALS,
     )
 
 
@@ -93,6 +95,7 @@ def test_required_encoder_source_columns_is_hrrr_plus_obs_plus_target() -> None:
 def test_required_decoder_source_columns_is_hrrr_only() -> None:
     from model.features import HRRR_KNOWN_REALS, REQUIRED_DECODER_SOURCE_COLUMNS
     assert REQUIRED_DECODER_SOURCE_COLUMNS == HRRR_KNOWN_REALS
+    assert REQUIRED_DECODER_SOURCE_COLUMNS is not HRRR_KNOWN_REALS
 
 
 def test_model_generated_columns_contains_time_features() -> None:
@@ -106,6 +109,59 @@ def test_hrrr_and_obs_sets_are_disjoint() -> None:
     from model.features import HRRR_KNOWN_REALS, OBS_UNKNOWN_REALS
     overlap = set(HRRR_KNOWN_REALS) & set(OBS_UNKNOWN_REALS)
     assert overlap == set(), f"Overlap between HRRR and OBS: {overlap}"
+
+
+# ---------------------------------------------------------------------------
+# TFT_KNOWN_REALS / TFT_UNKNOWN_REALS
+# ---------------------------------------------------------------------------
+
+
+def test_tft_known_reals_starts_with_time_encoding_then_hrrr() -> None:
+    from model.features import HRRR_KNOWN_REALS, TFT_KNOWN_REALS
+    for col in ("local_idx", "sin_hour", "cos_hour", "sin_doy", "cos_doy"):
+        assert col in TFT_KNOWN_REALS, f"{col} missing from TFT_KNOWN_REALS"
+    for col in HRRR_KNOWN_REALS:
+        assert col in TFT_KNOWN_REALS, f"{col} missing from TFT_KNOWN_REALS"
+
+
+def test_tft_unknown_reals_equals_obs_unknown_reals() -> None:
+    from model.features import OBS_UNKNOWN_REALS, TFT_UNKNOWN_REALS
+    assert TFT_UNKNOWN_REALS == OBS_UNKNOWN_REALS
+    assert TFT_UNKNOWN_REALS is not OBS_UNKNOWN_REALS
+
+
+def test_tft_known_reals_has_no_duplicates() -> None:
+    from model.features import TFT_KNOWN_REALS
+    assert len(TFT_KNOWN_REALS) == len(set(TFT_KNOWN_REALS))
+
+
+# ---------------------------------------------------------------------------
+# Smoke tests: tft.py and train_tft.py use the same contract
+# ---------------------------------------------------------------------------
+
+
+def test_tft_known_reals_matches_model_tft_known_reals() -> None:
+    from model.features import TFT_KNOWN_REALS
+    from model.tft import KNOWN_REALS
+    assert KNOWN_REALS == TFT_KNOWN_REALS
+
+
+def test_tft_unknown_reals_matches_model_tft_unknown_reals() -> None:
+    from model.features import TFT_UNKNOWN_REALS
+    from model.tft import UNKNOWN_REALS
+    assert UNKNOWN_REALS == TFT_UNKNOWN_REALS
+
+
+def test_train_tft_known_reals_matches_tft_contract() -> None:
+    from model.features import TFT_KNOWN_REALS
+    from scripts.train_tft import _KNOWN_REALS
+    assert _KNOWN_REALS == TFT_KNOWN_REALS
+
+
+def test_train_tft_unknown_reals_matches_tft_contract() -> None:
+    from model.features import TFT_UNKNOWN_REALS
+    from scripts.train_tft import _UNKNOWN_REALS
+    assert _UNKNOWN_REALS == TFT_UNKNOWN_REALS
 
 
 # ---------------------------------------------------------------------------

@@ -55,7 +55,21 @@ REQUIRED_ENCODER_SOURCE_COLUMNS: list[str] = (
     HRRR_KNOWN_REALS + OBS_UNKNOWN_REALS + [TARGET]
 )
 
-REQUIRED_DECODER_SOURCE_COLUMNS: list[str] = HRRR_KNOWN_REALS
+REQUIRED_DECODER_SOURCE_COLUMNS: list[str] = list(HRRR_KNOWN_REALS)
+
+# ---------------------------------------------------------------------------
+# TFT time_varying_known/unknown_reals (training and inference must match)
+# These are the lists passed directly to TimeSeriesDataSet / TftModel.
+# ---------------------------------------------------------------------------
+
+# Calendar encoding columns prepended to HRRR_KNOWN_REALS for the TFT encoder.
+_TFT_TIME_ENCODING: list[str] = [
+    "local_idx",
+    "sin_hour", "cos_hour", "sin_doy", "cos_doy",
+]
+
+TFT_KNOWN_REALS: list[str] = _TFT_TIME_ENCODING + HRRR_KNOWN_REALS
+TFT_UNKNOWN_REALS: list[str] = list(OBS_UNKNOWN_REALS)
 
 # ---------------------------------------------------------------------------
 # Model-generated columns (added by the pipeline, not sourced from raw data)

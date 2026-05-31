@@ -30,22 +30,16 @@ except ImportError:
 if TYPE_CHECKING:
     pass
 
-from model.features import HRRR_KNOWN_REALS, OBS_UNKNOWN_REALS
+from model.features import HRRR_KNOWN_REALS, OBS_UNKNOWN_REALS  # noqa: F401
 from model.features import TARGET  # noqa: F401  (re-exported for callers)
+from model.features import TFT_KNOWN_REALS, TFT_UNKNOWN_REALS
 
 # ---------------------------------------------------------------------------
 # Column definitions (must match the training dataset exactly)
 # ---------------------------------------------------------------------------
 
-# Time-encoding features are known at forecast time; combined with HRRR vars
-# they form the full set of time_varying_known_reals for TFT.
-KNOWN_REALS: list[str] = [
-    "local_idx",
-    "sin_hour", "cos_hour", "sin_doy", "cos_doy",
-    *HRRR_KNOWN_REALS,
-]
-
-UNKNOWN_REALS: list[str] = OBS_UNKNOWN_REALS
+KNOWN_REALS: list[str] = TFT_KNOWN_REALS
+UNKNOWN_REALS: list[str] = TFT_UNKNOWN_REALS
 
 MAX_ENCODER_LENGTH    = 72
 MAX_PREDICTION_LENGTH = 48

@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 from config.settings import Settings
-from model.features import HRRR_KNOWN_REALS, OBS_UNKNOWN_REALS
+from model.features import TFT_KNOWN_REALS, TFT_UNKNOWN_REALS
 
 if TYPE_CHECKING:
     from data.storage.parquet_store import ParquetStore
@@ -62,13 +62,9 @@ _STATIC_CATS = ["Node_ID"]
 
 _TEMP_K_COLS = ["TMP_2m", "DPT_2m", "TMP_sfc", "TMP_850mb", "TMP_500mb"]
 
-_KNOWN_REALS: list[str] = [
-    "local_idx",
-    "sin_hour", "cos_hour", "sin_doy", "cos_doy",
-    *HRRR_KNOWN_REALS,
-]
+_KNOWN_REALS: list[str] = TFT_KNOWN_REALS
 
-_UNKNOWN_REALS: list[str] = OBS_UNKNOWN_REALS
+_UNKNOWN_REALS: list[str] = TFT_UNKNOWN_REALS
 
 
 # ---------------------------------------------------------------------------
