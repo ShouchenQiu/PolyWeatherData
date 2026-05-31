@@ -79,6 +79,49 @@ def test_val_end():
     assert Settings().val_end == "2026-02-28"
 
 
+# ---------------------------------------------------------------------------
+# V2F02 AC: V1 Polymarket credential fields removed
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("field", [
+    "polymarket_api_key",
+    "polymarket_api_secret",
+    "polymarket_passphrase",
+    "polymarket_funder",
+    "polymarket_proxy_address",
+    "chain_id",
+])
+def test_v1_credential_field_absent(field):
+    s = Settings()
+    assert not hasattr(s, field), f"V1 credential field {field!r} must be removed"
+
+
+# ---------------------------------------------------------------------------
+# V2F02 AC: V2 Polymarket credential fields added
+# ---------------------------------------------------------------------------
+
+def test_polymarket_private_key_default_empty():
+    import os
+    os.environ.pop("POLYMARKET_PRIVATE_KEY", None)
+    assert Settings().polymarket_private_key == ""
+
+
+def test_polymarket_private_key_reads_from_env(monkeypatch):
+    monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", "0xdeadbeef")
+    assert Settings().polymarket_private_key == "0xdeadbeef"
+
+
+def test_polymarket_wallet_address_default_empty():
+    import os
+    os.environ.pop("POLYMARKET_WALLET_ADDRESS", None)
+    assert Settings().polymarket_wallet_address == ""
+
+
+def test_polymarket_wallet_address_reads_from_env(monkeypatch):
+    monkeypatch.setenv("POLYMARKET_WALLET_ADDRESS", "0xabc123")
+    assert Settings().polymarket_wallet_address == "0xabc123"
+
+
 def test_test_start():
     assert Settings().test_start == "2026-03-01"
 

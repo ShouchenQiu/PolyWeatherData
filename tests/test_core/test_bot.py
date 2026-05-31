@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -85,3 +86,71 @@ def test_bot_manager_run_starts_single_sniper_entry_when_enabled():
 
     assert "sniper" in calls
     bot.snipers.start_all.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# V2F02 AC: paper mode never constructs SecureClient; live mode uses it
+# ---------------------------------------------------------------------------
+
+def test_bot_paper_mode_uses_paper_exchange(tmp_path):
+    """Paper mode wires PaperExchange and does not require SDK credentials."""
+    from core.exchange.paper import PaperExchange
+    settings = Settings(data_store_dir=tmp_path / "data")
+    bot = BotManager(settings, db_path=str(tmp_path / "bot.db"))
+    assert isinstance(bot.exchange, PaperExchange)
+
+
+def test_bot_live_mode_raises_without_sdk(tmp_path, monkeypatch):
+    """Live mode raises ImportError when polymarket-client is not installed."""
+    import core.bot as bot_mod
+    monkeypatch.setattr(bot_mod, "SecureClient", None)
+    settings = Settings(data_store_dir=tmp_path / "data")
+    settings.trading_mode = "live"
+    with pytest.raises(ImportError, match="polymarket-client"):
+        BotManager(settings, db_path=str(tmp_path / "bot.db"))
+
+
+def test_bot_live_mode_calls_secure_client_create(tmp_path, monkeypatch):
+    """Live mode calls SecureClient.create(private_key=..., wallet=...)."""
+    import core.bot as bot_mod
+    from types import SimpleNamespace
+
+    created_with: list[dict] = []
+
+    class FakeSecure:
+        @classmethod
+        def create(cls, *, private_key, wallet):
+            created_with.append({"private_key": private_key, "wallet": wallet})
+            return cls()
+        def place_limit_order(self, **kwargs):
+            return SimpleNamespace(order_id="", error_msg=None)
+        def cancel_orders(self, **kwargs):
+            return True
+        def get_positions(self):
+            return []
+
+    class FakePublic:
+        def get_order_book(self, *, token_id):
+            return SimpleNamespace(bids=[], asks=[])
+
+    monkeypatch.setattr(bot_mod, "SecureClient", FakeSecure)
+    monkeypatch.setattr(bot_mod, "PublicClient", FakePublic)
+    monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", "0xprivkey")
+    monkeypatch.setenv("POLYMARKET_WALLET_ADDRESS", "0xwallet")
+
+    settings = Settings(data_store_dir=tmp_path / "data")
+    settings.trading_mode = "live"
+
+    BotManager(settings, db_path=str(tmp_path / "bot.db"))
+
+    assert len(created_with) == 1
+    assert created_with[0]["private_key"] == "0xprivkey"
+    assert created_with[0]["wallet"] == "0xwallet"
+
+
+def test_bot_module_has_no_py_clob_client_import():
+    """No py_clob_client import must remain in core/bot.py."""
+    import inspect
+    import core.bot as mod
+    src = inspect.getsource(mod)
+    assert "py_clob_client" not in src

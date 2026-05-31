@@ -5,11 +5,10 @@ import asyncio
 from typing import TYPE_CHECKING
 
 try:
-    from py_clob_client import ClobClient  # type: ignore[import-untyped]
-    from py_clob_client.clob_types import ApiCreds  # type: ignore[import-untyped]
+    from polymarket_client import PublicClient, SecureClient  # type: ignore[import-untyped]
 except ImportError:
-    ClobClient = None  # type: ignore[assignment,misc]
-    ApiCreds   = None  # type: ignore[assignment,misc]
+    PublicClient = None  # type: ignore[assignment,misc]
+    SecureClient = None  # type: ignore[assignment,misc]
 
 if TYPE_CHECKING:
     from config.settings import Settings
@@ -107,31 +106,25 @@ class BotManager:
         # Strategy
         self.strategy = MultiStrategy([EdgeStrategy(min_edge=settings.min_edge)])
 
-        # Exchange wiring [ADR-0008]
+        # Exchange wiring [ADR-0009]
         if settings.trading_mode == "live":
-            if ClobClient is None:
+            if SecureClient is None:
                 raise ImportError(
-                    "py_clob_client is required for live trading mode."
+                    "polymarket-client is required for live trading mode."
                 )
-            creds = ApiCreds(
-                api_key        = settings.polymarket_api_key,
-                api_secret     = settings.polymarket_api_secret,
-                api_passphrase = settings.polymarket_passphrase,
+            secure = SecureClient.create(
+                private_key = settings.polymarket_private_key,
+                wallet      = settings.polymarket_wallet_address or None,
             )
-            l2_client      = ClobClient(
-                host     = settings.clob_api_url,
-                chain_id = settings.chain_id,
-                creds    = creds,
-            )
-            self.orderbook = OrderbookFetcher(l2_client)
-            self.exchange  = ClobExchange(l2_client, alert_bus=self.alert_bus)
+            if PublicClient is not None:
+                self.orderbook = OrderbookFetcher(PublicClient())
+            else:
+                self.orderbook = None
+            self.exchange = ClobExchange(secure, alert_bus=self.alert_bus)
         else:
-            if ClobClient is not None:
-                l1_client      = ClobClient(
-                    host     = settings.clob_api_url,
-                    chain_id = settings.chain_id,
-                )
-                self.orderbook = OrderbookFetcher(l1_client)
+            # Paper mode: never load private key
+            if PublicClient is not None:
+                self.orderbook = OrderbookFetcher(PublicClient())
             else:
                 self.orderbook = None
             self.exchange = PaperExchange(

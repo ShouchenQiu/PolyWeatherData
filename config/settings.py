@@ -90,27 +90,11 @@ class Settings:
     max_open_per_token: int = 1
     quote_size_usd: float = 50.0
 
-    # Polymarket credentials (read-only properties)
+    # Polymarket credentials (V2: private-key wallet pair; read-only properties)
     @property
-    def polymarket_api_key(self) -> str:
-        return os.environ.get("POLYMARKET_API_KEY", "")
+    def polymarket_private_key(self) -> str:
+        return os.environ.get("POLYMARKET_PRIVATE_KEY", "")
 
     @property
-    def polymarket_api_secret(self) -> str:
-        return os.environ.get("POLYMARKET_API_SECRET", "")
-
-    @property
-    def polymarket_passphrase(self) -> str:
-        return os.environ.get("POLYMARKET_PASSPHRASE", "")
-
-    @property
-    def polymarket_funder(self) -> str:
-        return os.environ.get("POLYMARKET_FUNDER", "")
-
-    @property
-    def polymarket_proxy_address(self) -> str:
-        return os.environ.get("POLYMARKET_PROXY_ADDRESS", "")
-
-    @property
-    def chain_id(self) -> int:
-        return int(os.environ.get("CHAIN_ID", "137"))
+    def polymarket_wallet_address(self) -> str:
+        return os.environ.get("POLYMARKET_WALLET_ADDRESS", "")

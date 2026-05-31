@@ -281,7 +281,7 @@ def test_clob_exchange_emits_order_failure_on_place_exception():
     from core.exchange.clob import ClobExchange
 
     class BrokenClient:
-        def create_order(self, order_args):
+        def place_limit_order(self, **kwargs):
             raise RuntimeError("auth failure")
 
     emitted: list[AlertEvent] = []
@@ -305,15 +305,14 @@ def test_clob_exchange_emits_order_failure_on_place_exception():
 
 
 def test_clob_exchange_emits_order_failure_on_rejected_response():
-    """A response without an orderID must emit an order_failure alert."""
+    """A response without an order_id must emit an order_failure alert."""
+    from types import SimpleNamespace
     from core.alerts import AlertBus, AlertEvent
     from core.exchange.clob import ClobExchange
 
     class RejectingClient:
-        def create_order(self, order_args):
-            return object()
-        def post_order(self, signed):
-            return {"errorMsg": "insufficient funds", "orderID": ""}
+        def place_limit_order(self, **kwargs):
+            return SimpleNamespace(order_id=None, error_msg="insufficient funds")
 
     emitted: list[AlertEvent] = []
 
@@ -335,61 +334,54 @@ def test_clob_exchange_emits_order_failure_on_rejected_response():
 
 
 # -----------------------------------------------------------------------
-# bot.py -- auth wiring (V07)
+# ClobExchange -- V2F02: SecureClient interface
 # -----------------------------------------------------------------------
 
-def test_bot_paper_mode_no_api_creds(tmp_path, monkeypatch):
-    """Paper mode must not pass ApiCreds to ClobClient constructor."""
-    from unittest.mock import MagicMock, patch
-    from config.settings import Settings
+def test_clob_exchange_place_order_calls_place_limit_order():
+    """place_order() must delegate to SecureClient.place_limit_order()."""
+    from types import SimpleNamespace
+    from core.exchange.clob import ClobExchange
 
-    settings = Settings(
-        data_store_dir=tmp_path / "data",
-        trading_mode="paper",
-    )
+    placed: list[dict] = []
 
-    constructed_kwargs: list[dict] = []
+    class FakeSecureClient:
+        def place_limit_order(self, *, token_id, price, size, side):
+            placed.append({"token_id": token_id, "price": price,
+                           "size": size, "side": side})
+            return SimpleNamespace(order_id="ord-001", error_msg=None)
 
-    class FakeClobClient:
-        def __init__(self, *args, **kwargs):
-            constructed_kwargs.append(kwargs)
+    exch = ClobExchange(clob_client=FakeSecureClient())
+    oid  = exch.place_order("tok1", "BUY", 50.0, 0.55)
 
-    with patch("core.bot.ClobClient", FakeClobClient):
-        from core.bot import BotManager
-        bot = BotManager(settings, db_path=str(tmp_path / "bot.db"))
+    assert oid == "ord-001"
+    assert len(placed) == 1
+    assert placed[0]["token_id"] == "tok1"
+    assert placed[0]["price"] == pytest.approx(0.55)
+    assert placed[0]["size"] == pytest.approx(50.0)
+    assert placed[0]["side"] == "BUY"
 
-    # Paper mode: should not have passed creds= kwarg
-    assert all("creds" not in kw for kw in constructed_kwargs)
+
+def test_clob_exchange_cancel_order_calls_cancel_orders():
+    """cancel_order() must delegate to SecureClient.cancel_orders()."""
+    from core.exchange.clob import ClobExchange
+
+    cancelled: list[str] = []
+
+    class FakeSecureClient:
+        def cancel_orders(self, *, order_ids):
+            cancelled.extend(order_ids)
+            return True
+
+    exch   = ClobExchange(clob_client=FakeSecureClient())
+    result = exch.cancel_order("ord-999")
+
+    assert result is True
+    assert "ord-999" in cancelled
 
 
-def test_bot_live_mode_passes_api_creds(tmp_path, monkeypatch):
-    """Live mode must pass creds= to ClobClient constructor."""
-    from unittest.mock import patch
-    from config.settings import Settings
-    import core.bot
-
-    monkeypatch.setenv("POLYMARKET_API_KEY", "test-key")
-    monkeypatch.setenv("POLYMARKET_API_SECRET", "test-secret")
-    monkeypatch.setenv("POLYMARKET_PASSPHRASE", "test-pass")
-
-    settings = Settings(
-        data_store_dir=tmp_path / "data",
-        trading_mode="live",
-    )
-
-    constructed_kwargs: list[dict] = []
-
-    class FakeClobClient:
-        def __init__(self, *args, **kwargs):
-            constructed_kwargs.append(kwargs)
-
-    class FakeApiCreds:
-        def __init__(self, **kwargs):
-            pass
-
-    with patch("core.bot.ClobClient", FakeClobClient), \
-         patch("core.bot.ApiCreds", FakeApiCreds):
-        bot = core.bot.BotManager(settings, db_path=str(tmp_path / "bot.db"))
-
-    live_calls = [kw for kw in constructed_kwargs if "creds" in kw]
-    assert len(live_calls) >= 1
+def test_clob_exchange_module_has_no_py_clob_client_import():
+    """No py_clob_client import must remain in core/exchange/clob.py."""
+    import inspect
+    import core.exchange.clob as mod
+    src = inspect.getsource(mod)
+    assert "py_clob_client" not in src
