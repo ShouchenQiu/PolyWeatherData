@@ -334,7 +334,7 @@ class DbClient:
         )
         return [dict(r) for r in cur.fetchall()]
 
-    def get_forecast_events(self, now_date: str, horizon_days: int = 2) -> list[dict]:
+    def get_forecast_candidate_events(self, now_date: str, horizon_days: int = 2) -> list[dict]:
         """Return events whose end date is within [today, today+horizon_days].
 
         Excludes resolved, cancelled, and settled events.  The date

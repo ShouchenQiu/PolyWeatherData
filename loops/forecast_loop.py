@@ -77,7 +77,7 @@ class ForecastLoop:
         )
 
         logger.info("ForecastLoop tick: init_time={}", init_utc)
-        forecast_events = self.db.get_forecast_events(init_utc.date().isoformat())
+        forecast_events = self.db.get_forecast_candidate_events(init_utc.date().isoformat())
         logger.debug("ForecastLoop: {} forecast event(s)", len(forecast_events))
         written: list[str] = []
 

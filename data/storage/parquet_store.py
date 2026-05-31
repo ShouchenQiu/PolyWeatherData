@@ -52,15 +52,20 @@ class ParquetStore:
         dedup_key = self._pick_dedup_key(df)
         df = df.copy()
 
-        # Collect all quarters touched by the new data
+        # Collect all quarters touched by the new data.
+        # UTC-normalize before extracting year/month so that a timezone-offset
+        # timestamp that straddles a quarter boundary is bucketed consistently
+        # with the UTC-normalized dedup keys in _make_key_tuples.
         ts_col = dedup_key[0]
         quarters: set[str] = set()
-        for ts in pd.to_datetime(df[ts_col]):
+        for ts in pd.to_datetime(df[ts_col], utc=True):
             quarters.add(self._quarter_key(ts))
 
         new_total = 0
         for q in sorted(quarters):
-            mask = df[ts_col].apply(lambda t, _q=q: self._quarter_key(pd.Timestamp(t)) == _q)
+            mask = df[ts_col].apply(
+                lambda t, _q=q: self._quarter_key(pd.to_datetime(t, utc=True)) == _q
+            )
             chunk = df[mask]
             new_total += self._append_to_quarter(station_id, q, chunk, dedup_key)
 
@@ -127,12 +132,15 @@ class ParquetStore:
     def _make_key_tuples(
         self, df: pd.DataFrame, dedup_key: list[str]
     ) -> pd.Series:
-        """Build comparable key tuples, normalising timestamp columns to UTC."""
+        """Build comparable key tuples, normalising timestamp columns to UTC second."""
         norm: dict[str, pd.Series] = {}
         for k in dedup_key:
             col = df[k]
             if k in self._TIMESTAMP_KEY_COLS:
-                col = pd.to_datetime(col, utc=True)
+                # Normalise to UTC and floor to whole second so that sub-second
+                # precision differences (e.g. from Parquet round-trips or
+                # microsecond jitter) do not create duplicate rows (#45).
+                col = pd.to_datetime(col, utc=True).dt.floor("s")
             norm[k] = col
         return pd.DataFrame(norm).apply(lambda r: tuple(r), axis=1)
 

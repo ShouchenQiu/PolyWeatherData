@@ -156,3 +156,26 @@ def test_discovery_loop_no_status_change_skips_db_write():
 
     asyncio.run(_run_one_tick())
     db.update_event_status.assert_not_called()
+
+
+# -----------------------------------------------------------------------
+# Partial-dep guard (Batch 3 arch fix)
+# -----------------------------------------------------------------------
+
+def test_discovery_loop_raises_when_only_db_provided():
+    """Providing db without lifecycle must raise ValueError."""
+    with pytest.raises(ValueError, match="both"):
+        DiscoveryLoop(MagicMock(), db=MagicMock())
+
+
+def test_discovery_loop_raises_when_only_lifecycle_provided():
+    """Providing lifecycle without db must raise ValueError."""
+    with pytest.raises(ValueError, match="both"):
+        DiscoveryLoop(MagicMock(), lifecycle=MagicMock())
+
+
+def test_discovery_loop_allows_both_none():
+    """Omitting both db and lifecycle is valid (lifecycle advance pass is skipped)."""
+    loop = DiscoveryLoop(MagicMock())
+    assert loop._db is None
+    assert loop._lifecycle is None

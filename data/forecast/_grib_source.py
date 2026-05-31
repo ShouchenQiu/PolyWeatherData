@@ -32,7 +32,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from data.forecast.base import BaseForecastSource
-from data.forecast.hrrr_fill import HrrrFill, _MAJOR_HOURS, _nearest_prior_major
+from data.forecast.hrrr_fill import HrrrFill, MAJOR_HOURS, nearest_prior_major
 from data.forecast.vars import GRIB_TO_COL, HRRR_SEARCHES
 
 if TYPE_CHECKING:
@@ -75,7 +75,7 @@ def _is_major(init_time: pd.Timestamp) -> bool:
         init_time.tz_localize("UTC") if init_time.tzinfo is None
         else init_time.tz_convert("UTC")
     )
-    return utc.hour in _MAJOR_HOURS
+    return utc.hour in MAJOR_HOURS
 
 
 class BaseGribSource(BaseForecastSource):
@@ -109,54 +109,68 @@ class BaseGribSource(BaseForecastSource):
         """Parse a .idx file and return [(start_byte, end_byte, col_name), ...].
 
         The .idx format is:
-            msgnum:byte_offset:d=YYYYMMDDHHZ:VAR:LEVEL:FCST:...
+            msgnum:byte_offset:d=YYYYMMDDHHZ:VAR:LEVEL:DESCRIPTOR:...
 
-        Uses exact VAR+LEVEL two-field match to prevent prefix collisions
-        (e.g. MAXTMP must not match TMP) and level cross-matches (e.g.
-        TMP:surface must not match TMP:2 m above ground).
+        Uses exact VAR + LEVEL + DESCRIPTOR three-field match to prevent:
+        - Prefix collisions (MAXTMP must not match TMP).
+        - Level cross-matches (TMP:surface must not match TMP:2 m above ground).
+        - Descriptor mismatches (same VAR/LEVEL under different accumulation
+          periods or layer selectors).  When HRRR_SEARCHES has descriptor=None
+          the descriptor field is ignored and any value is accepted.
 
         Raises
         ------
         ValueError
             If more than one .idx row maps to the same target column name.
-            The error message includes the matched VAR:LEVEL fields.
+            The error message includes the matched VAR:LEVEL:DESCRIPTOR fields.
         """
-        offsets: list[int] = []
-        var_fields: list[str] = []
+        offsets:    list[int] = []
+        var_fields:  list[str] = []
         level_fields: list[str] = []
+        desc_fields:  list[str] = []
 
         for ln in idx_text.strip().splitlines():
             parts = ln.split(":")
-            if len(parts) >= 5:
+            if len(parts) >= 6:
                 try:
                     offsets.append(int(parts[1]))
                     var_fields.append(parts[3])
                     level_fields.append(parts[4])
+                    desc_fields.append(parts[5])
+                except ValueError:
+                    pass
+            elif len(parts) == 5:
+                # Tolerate malformed rows that omit the descriptor field.
+                try:
+                    offsets.append(int(parts[1]))
+                    var_fields.append(parts[3])
+                    level_fields.append(parts[4])
+                    desc_fields.append("")
                 except ValueError:
                     pass
 
         targets: list[tuple[int, int | None, str]] = []
         seen_colnames: set[str] = set()
 
-        for i, (off, var_field, level_field) in enumerate(
-            zip(offsets, var_fields, level_fields)
+        for i, (off, var_field, level_field, desc_field) in enumerate(
+            zip(offsets, var_fields, level_fields, desc_fields)
         ):
-            # For the last message use None (open-ended Range request bytes={start}-)
             end: int | None = offsets[i + 1] - 1 if i + 1 < len(offsets) else None
-            for search, colname in HRRR_SEARCHES:
-                search_parts = search.split(":", 1)
-                s_var = search_parts[0]
-                s_level = search_parts[1] if len(search_parts) > 1 else ""
-                # Exact VAR+LEVEL match prevents prefix and level cross-matches
-                if var_field == s_var and level_field == s_level:
-                    if colname in seen_colnames:
-                        raise ValueError(
-                            f"_grib_source: duplicate .idx rows for column "
-                            f"'{colname}' -- matched '{var_field}:{level_field}'"
-                        )
-                    seen_colnames.add(colname)
-                    targets.append((off, end, colname))
-                    break
+            for s_var, s_level, s_desc, colname in HRRR_SEARCHES:
+                # Exact VAR+LEVEL match; descriptor matched only when specified.
+                if var_field != s_var or level_field != s_level:
+                    continue
+                if s_desc is not None and desc_field != s_desc:
+                    continue
+                if colname in seen_colnames:
+                    raise ValueError(
+                        f"_grib_source: duplicate .idx rows for column "
+                        f"'{colname}' -- matched "
+                        f"'{var_field}:{level_field}:{desc_field}'"
+                    )
+                seen_colnames.add(colname)
+                targets.append((off, end, colname))
+                break
         return targets
 
     # ------------------------------------------------------------------
@@ -246,6 +260,21 @@ class BaseGribSource(BaseForecastSource):
                                 "_grib_source: 206 byte count mismatch; "
                                 "expected={} got={} Content-Range={!r} url={}",
                                 expected, len(resp.content), cr, grib_url,
+                            )
+                            return None
+                    else:
+                        # Open-ended Range: validate that Content-Range reports
+                        # a consistent byte count (cr_end - cr_start + 1 == actual).
+                        try:
+                            cr_end = int(cr_end_str)
+                            expected_open = cr_end - cr_start + 1
+                        except (ValueError, NameError):
+                            expected_open = None
+                        if expected_open is not None and len(resp.content) != expected_open:
+                            logger.error(
+                                "_grib_source: 206 open-ended byte count mismatch; "
+                                "Content-Range={!r} expected={} got={} url={}",
+                                cr, expected_open, len(resp.content), grib_url,
                             )
                             return None
                     return resp.content
@@ -393,7 +422,7 @@ class BaseGribSource(BaseForecastSource):
         )
         non_major_dict = self._fetch_all_stations(init_utc, _NON_MAJOR_FXX, station_list)
 
-        nearest_major_init = _nearest_prior_major(init_utc)
+        nearest_major_init = nearest_prior_major(init_utc)
         prior_major_init   = nearest_major_init - pd.Timedelta(hours=6)
 
         try:

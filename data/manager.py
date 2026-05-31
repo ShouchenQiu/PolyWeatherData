@@ -40,6 +40,10 @@ class DataManager:
         ParquetStore used to cache and retrieve HRRR data.
     obs_store:
         ParquetStore used to cache and retrieve obs data.
+    settings:
+        Optional Settings instance.  When None, a default Settings() is
+        constructed at init time.  Inject explicitly in tests that need to
+        control cold_start_hours.
     """
 
     def __init__(
@@ -48,11 +52,13 @@ class DataManager:
         obs_sources:      "list[BaseObsSource]",
         forecast_store:   "ParquetStore",
         obs_store:        "ParquetStore",
+        settings:         "_Settings | None" = None,
     ) -> None:
         self._forecast_sources = forecast_sources
         self._obs_sources      = obs_sources
         self._forecast_store   = forecast_store
         self._obs_store        = obs_store
+        self._settings         = settings if settings is not None else _Settings()
 
     # ------------------------------------------------------------------
     # HRRR forecast
@@ -181,6 +187,7 @@ class DataManager:
             try:
                 df = src.fetch(station, start, end, now_utc)
                 if df is not None and not df.empty:
+                    df = Cleaner.process_iem(df)
                     if not self._obs_is_complete(df):
                         logger.warning(
                             "Obs source {} returned incomplete data for "
@@ -188,7 +195,6 @@ class DataManager:
                             src_name, station.station_id,
                         )
                         continue
-                    df = Cleaner.process_iem(df)
                     logger.debug(
                         "Obs fetch: source={} station={} rows={}",
                         src_name, station.station_id, len(df),
@@ -221,31 +227,42 @@ class DataManager:
 
     @staticmethod
     def _obs_is_complete(df: pd.DataFrame) -> bool:
-        """Return True if df has at least one non-null reading for each required field.
+        """Return True if at least one row has all required fields non-null simultaneously.
 
-        Required fields: raw_tmpc_tenths, obs_WS or (obs_U and obs_V), skyc1, p01i.
-        A single NOAA row that only contains temperature must not pass this gate.
+        Must be called on fully processed data (after ``Cleaner.process_iem()``,
+        which chains ``clean_iem()`` + ``build_features_iem()``).  After
+        ``process_iem()``, ``skyc1``, ``p01i``, and wind columns are
+        zero-filled; the meaningful per-row check is whether
+        ``raw_tmpc_tenths`` is non-null in the same row as the other
+        required columns.
+
+        Wind column resolution (row-level):
+        - ``obs_WS`` alone satisfies the wind requirement (scalar speed
+          produced by ``build_features_iem()``).
+        - Otherwise ``obs_U`` AND ``obs_V`` must both be non-null in the
+          same row (``obs_U`` alone is not sufficient).
         """
-        if "raw_tmpc_tenths" not in df.columns or not df["raw_tmpc_tenths"].notna().any():
+        required = ["raw_tmpc_tenths", "skyc1", "p01i"]
+        if not all(c in df.columns for c in required):
             return False
 
-        has_wind = (
-            ("obs_WS" in df.columns and df["obs_WS"].notna().any())
-            or (
-                "obs_U" in df.columns and "obs_V" in df.columns
-                and df["obs_U"].notna().any() and df["obs_V"].notna().any()
-            )
+        has_ws = "obs_WS" in df.columns
+        has_uv = "obs_U" in df.columns and "obs_V" in df.columns
+        if not has_ws and not has_uv:
+            return False
+
+        if has_ws:
+            wind_mask = df["obs_WS"].notna()
+        else:
+            wind_mask = df["obs_U"].notna() & df["obs_V"].notna()
+
+        row_mask = (
+            df["raw_tmpc_tenths"].notna()
+            & df["skyc1"].notna()
+            & df["p01i"].notna()
+            & wind_mask
         )
-        if not has_wind:
-            return False
-
-        if "skyc1" not in df.columns or not df["skyc1"].notna().any():
-            return False
-
-        if "p01i" not in df.columns or not df["p01i"].notna().any():
-            return False
-
-        return True
+        return bool(row_mask.any())
 
     # ------------------------------------------------------------------
     # Encoder window builder
@@ -286,7 +303,7 @@ class DataManager:
             When fewer than n_hours rows are available in either the HRRR
             or obs store after the merge.
         """
-        settings = _Settings()
+        settings = self._settings
         cold_start = settings.cold_start_hours
 
         init_utc = (

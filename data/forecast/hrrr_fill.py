@@ -18,14 +18,14 @@ from __future__ import annotations
 import pandas as pd
 from loguru import logger
 
-_MAJOR_HOURS = frozenset({0, 6, 12, 18})
+MAJOR_HOURS = frozenset({0, 6, 12, 18})
 _TARGET_FXX_COUNT = 49  # fxx 0..48 inclusive
 _MAX_EXTRAP_HOURS = 3
 # Metadata columns excluded from data_cols union and not copied from source rows.
 _META_COLS = frozenset({"init_time", "fxx", "valid_time", "_vt", "_vt_raw", "is_extrapolated"})
 
 
-def _nearest_prior_major(init_time: pd.Timestamp) -> pd.Timestamp:
+def nearest_prior_major(init_time: pd.Timestamp) -> pd.Timestamp:
     """Return the most recent MAJOR-hour init prior to (or equal to) init_time."""
     init_utc = (
         init_time.tz_localize("UTC") if init_time.tzinfo is None

@@ -42,6 +42,12 @@ class DiscoveryLoop:
         db:               "DbClient | None"        = None,
         lifecycle:        "EventLifecycle | None"  = None,
     ) -> None:
+        if (db is None) != (lifecycle is None):
+            raise ValueError(
+                "DiscoveryLoop: 'db' and 'lifecycle' must both be provided "
+                "or both be None; partial construction silently disables the "
+                "lifecycle advance pass"
+            )
         self._discovery        = discovery
         self._interval_seconds = interval_seconds
         self._db               = db

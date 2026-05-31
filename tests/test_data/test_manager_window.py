@@ -325,3 +325,61 @@ def test_obs_is_complete_accepts_zero_precip():
     row["p01i"] = 0.0
     df = pd.DataFrame([row])
     assert DataManager._obs_is_complete(df) is True
+
+
+def test_obs_is_complete_vrb_wind_passes_after_cleaning():
+    """VRB wind (obs_U/V filled to 0 by process_iem) must pass the completeness gate."""
+    row = _complete_obs_row()
+    row["obs_U"] = 0.0   # process_iem fills VRB to 0
+    row["obs_V"] = 0.0
+    df = pd.DataFrame([row])
+    assert DataManager._obs_is_complete(df) is True
+
+
+def test_obs_is_complete_rejects_cross_row_partial_data():
+    """Values spread across rows where no single row has all required fields must fail."""
+    rows = [
+        # Row A: has temp but no wind
+        {
+            "raw_tmpc_tenths": 5.0,
+            "obs_U": float("nan"),
+            "obs_V": float("nan"),
+            "skyc1": 0.0,
+            "p01i": 0.0,
+        },
+        # Row B: has wind but no temp
+        {
+            "raw_tmpc_tenths": float("nan"),
+            "obs_U": -3.0,
+            "obs_V": 4.0,
+            "skyc1": 0.0,
+            "p01i": 0.0,
+        },
+    ]
+    df = pd.DataFrame(rows)
+    assert DataManager._obs_is_complete(df) is False
+
+
+def test_obs_is_complete_rejects_obs_u_without_obs_v():
+    """obs_U alone (no obs_V column) must NOT satisfy the wind requirement."""
+    row = {
+        "raw_tmpc_tenths": 5.0,
+        "obs_U": 3.0,
+        "skyc1": 0.0,
+        "p01i": 0.0,
+    }
+    df = pd.DataFrame([row])
+    assert DataManager._obs_is_complete(df) is False
+
+
+def test_obs_is_complete_requires_both_uv_components():
+    """Both obs_U and obs_V must be non-null in the same row to satisfy the wind gate."""
+    row = {
+        "raw_tmpc_tenths": 5.0,
+        "obs_U": 3.0,
+        "obs_V": float("nan"),
+        "skyc1": 0.0,
+        "p01i": 0.0,
+    }
+    df = pd.DataFrame([row])
+    assert DataManager._obs_is_complete(df) is False

@@ -205,6 +205,24 @@ def test_append_dedup_normalizes_timestamp_str_vs_timestamp(tmp_dir):
     assert n == 0, "duplicate row was written despite same logical timestamp"
 
 
+def test_append_dedup_normalizes_microsecond_timestamps(tmp_dir):
+    """Timestamps differing only in sub-second precision are treated as the same key."""
+    store = ParquetStore(tmp_dir / "store")
+
+    obs1 = pd.DataFrame([{
+        "valid_time": pd.Timestamp("2026-01-01 00:00:00.000000", tz="UTC"),
+        "raw_tmpc_tenths": 0.0,
+    }])
+    store.append("KLGA_obs", obs1)
+
+    obs2 = pd.DataFrame([{
+        "valid_time": pd.Timestamp("2026-01-01 00:00:00.000001", tz="UTC"),
+        "raw_tmpc_tenths": 0.0,
+    }])
+    n = store.append("KLGA_obs", obs2)
+    assert n == 0, "microsecond-offset duplicate was written as a new row"
+
+
 def test_parquet_store_write_has_concurrency_todo(tmp_dir):
     """The _append_to_quarter / write path has a concurrency TODO comment. (#48)"""
     import inspect

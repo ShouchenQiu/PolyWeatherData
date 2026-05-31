@@ -26,7 +26,7 @@ import pandas as pd
 from loguru import logger
 
 from data.forecast.base import BaseForecastSource
-from data.forecast.hrrr_fill import HrrrFill, _MAJOR_HOURS, _nearest_prior_major
+from data.forecast.hrrr_fill import HrrrFill, MAJOR_HOURS, nearest_prior_major
 from data.forecast.vars import DATA_COLS, ZARR_VARS
 
 if TYPE_CHECKING:
@@ -134,7 +134,7 @@ class HrrrZarrSource(BaseForecastSource):
         )
         date_str = init_utc.strftime("%Y%m%d")
         hh = int(init_utc.strftime("%H"))
-        is_major = hh in _MAJOR_HOURS
+        is_major = hh in MAJOR_HOURS
 
         url_anl  = f"{self._base_url}/{date_str}/{date_str}_{hh:02d}z_anl.zarr"
         url_fcst = f"{self._base_url}/{date_str}/{date_str}_{hh:02d}z_fcst.zarr"
@@ -227,7 +227,7 @@ class HrrrZarrSource(BaseForecastSource):
                 rows.append(row)
             non_major_df = pd.DataFrame(rows)
 
-            nearest_major_init = _nearest_prior_major(init_utc)
+            nearest_major_init = nearest_prior_major(init_utc)
             prior_major_init   = nearest_major_init - pd.Timedelta(hours=6)
 
             try:

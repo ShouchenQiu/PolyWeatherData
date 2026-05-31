@@ -380,7 +380,7 @@ def test_fetch_fxx_values_correct():
 
 
 def test_hrrr_searches_covers_all_data_cols():
-    search_cols = {col for _, col in HRRR_SEARCHES}
+    search_cols = {col for _, _, _, col in HRRR_SEARCHES}
     missing = set(DATA_COLS) - search_cols
     assert not missing, f"Columns missing from HRRR_SEARCHES: {missing}"
 

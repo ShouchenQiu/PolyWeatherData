@@ -116,29 +116,19 @@ class NoaaFileSource(BaseObsSource):
         current whole hour during shared obs cleaning.
         """
         if now_utc is None:
-            start_aware = (
-                start.tz_localize("UTC") if start.tzinfo is None
-                else start.tz_convert("UTC")
+            raise ValueError(
+                "NoaaFileSource is a now-utc tick fallback only; "
+                "pass now_utc= to fetch the current observation"
             )
-            end_aware = (
-                end.tz_localize("UTC") if end.tzinfo is None
-                else end.tz_convert("UTC")
-            )
-            if end_aware - start_aware > pd.Timedelta(hours=2):
-                raise ValueError(
-                    "NoaaFileSource is a now-utc tick fallback only; "
-                    f"requested window {end_aware - start_aware} exceeds 2 hours"
-                )
 
-        if now_utc is not None:
-            now_utc_aware = (
-                now_utc.tz_localize("UTC") if now_utc.tzinfo is None
-                else now_utc.tz_convert("UTC")
-            )
-            hour_back = now_utc_aware - pd.Timedelta(hours=1)
-            target_dt = hour_back.replace(minute=51, second=0, microsecond=0)
-            start = target_dt - pd.Timedelta(seconds=30)
-            end = target_dt + pd.Timedelta(seconds=30)
+        now_utc_aware = (
+            now_utc.tz_localize("UTC") if now_utc.tzinfo is None
+            else now_utc.tz_convert("UTC")
+        )
+        hour_back = now_utc_aware - pd.Timedelta(hours=1)
+        target_dt = hour_back.replace(minute=51, second=0, microsecond=0)
+        start = target_dt - pd.Timedelta(seconds=30)
+        end = target_dt + pd.Timedelta(seconds=30)
 
         url = _TGFTP_URL_TPL.format(station=station.station_id)
         try:

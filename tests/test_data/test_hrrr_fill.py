@@ -4,7 +4,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from data.forecast.hrrr_fill import HrrrFill, _nearest_prior_major
+from data.forecast.hrrr_fill import HrrrFill, nearest_prior_major
 
 
 # ---------------------------------------------------------------------------
@@ -31,18 +31,18 @@ def _make_df(init_time_str: str, fxx_range: range, col_val: float = 1.0) -> pd.D
 
 def test_nearest_prior_major_on_major_hour():
     t = pd.Timestamp("2026-01-01 12:00", tz="UTC")
-    assert _nearest_prior_major(t) == t
+    assert nearest_prior_major(t) == t
 
 
 def test_nearest_prior_major_non_major():
     t = pd.Timestamp("2026-01-01 03:00", tz="UTC")
-    result = _nearest_prior_major(t)
+    result = nearest_prior_major(t)
     assert result == pd.Timestamp("2026-01-01 00:00", tz="UTC")
 
 
 def test_nearest_prior_major_21z():
     t = pd.Timestamp("2026-01-01 21:00", tz="UTC")
-    result = _nearest_prior_major(t)
+    result = nearest_prior_major(t)
     assert result == pd.Timestamp("2026-01-01 18:00", tz="UTC")
 
 

@@ -38,4 +38,14 @@ class BaseObsSource(ABC):
             Inclusive start of the requested window (UTC).
         end:
             Inclusive end of the requested window (UTC).
+        now_utc:
+            When provided (tick mode), the implementation should ignore
+            *start*/*end* and return only the single H-1 :51 observation
+            that is the representative reading for the nearest whole hour.
+            When ``None`` (historical mode), the implementation may return
+            all observations in [start, end].
+
+            Implementations that only support tick mode (e.g.
+            ``NoaaFileSource``) must raise ``ValueError`` with a message
+            containing 'tick' when ``now_utc is None``.
         """
