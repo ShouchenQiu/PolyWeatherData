@@ -105,32 +105,50 @@ class BaseGribSource(BaseForecastSource):
     # .idx parsing
     # ------------------------------------------------------------------
 
-    def _parse_idx(self, idx_text: str) -> list[tuple[int, int, str]]:
+    def _parse_idx(self, idx_text: str) -> list[tuple[int, int | None, str]]:
         """Parse a .idx file and return [(start_byte, end_byte, col_name), ...].
 
         The .idx format is:
             msgnum:byte_offset:d=YYYYMMDDHHZ:VAR:LEVEL:FCST:...
 
-        The end byte of message N is start_byte(N+1) - 1.
-        For the last message we add 5_000_000 as a conservative upper bound.
+        Uses exact VAR field matching (parts[3]) to prevent prefix matches
+        (e.g. MAXTMP must not match a TMP search).
+
+        Raises
+        ------
+        ValueError
+            If more than one .idx row maps to the same target column name.
         """
         offsets: list[int] = []
-        line_texts: list[str] = []
+        var_fields: list[str] = []
+        raw_texts: list[str] = []
 
         for ln in idx_text.strip().splitlines():
             parts = ln.split(":")
             if len(parts) >= 5:
                 try:
                     offsets.append(int(parts[1]))
-                    line_texts.append(":".join(parts[3:]))
+                    var_fields.append(parts[3])
+                    raw_texts.append(":".join(parts[3:]))
                 except ValueError:
                     pass
 
-        targets: list[tuple[int, int, str]] = []
-        for i, (off, txt) in enumerate(zip(offsets, line_texts)):
-            end = offsets[i + 1] - 1 if i + 1 < len(offsets) else off + 5_000_000
+        targets: list[tuple[int, int | None, str]] = []
+        seen_colnames: set[str] = set()
+
+        for i, (off, var_field, txt) in enumerate(zip(offsets, var_fields, raw_texts)):
+            # For the last message use None (open-ended Range request bytes={start}-)
+            end: int | None = offsets[i + 1] - 1 if i + 1 < len(offsets) else None
             for search, colname in HRRR_SEARCHES:
-                if search in txt:
+                s_var = search.split(":")[0]
+                # Exact VAR field match prevents prefix collisions (MAXTMP vs TMP)
+                if var_field == s_var and search in txt:
+                    if colname in seen_colnames:
+                        raise ValueError(
+                            f"_grib_source: duplicate .idx rows for column "
+                            f"'{colname}' -- ambiguous byte range"
+                        )
+                    seen_colnames.add(colname)
                     targets.append((off, end, colname))
                     break
         return targets
@@ -156,21 +174,64 @@ class BaseGribSource(BaseForecastSource):
         self,
         grib_url: str,
         start: int,
-        end: int,
+        end: int | None,
     ) -> bytes | None:
-        """Download bytes [start, end] from grib_url using an HTTP Range Request."""
+        """Download bytes from grib_url using an HTTP Range Request.
+
+        Parameters
+        ----------
+        start:
+            First byte to fetch (inclusive).
+        end:
+            Last byte to fetch (inclusive).  When None an open-ended Range
+            header (``bytes={start}-``) is used, which fetches to end-of-file.
+
+        Returns
+        -------
+        Raw bytes on success (HTTP 206), or None on permanent failure.
+        HTTP 200 responses are rejected (not a proper partial-content reply)
+        with an ERROR log; other error codes trigger up to 3 retries.
+        """
+        range_header = f"bytes={start}-{end}" if end is not None else f"bytes={start}-"
+        last_exc: Exception | None = None
+        last_status: int | None = None
+
         for attempt in range(3):
             try:
                 resp = self._session.get(
                     grib_url,
-                    headers={"Range": f"bytes={start}-{end}"},
+                    headers={"Range": range_header},
                     timeout=60,
                 )
-                if resp.status_code in (200, 206):
+                if resp.status_code == 206:
                     return resp.content
-            except Exception:  # noqa: BLE001
-                pass
+                if resp.status_code == 200:
+                    # Server ignored Range header -- validate Content-Range header
+                    # and byte count; always reject since 206 is required.
+                    cr = resp.headers.get("Content-Range", "")
+                    if end is not None and len(resp.content) != end - start + 1:
+                        logger.error(
+                            "_grib_source: 200 response with wrong byte count; "
+                            "expected={} got={} Content-Range={!r} url={}",
+                            end - start + 1, len(resp.content), cr, grib_url,
+                        )
+                    else:
+                        logger.error(
+                            "_grib_source: 200 response for Range request "
+                            "(expected 206); Content-Range={!r} url={}",
+                            cr, grib_url,
+                        )
+                    return None
+                last_status = resp.status_code
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
             time.sleep(1.0 * (attempt + 1))
+
+        logger.warning(
+            "_grib_source: _fetch_range failed after retries: "
+            "url={} start={} end={} status={} exc={}",
+            grib_url, start, end, last_status, last_exc,
+        )
         return None
 
     # ------------------------------------------------------------------
@@ -362,6 +423,7 @@ class BaseGribSource(BaseForecastSource):
             for col in all_cols:
                 if col not in df.columns:
                     df[col] = float("nan")
+            df["is_extrapolated"] = False
             result[sid] = df
 
         return result

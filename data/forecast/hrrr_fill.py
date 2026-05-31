@@ -7,6 +7,11 @@ prior MAJOR-hour run (00Z, 06Z, 12Z, 18Z) which covers 0-48 fxx.
 For valid_times in the tail that are not covered by the nearest MAJOR run
 (up to a 6h gap in the worst case), HrrrFill falls back to the MAJOR-hour
 before that and logs a WARNING.  [ADR-0005]
+
+For valid_times not covered by any MAJOR run, HrrrFill linearly extrapolates
+from the last aligned value.  Extrapolation is capped at 3 hours; beyond that
+a RuntimeError is raised.  Extrapolated rows are flagged with
+is_extrapolated=True.
 """
 from __future__ import annotations
 
@@ -15,6 +20,9 @@ from loguru import logger
 
 _MAJOR_HOURS = frozenset({0, 6, 12, 18})
 _TARGET_FXX_COUNT = 49  # fxx 0..48 inclusive
+_MAX_EXTRAP_HOURS = 3
+# Metadata columns excluded from data_cols union and not copied from source rows.
+_META_COLS = frozenset({"init_time", "fxx", "valid_time", "_vt", "_vt_raw", "is_extrapolated"})
 
 
 def _nearest_prior_major(init_time: pd.Timestamp) -> pd.Timestamp:
@@ -25,6 +33,30 @@ def _nearest_prior_major(init_time: pd.Timestamp) -> pd.Timestamp:
     )
     hours_since_major = init_utc.hour % 6
     return init_utc - pd.Timedelta(hours=hours_since_major)
+
+
+def _vt_index(df: pd.DataFrame, source_name: str = "source") -> dict:
+    """Build a valid_time -> row_dict lookup from a DataFrame.
+
+    Applies .dt.floor("s") to valid_time before indexing to absorb sub-second
+    differences.  Sorts by valid_time ascending and keeps the last row when
+    duplicates are present (emits WARNING with count and init_time).
+    """
+    if df.empty:
+        return {}
+    df = df.copy()
+    df["_vt_raw"] = pd.to_datetime(df["valid_time"], utc=True)
+    df["_vt"] = df["_vt_raw"].dt.floor("s")
+    n_before = len(df)
+    df = df.sort_values("_vt").drop_duplicates(subset=["_vt"], keep="last")
+    n_after = len(df)
+    if n_before != n_after:
+        it = df["init_time"].iloc[0] if "init_time" in df.columns else "unknown"
+        logger.warning(
+            "HrrrFill: {} duplicate valid_times dropped in {} (init={}); kept last",
+            n_before - n_after, source_name, it,
+        )
+    return {ts: row for ts, row in zip(df["_vt"], df.to_dict("records"))}
 
 
 class HrrrFill:
@@ -41,10 +73,12 @@ class HrrrFill:
         2. nearest_major_df for tail valid_times not in non_major_df
         3. prior_major_df for tail valid_times not in nearest_major_df
            (logs WARNING when this fallback is used)
+        4. Linear extrapolation for any remaining uncovered valid_times
+           (capped at 3 hours; beyond that raises RuntimeError)
 
     All DataFrames must have a ``valid_time`` column (UTC-aware timestamps).
     The ``init_time`` and ``fxx`` columns in the output are recomputed to
-    reflect the non_major init_time.
+    reflect the non_major init_time.  Output always includes ``is_extrapolated``.
     """
 
     def fill(
@@ -69,6 +103,13 @@ class HrrrFill:
         Returns
         -------
         DataFrame with fxx 0..48 rows, reindexed to the non-major init_time.
+        Includes ``is_extrapolated`` column (False for sourced rows, True for
+        linearly-extrapolated rows).
+
+        Raises
+        ------
+        RuntimeError
+            When the uncovered tail exceeds _MAX_EXTRAP_HOURS consecutive hours.
         """
         if non_major_df.empty:
             return non_major_df
@@ -85,46 +126,89 @@ class HrrrFill:
         else:
             init_utc = init_utc.tz_convert("UTC")
 
-        # Build lookup dicts keyed by valid_time (rounded to second)
-        def _vt_index(df: pd.DataFrame) -> dict:
-            if df.empty:
-                return {}
-            df = df.copy()
-            df["_vt"] = pd.to_datetime(df["valid_time"], utc=True)
-            return {ts: row for ts, row in zip(df["_vt"], df.to_dict("records"))}
+        nm_idx  = _vt_index(non_major_df,    "non_major")
+        maj_idx = _vt_index(nearest_major_df, "nearest_major")
+        pri_idx = (
+            _vt_index(prior_major_df, "prior_major")
+            if prior_major_df is not None and not prior_major_df.empty
+            else {}
+        )
 
-        nm_idx  = _vt_index(non_major_df)
-        maj_idx = _vt_index(nearest_major_df)
-        pri_idx = _vt_index(prior_major_df) if prior_major_df is not None and not prior_major_df.empty else {}
-
-        data_cols = [
-            c for c in non_major_df.columns
-            if c not in ("init_time", "fxx", "valid_time", "_vt")
-        ]
+        # Output column set: union of non_major and nearest_major columns,
+        # excluding metadata columns that are recomputed per row.
+        all_source_cols = set(non_major_df.columns) | set(nearest_major_df.columns)
+        data_cols = [c for c in all_source_cols if c not in _META_COLS]
 
         rows: list[dict] = []
         used_prior = False
 
+        # State for linear extrapolation
+        last_aligned: dict | None = None
+        prev_aligned: dict | None = None
+        extrap_steps = 0
+
         for fxx in range(_TARGET_FXX_COUNT):
             vt = init_utc + pd.Timedelta(hours=fxx)
 
-            # Explicit priority: non_major > nearest_major > prior_major.
-            # used_prior is set when prior_major is the actual source for a row
-            # so that the WARNING fires if and only if prior data was used.
-            nm_row  = nm_idx.get(vt)
+            nm_row = nm_idx.get(vt)
             if nm_row is not None:
                 src_row: dict | None = nm_row
+                is_extrap = False
+                prev_aligned = last_aligned
+                last_aligned = src_row
+                extrap_steps = 0
             elif maj_idx.get(vt) is not None:
                 src_row = maj_idx[vt]
+                is_extrap = False
+                prev_aligned = last_aligned
+                last_aligned = src_row
+                extrap_steps = 0
             elif pri_idx.get(vt) is not None:
                 src_row = pri_idx[vt]
+                is_extrap = False
                 used_prior = True
+                prev_aligned = last_aligned
+                last_aligned = src_row
+                extrap_steps = 0
             else:
+                # No source covers this valid_time -- linear extrapolation
+                extrap_steps += 1
+                if extrap_steps > _MAX_EXTRAP_HOURS:
+                    raise RuntimeError(
+                        f"HrrrFill: tail gap exceeds 3-hour cap for init={init_utc}; "
+                        f"fxx={fxx} has no coverage from any MAJOR run"
+                    )
                 src_row = None
+                is_extrap = True
 
-            row: dict = {"init_time": str(init_utc), "fxx": fxx, "valid_time": vt}
-            for col in data_cols:
-                row[col] = src_row.get(col, float("nan")) if src_row else float("nan")
+            row: dict = {
+                "init_time": str(init_utc),
+                "fxx": fxx,
+                "valid_time": vt,
+                "is_extrapolated": is_extrap,
+            }
+
+            if src_row is not None:
+                for col in data_cols:
+                    row[col] = src_row.get(col, float("nan"))
+            elif last_aligned is not None:
+                # Linear extrapolation: slope from last two aligned rows (per 1h step)
+                for col in data_cols:
+                    last_val = last_aligned.get(col, float("nan"))
+                    prev_val = (
+                        prev_aligned.get(col, float("nan"))
+                        if prev_aligned is not None
+                        else last_val
+                    )
+                    try:
+                        slope = float(last_val) - float(prev_val)
+                        row[col] = float(last_val) + slope * extrap_steps
+                    except (TypeError, ValueError):
+                        row[col] = float("nan")
+            else:
+                for col in data_cols:
+                    row[col] = float("nan")
+
             rows.append(row)
 
         if used_prior:
@@ -134,3 +218,4 @@ class HrrrFill:
             )
 
         return pd.DataFrame(rows)
+

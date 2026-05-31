@@ -178,6 +178,143 @@ def test_fill_prior_major_data_appears_in_tail():
     assert fxx19_row["TMP_2m"] == pytest.approx(99.0 + 28 * 0.01, abs=0.05)
 
 
+# ---------------------------------------------------------------------------
+# V2V02: is_extrapolated column
+# ---------------------------------------------------------------------------
+
+def test_fill_output_has_is_extrapolated_column():
+    """Output always contains an is_extrapolated boolean column."""
+    fill = HrrrFill()
+    non_major = _make_df("2026-01-01 03:00", range(0, 19))
+    nearest   = _make_df("2026-01-01 00:00", range(0, 49))
+    result = fill.fill(non_major, nearest)
+    assert "is_extrapolated" in result.columns
+
+
+def test_fill_is_extrapolated_false_for_covered_rows():
+    """Rows filled from nearest_major or non_major get is_extrapolated=False."""
+    fill = HrrrFill()
+    non_major = _make_df("2026-01-01 03:00", range(0, 19))
+    nearest   = _make_df("2026-01-01 00:00", range(0, 49))
+    result = fill.fill(non_major, nearest)
+    # nearest covers all 49 rows for 03Z init (00Z+45h = 2026-01-03 00Z = 03Z+45h)
+    # fxx_out 46..48 are NOT covered by 00Z fxx 0..48 -> they may be extrapolated
+    # But the first 46 rows are all covered
+    covered = result[result["fxx"] < 46]
+    assert (covered["is_extrapolated"] == False).all()  # noqa: E712
+
+
+def test_fill_tail_extrapolation_marks_is_extrapolated_true():
+    """Rows beyond nearest_major coverage get is_extrapolated=True."""
+    fill = HrrrFill()
+    non_major = _make_df("2026-01-01 03:00", range(0, 19))
+    # nearest = 00Z fxx 0..48; covers 03Z fxx_out 0..45 (vt up to 03Z+45h=00Z+48h)
+    # fxx_out 46, 47, 48 are uncovered -> extrapolated
+    nearest = _make_df("2026-01-01 00:00", range(0, 49))
+    result = fill.fill(non_major, nearest)
+    extrap = result[result["is_extrapolated"] == True]  # noqa: E712
+    assert set(extrap["fxx"]) == {46, 47, 48}
+
+
+def test_fill_tail_extrapolation_raises_beyond_3h():
+    """RuntimeError when uncovered tail exceeds 3 hours."""
+    fill = HrrrFill()
+    non_major = _make_df("2026-01-01 03:00", range(0, 19))
+    # nearest = 00Z fxx 0..43; covers 03Z fxx_out 0..40 (vt 03Z+40h = 00Z+43h)
+    # fxx_out 41..44 are uncovered (4 steps) -> raises at step 4
+    nearest = _make_df("2026-01-01 00:00", range(0, 44))
+    with pytest.raises(RuntimeError, match="tail gap exceeds 3-hour cap"):
+        fill.fill(non_major, nearest)
+
+
+def test_fill_tail_extrapolation_values_are_linear():
+    """Extrapolated row values follow linear trend from last two aligned rows."""
+    fill = HrrrFill()
+    non_major = _make_df("2026-01-01 03:00", range(0, 19), col_val=1.0)
+    # nearest = 00Z fxx 0..48; last two covered rows from nearest
+    # fxx_out 44: vt = 03Z+44h = 00Z+47h -> nearest fxx 47: col=1.0+47*0.01=1.47
+    # fxx_out 45: vt = 03Z+45h = 00Z+48h -> nearest fxx 48: col=1.0+48*0.01=1.48
+    # fxx_out 46 (1st extrap): slope = (1.48 - 1.47) = 0.01 -> val ~ 1.48 + 0.01 = 1.49
+    nearest = _make_df("2026-01-01 00:00", range(0, 49), col_val=1.0)
+    result = fill.fill(non_major, nearest)
+    fxx46 = result[result["fxx"] == 46].iloc[0]["TMP_2m"]
+    assert fxx46 == pytest.approx(1.48 + 0.01, abs=0.005)
+
+
+# ---------------------------------------------------------------------------
+# V2V02: _vt_index duplicate handling
+# ---------------------------------------------------------------------------
+
+def test_fill_dedup_warns_on_duplicate_valid_time():
+    """WARNING is emitted when non_major_df has duplicate valid_times."""
+    from loguru import logger
+    messages: list[str] = []
+    sink_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        fill = HrrrFill()
+        base = _make_df("2026-01-01 03:00", range(0, 5))
+        dup  = _make_df("2026-01-01 03:00", range(0, 3), col_val=99.0)
+        non_major = pd.concat([base, dup], ignore_index=True)
+        nearest   = _make_df("2026-01-01 00:00", range(0, 49))
+        fill.fill(non_major, nearest)
+    finally:
+        logger.remove(sink_id)
+    assert any("duplicate" in m.lower() for m in messages)
+
+
+def test_fill_dedup_keeps_last_when_duplicate():
+    """When valid_times are duplicated, the last row (by valid_time sort) is kept."""
+    fill = HrrrFill()
+    # Create non_major with fxx=0 appearing twice: first with col_val=1.0, then 99.0
+    base = _make_df("2026-01-01 03:00", range(0, 5), col_val=1.0)
+    dup  = _make_df("2026-01-01 03:00", range(0, 1), col_val=99.0)
+    non_major = pd.concat([base, dup], ignore_index=True)
+    nearest   = _make_df("2026-01-01 00:00", range(0, 49))
+    result = fill.fill(non_major, nearest)
+    # fxx=0 valid_time is 03Z, appears in both base (1.0) and dup (99.0)
+    # After sort ASC + keep last: the dup (99.0) is kept
+    fxx0_row = result[result["fxx"] == 0].iloc[0]
+    assert fxx0_row["TMP_2m"] == pytest.approx(99.0, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# V2V02: sub-second valid_time rounding
+# ---------------------------------------------------------------------------
+
+def test_fill_subsecond_valid_time_matches():
+    """Sub-second valid_time differences do not prevent matching after floor('s')."""
+    fill = HrrrFill()
+    non_major = _make_df("2026-01-01 03:00", range(0, 19), col_val=100.0)
+    nearest   = _make_df("2026-01-01 00:00", range(0, 49), col_val=2.0)
+    # Add tiny sub-second offset to nearest_major valid_times
+    nearest["valid_time"] = pd.to_datetime(
+        nearest["valid_time"], utc=True
+    ) + pd.Timedelta(microseconds=1)
+    result = fill.fill(non_major, nearest)
+    # Should still produce a full 49-row result (sub-second offset is floored away)
+    assert len(result) == 49
+    # fxx 25 should be filled from nearest (not NaN) despite sub-second mismatch
+    fxx25_tmp = result[result["fxx"] == 25].iloc[0]["TMP_2m"]
+    assert not pd.isna(fxx25_tmp)
+
+
+# ---------------------------------------------------------------------------
+# V2V02: output column union
+# ---------------------------------------------------------------------------
+
+def test_fill_column_union_includes_major_only_cols():
+    """Columns present only in nearest_major_df appear in fill() output."""
+    fill = HrrrFill()
+    non_major = _make_df("2026-01-01 03:00", range(0, 19))   # has TMP_2m only
+    nearest   = _make_df("2026-01-01 00:00", range(0, 49))
+    nearest["DPT_2m"] = nearest["TMP_2m"] - 5.0              # extra col in major
+    result = fill.fill(non_major, nearest)
+    assert "DPT_2m" in result.columns
+    # Tail row fxx=25 should have non-NaN DPT_2m (filled from nearest_major)
+    fxx25_dpt = result[result["fxx"] == 25].iloc[0]["DPT_2m"]
+    assert not pd.isna(fxx25_dpt)
+
+
 def test_fill_warning_fires_when_prior_used_not_absent():
     """WARNING fires because prior fills a valid_time, not because nothing fills it."""
     from loguru import logger

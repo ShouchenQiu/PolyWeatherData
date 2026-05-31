@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from data.forecast.hrrr_s3 import HrrrS3Source, _S3_BASE
+from data.forecast.hrrr_s3 import HrrrS3Source
 from data.forecast.vars import DATA_COLS, HRRR_SEARCHES
 
 
@@ -22,6 +22,18 @@ _SAMPLE_IDX = """\
 2:12345:d=2026010100:DPT:2 m above ground:1 hour fcst:
 3:24690:d=2026010100:RH:2 m above ground:1 hour fcst:
 4:37035:d=2026010100:GUST:surface:1 hour fcst:
+"""
+
+# An idx with a prefix-match trap: MAXTMP should NOT match the TMP search
+_PREFIX_TRAP_IDX = """\
+1:0:d=2026010100:MAXTMP:2 m above ground:1 hour fcst:
+2:12345:d=2026010100:TMP:2 m above ground:1 hour fcst:
+"""
+
+# An idx where TMP appears twice -> duplicate colname for TMP_2m
+_DUPLICATE_IDX = """\
+1:0:d=2026010100:TMP:2 m above ground:1 hour fcst:
+2:12345:d=2026010100:TMP:2 m above ground:1 hour fcst:
 """
 
 _STATION = MagicMock()
@@ -40,7 +52,7 @@ _STATION.hrrr_grid_col_zarr = 1556
 def test_build_url_format():
     src = HrrrS3Source()
     url = src._build_url("20260101", "06", "12")
-    expected = f"{_S3_BASE}/hrrr.20260101/conus/hrrr.t06z.wrfsfcf12.grib2"
+    expected = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.20260101/conus/hrrr.t06z.wrfsfcf12.grib2"
     assert url == expected
 
 
@@ -48,6 +60,13 @@ def test_build_url_zero_padded_fxx():
     src = HrrrS3Source()
     url = src._build_url("20260101", "00", "03")
     assert "wrfsfcf03" in url
+
+
+def test_s3_base_url_override():
+    """Constructor accepts base_url override for testing."""
+    src = HrrrS3Source(base_url="https://custom-bucket.example.com")
+    url = src._build_url("20260101", "06", "12")
+    assert url.startswith("https://custom-bucket.example.com")
 
 
 # ---------------------------------------------------------------------------
@@ -75,13 +94,13 @@ def test_parse_idx_byte_ranges():
     assert by_col["DPT_2m"] == (12345, 24689)
 
 
-def test_parse_idx_last_msg_large_end():
+def test_parse_idx_last_msg_open_ended():
     src = HrrrS3Source()
     targets = src._parse_idx(_SAMPLE_IDX)
     by_col = {t[2]: (t[0], t[1]) for t in targets}
-    # GUST_sfc is the last message: end should be start + 5_000_000
+    # GUST_sfc is the last message: end should be None (open-ended range)
     start, end = by_col["GUST_sfc"]
-    assert end == start + 5_000_000
+    assert end is None
 
 
 def test_parse_idx_empty_returns_empty():
@@ -97,7 +116,29 @@ def test_parse_idx_unknown_vars_skipped():
 
 
 # ---------------------------------------------------------------------------
-# Unit: Range request header format
+# V2V02: .idx structured parse -- exact VAR match and duplicate detection
+# ---------------------------------------------------------------------------
+
+
+def test_parse_idx_rejects_prefix_match():
+    """MAXTMP must not match TMP:2 m above ground -- exact VAR field only."""
+    src = HrrrS3Source()
+    targets = src._parse_idx(_PREFIX_TRAP_IDX)
+    by_col = {t[2]: t[0] for t in targets}
+    # TMP_2m should be matched to the SECOND entry (byte offset 12345), not MAXTMP
+    assert "TMP_2m" in by_col
+    assert by_col["TMP_2m"] == 12345
+
+
+def test_parse_idx_raises_on_duplicate_colname():
+    """ValueError raised when two idx rows would map to the same column name."""
+    src = HrrrS3Source()
+    with pytest.raises(ValueError, match="duplicate"):
+        src._parse_idx(_DUPLICATE_IDX)
+
+
+# ---------------------------------------------------------------------------
+# Unit: Range request -- 206 / 200 / open-ended range
 # ---------------------------------------------------------------------------
 
 
@@ -118,6 +159,58 @@ def test_fetch_range_header_format():
     assert captured["headers"] == {"Range": "bytes=100-999"}
 
 
+def test_fetch_range_open_ended_uses_no_end_byte():
+    """When end=None the Range header is bytes={start}- (open-ended)."""
+    src = HrrrS3Source()
+    captured = {}
+
+    def fake_get(url, headers=None, timeout=None):
+        captured["headers"] = headers
+        resp = MagicMock()
+        resp.status_code = 206
+        resp.content = b"\xff" * 20
+        return resp
+
+    src._session.get = fake_get
+    result = src._fetch_range("https://example.com/file.grib2", 500, None)
+    assert result == b"\xff" * 20
+    assert captured["headers"] == {"Range": "bytes=500-"}
+
+
+def test_fetch_range_rejects_200_without_content_range():
+    """HTTP 200 response to a Range request is rejected (logs error, returns None)."""
+    src = HrrrS3Source()
+
+    def fake_get(url, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"\x00" * 10
+        resp.headers = {}
+        return resp
+
+    src._session.get = fake_get
+    result = src._fetch_range("https://example.com/file.grib2", 100, 999)
+    assert result is None
+
+
+def test_fetch_range_logs_warning_on_final_failure():
+    """WARNING with grib_url emitted after all retry attempts fail."""
+    from loguru import logger
+    messages: list[str] = []
+    sink_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        src = HrrrS3Source()
+
+        def bad_get(*args, **kwargs):
+            raise ConnectionError("network down")
+
+        src._session.get = bad_get
+        src._fetch_range("https://example.com/fail.grib2", 0, 99)
+    finally:
+        logger.remove(sink_id)
+    assert any("fail.grib2" in m for m in messages)
+
+
 def test_fetch_range_returns_none_on_failure():
     src = HrrrS3Source()
 
@@ -128,6 +221,26 @@ def test_fetch_range_returns_none_on_failure():
     result = src._fetch_range("https://example.com/file.grib2", 0, 99)
     assert result is None
 
+# ---------------------------------------------------------------------------
+# V2V02: is_extrapolated column
+# ---------------------------------------------------------------------------
+
+
+def test_s3_fetch_output_has_is_extrapolated_false():
+    """MAJOR init fetch() output includes is_extrapolated=False on all rows."""
+    src = HrrrS3Source()
+    with (
+        patch.object(src, "_fetch_idx", return_value=_SAMPLE_IDX),
+        patch.object(src, "_fetch_range", return_value=None),
+    ):
+        result = src.fetch(
+            pd.Timestamp("2026-01-01 06:00", tz="UTC"),
+            range(0, 3),
+            _STATION,
+        )
+    df = result["KLGA"]
+    assert "is_extrapolated" in df.columns
+    assert (df["is_extrapolated"] == False).all()  # noqa: E712
 
 # ---------------------------------------------------------------------------
 # Integration: fetch() returns correct shape with mocked HTTP

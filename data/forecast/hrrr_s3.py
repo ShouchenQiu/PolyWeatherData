@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from data.forecast._grib_source import BaseGribSource
 
-_S3_BASE = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com"
-
 
 class HrrrS3Source(BaseGribSource):
     """Fetch HRRR forecasts from the NOAA public S3 bucket.
@@ -18,10 +16,25 @@ class HrrrS3Source(BaseGribSource):
     URL pattern:
         https://noaa-hrrr-bdp-pds.s3.amazonaws.com/
             hrrr.YYYYMMDD/conus/hrrr.tHHz.wrfsfcfFX.grib2
+
+    Parameters
+    ----------
+    base_url:
+        Override the S3 base URL (useful in tests).  When None, the URL is
+        constructed from ``settings.hrrr_s3_bucket``.
     """
+
+    def __init__(self, base_url: str | None = None) -> None:
+        super().__init__()
+        if base_url is not None:
+            self._base_url = base_url.rstrip("/")
+        else:
+            from config.settings import Settings
+            bucket = Settings().hrrr_s3_bucket
+            self._base_url = f"https://{bucket}.s3.amazonaws.com"
 
     def _build_url(self, date_str: str, init_hh: str, fxx_str: str) -> str:
         return (
-            f"{_S3_BASE}/hrrr.{date_str}/conus/"
+            f"{self._base_url}/hrrr.{date_str}/conus/"
             f"hrrr.t{init_hh}z.wrfsfcf{fxx_str}.grib2"
         )
