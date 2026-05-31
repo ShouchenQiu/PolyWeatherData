@@ -28,6 +28,7 @@ from loguru import logger
 if TYPE_CHECKING:
     from config.stations import StationConfig
     from core.strategy.base import BaseStrategy
+    from data.manager import DataManager
     from data.storage.parquet_store import ParquetStore
     from model.pipeline import ModelPipeline
 
@@ -89,6 +90,13 @@ class BacktestEngine:
         historical data before each init time; inits that fall inside
         this window cannot produce a valid encoder frame and are skipped
         (default 72, matching ``MAX_ENCODER_LENGTH`` [ADR-0001]).
+        Ignored when ``data_manager`` is provided.
+    data_manager:
+        Optional DataManager.  When provided, the time-based
+        ``cold_start_hours`` gate is replaced by
+        ``data_manager.is_inference_ready()`` for each candidate init
+        (V2V04).  Backward-compatible: when None the old
+        ``cold_start_hours`` gate remains active.
     """
 
     def __init__(
@@ -99,12 +107,14 @@ class BacktestEngine:
         actual_highs:      dict[str, float],
         min_edge:          float = 0.0,
         cold_start_hours:  int   = 72,
+        data_manager:      "DataManager | None" = None,
     ) -> None:
         self.pipeline          = pipeline
         self.strategy          = strategy
         self.actual_highs      = actual_highs
         self.min_edge          = min_edge
         self._cold_start_hours = cold_start_hours
+        self._data_manager     = data_manager
         self._clob_index       = self._build_clob_index(clob_df)
 
     # ------------------------------------------------------------------
@@ -155,7 +165,20 @@ class BacktestEngine:
         for day in dates:
             for hour in init_hours:
                 init_utc = day + pd.Timedelta(hours=hour)
-                if init_utc < cold_start_cutoff:
+                if self._data_manager is not None:
+                    from model.tft import MAX_ENCODER_LENGTH
+                    if not self._data_manager.is_inference_ready(
+                        station, init_utc, MAX_ENCODER_LENGTH
+                    ):
+                        reason = self._data_manager.inference_readiness(
+                            station, init_utc, MAX_ENCODER_LENGTH
+                        ).reason
+                        logger.debug(
+                            "Backtest: readiness skip init={} reason={}",
+                            init_utc, reason,
+                        )
+                        continue
+                elif init_utc < cold_start_cutoff:
                     logger.debug("cold-start skip: {}", init_utc)
                     continue
                 self._process_init(init_utc, station, records)

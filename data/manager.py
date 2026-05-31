@@ -9,7 +9,7 @@ enabling fast historical replay without re-downloading.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import pandas as pd
 from loguru import logger
@@ -24,6 +24,49 @@ if TYPE_CHECKING:
     from data.storage.parquet_store import ParquetStore
 
 _DEFAULT_FXX_RANGE = range(0, 49)
+
+# Sentinel start date for historical store reads in inference_readiness().
+# Far enough back to pre-date any real station data.
+_EARLIEST_DATA_START = pd.Timestamp("2020-01-01", tz="UTC")
+
+
+class InsufficientEncoderData(RuntimeError):
+    """Raised when the encoder window cannot be fully populated from the Parquet store.
+
+    Callers (ForecastLoop, BacktestEngine) should call
+    ``DataManager.inference_readiness()`` before ``build_encoder_obs_window()``
+    to avoid this exception in steady-state operation.
+    """
+
+
+class ReadinessStatus(NamedTuple):
+    """Return value of ``DataManager.inference_readiness()``.
+
+    Attributes
+    ----------
+    ready:
+        True only when the full encoder window is populated and all
+        required columns are present.  The caller may safely call
+        ``build_encoder_obs_window()`` without expecting
+        ``InsufficientEncoderData``.
+    reason:
+        One of:
+          ``"ok"``                    -- encoder window is complete.
+          ``"cold_start"``            -- not enough historical data yet;
+                                         ``first_eligible_init`` is the
+                                         earliest init that *will* be ready.
+          ``"incomplete_hrrr_window"`` -- HRRR rows < encoder_hours.
+          ``"incomplete_obs_window"``  -- obs rows < encoder_hours.
+          ``"missing_required_columns"`` -- columns absent after window read.
+    first_eligible_init:
+        Estimated earliest ``init_time`` for which readiness would return
+        ``ready=True`` for this station.  Derived as
+        ``first_clean_row_ts + encoder_hours``.  ``None`` when the store
+        is completely empty and no estimate is possible.
+    """
+    ready:               bool
+    reason:              str
+    first_eligible_init: "pd.Timestamp | None"
 
 
 class DataManager:
@@ -278,66 +321,76 @@ class DataManager:
 
         Reads directly from the ParquetStores -- no network fetch.
 
+        The window is **exactly** ``[init_time - n_hours, init_time - 1h]``
+        (i.e. ``n_hours`` hourly rows).  No cold-start extension is applied;
+        cold-start burn-in is an offline / batch concern handled by
+        ``Cleaner.drop_cold_start()``.  Live callers should gate on
+        ``inference_readiness()`` before calling this method.
+
         Parameters
         ----------
         station:
             Target station.
         init_time:
             Model initialisation time (UTC).  The window covers
-            [init_time - n_hours, init_time - 1h], i.e. hours -n_hours..-1
-            relative to init.  For the default n_hours=72 this is hours
-            -72..-1 (72 hourly rows).  The IEM observation at init_time
-            itself is not included because it has not yet been fully
-            quality-controlled when the model runs.
+            ``[init_time - n_hours, init_time - 1h]``, i.e.
+            ``n_hours`` hourly rows ending one hour before init.
         n_hours:
-            Length of the lookback window in hours (default 72).
+            Length of the lookback window in hours (default 72,
+            matching ``MAX_ENCODER_LENGTH`` [ADR-0001]).
 
         Returns
         -------
-        Merged DataFrame with at least valid_time, TMP_2m, and raw_tmpc_tenths
-        columns.  Rows are sorted by valid_time.
+        Merged DataFrame with at least valid_time, TMP_2m, raw_tmpc_tenths,
+        and temp_error columns.  Rows are sorted by valid_time.
 
         Raises
         ------
+        InsufficientEncoderData
+            When fewer than n_hours rows are available in either store,
+            or when the merged window is too short after the asof join and
+            temp_error NaN removal.
         RuntimeError
-            When fewer than n_hours rows are available in either the HRRR
-            or obs store after the merge.
+            When required columns (valid_time, TMP_2m, raw_tmpc_tenths) are
+            absent from the store data, or when temp_error cannot be computed.
         """
-        settings = self._settings
-        cold_start = settings.cold_start_hours
-
         init_utc = (
             init_time.tz_localize("UTC") if init_time.tzinfo is None
             else init_time.tz_convert("UTC")
         )
-        # Read cold_start_hours extra so that after dropping the cold-start
-        # period the remaining window is at least n_hours deep.
-        window_start = init_utc - pd.Timedelta(hours=n_hours + cold_start)
+        window_start = init_utc - pd.Timedelta(hours=n_hours)
         window_end   = init_utc - pd.Timedelta(hours=1)
 
+        # .copy() immediately after store reads to avoid shared-reference
+        # side effects when the caller or Cleaner mutates the DataFrame.
         hrrr_raw = self._forecast_store.read(
             station.station_id, window_start, window_end
-        )
+        ).copy()
         obs_raw = self._obs_store.read(
             station.station_id, window_start, window_end
-        )
-
-        # Drop cold-start rows: the first cold_start_hours rows of the
-        # station's history are unreliable and must not reach the model.
-        hrrr_raw = Cleaner.drop_cold_start(hrrr_raw, cold_start)
-        obs_raw  = Cleaner.drop_cold_start(obs_raw,  cold_start)
+        ).copy()
 
         if len(hrrr_raw) < n_hours:
-            raise RuntimeError(
+            raise InsufficientEncoderData(
                 f"build_encoder_obs_window: insufficient HRRR rows for "
                 f"station={station.station_id} "
                 f"(have {len(hrrr_raw)}, need {n_hours})"
             )
         if len(obs_raw) < n_hours:
-            raise RuntimeError(
+            raise InsufficientEncoderData(
                 f"build_encoder_obs_window: insufficient obs rows for "
                 f"station={station.station_id} "
                 f"(have {len(obs_raw)}, need {n_hours})"
+            )
+
+        # Required-column guard: raise early with an actionable message.
+        missing_hrrr = [c for c in ("valid_time", "TMP_2m") if c not in hrrr_raw.columns]
+        missing_obs  = [c for c in ("valid_time", "raw_tmpc_tenths") if c not in obs_raw.columns]
+        if missing_hrrr or missing_obs:
+            raise RuntimeError(
+                f"build_encoder_obs_window: required columns missing for "
+                f"station={station.station_id} -- "
+                f"HRRR missing: {missing_hrrr}, obs missing: {missing_obs}"
             )
 
         hrrr_raw["valid_time"] = pd.to_datetime(hrrr_raw["valid_time"], utc=True)
@@ -359,7 +412,7 @@ class DataManager:
         merged = merged.sort_values("valid_time").reset_index(drop=True)
 
         if len(merged) < n_hours:
-            raise RuntimeError(
+            raise InsufficientEncoderData(
                 f"build_encoder_obs_window: merged window too short for "
                 f"station={station.station_id} "
                 f"(have {len(merged)}, need {n_hours})"
@@ -371,11 +424,177 @@ class DataManager:
             merged = Cleaner.compute_temp_error(merged)
             merged = merged.dropna(subset=["temp_error"]).reset_index(drop=True)
 
-        if len(merged) < n_hours:
+        if "temp_error" not in merged.columns:
             raise RuntimeError(
+                f"build_encoder_obs_window: temp_error not produced for "
+                f"station={station.station_id}; check that TMP_2m and "
+                f"raw_tmpc_tenths are both present after merge"
+            )
+
+        if len(merged) < n_hours:
+            raise InsufficientEncoderData(
                 f"build_encoder_obs_window: temp_error NaN removal left too few rows for "
                 f"station={station.station_id} "
                 f"(have {len(merged)}, need {n_hours})"
             )
 
         return merged.tail(n_hours).reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # Inference readiness gate
+    # ------------------------------------------------------------------
+
+    def inference_readiness(
+        self,
+        station:       "StationConfig",
+        init_time:     pd.Timestamp,
+        encoder_hours: int = 72,
+    ) -> ReadinessStatus:
+        """Check whether the encoder window for this station/init_time is ready.
+
+        Reads the exact encoder window ``[init_time - encoder_hours, init_time - 1h]``
+        from both stores.  When either window is short it performs a secondary
+        historical read to determine whether the shortfall is a cold-start state
+        (not enough data has been collected yet) or a mid-history gap.
+
+        Does NOT raise; always returns a ``ReadinessStatus``.  Callers that only
+        need a boolean may use the thinner ``is_inference_ready()`` wrapper.
+
+        Does NOT call ``Cleaner.drop_cold_start()``; cold-start burn-in is an
+        offline / batch concern and must not be applied here to avoid
+        double-counting (ADR-0001, grill-tasks-v2.md #3).
+
+        Parameters
+        ----------
+        station:
+            Target station.
+        init_time:
+            Model initialisation time (UTC).
+        encoder_hours:
+            Encoder lookback window length in hours (default 72).
+
+        Returns
+        -------
+        ReadinessStatus with ready, reason, and first_eligible_init.
+        """
+        init_utc = (
+            init_time.tz_localize("UTC") if init_time.tzinfo is None
+            else init_time.tz_convert("UTC")
+        )
+        window_start = init_utc - pd.Timedelta(hours=encoder_hours)
+        window_end   = init_utc - pd.Timedelta(hours=1)
+
+        hrrr_window = self._forecast_store.read(
+            station.station_id, window_start, window_end
+        )
+        obs_window = self._obs_store.read(
+            station.station_id, window_start, window_end
+        )
+
+        # --- Check required columns when data is present ---
+        if not hrrr_window.empty and "TMP_2m" not in hrrr_window.columns:
+            return ReadinessStatus(
+                ready=False,
+                reason="missing_required_columns",
+                first_eligible_init=None,
+            )
+        if not obs_window.empty and "raw_tmpc_tenths" not in obs_window.columns:
+            return ReadinessStatus(
+                ready=False,
+                reason="missing_required_columns",
+                first_eligible_init=None,
+            )
+
+        # --- Check HRRR encoder window coverage ---
+        if len(hrrr_window) < encoder_hours:
+            first_eligible = self._estimate_first_eligible(
+                self._forecast_store, station.station_id, window_start, encoder_hours
+            )
+            if first_eligible is None or first_eligible > init_utc:
+                return ReadinessStatus(
+                    ready=False, reason="cold_start",
+                    first_eligible_init=first_eligible,
+                )
+            return ReadinessStatus(
+                ready=False, reason="incomplete_hrrr_window",
+                first_eligible_init=first_eligible,
+            )
+
+        # --- Check obs encoder window coverage ---
+        if len(obs_window) < encoder_hours:
+            first_eligible = self._estimate_first_eligible(
+                self._obs_store, station.station_id, window_start, encoder_hours
+            )
+            if first_eligible is None or first_eligible > init_utc:
+                return ReadinessStatus(
+                    ready=False, reason="cold_start",
+                    first_eligible_init=first_eligible,
+                )
+            return ReadinessStatus(
+                ready=False, reason="incomplete_obs_window",
+                first_eligible_init=first_eligible,
+            )
+
+        # --- Both windows are sufficient ---
+        # first_eligible_init derived from the earliest row in the encoder window
+        # (approximate; the true first global row may be earlier, but this is
+        # always <= init_time when the window is full).
+        hrrr_ts = self._min_valid_time(hrrr_window)
+        obs_ts  = self._min_valid_time(obs_window)
+        if hrrr_ts is not None and obs_ts is not None:
+            first_eligible = max(hrrr_ts, obs_ts) + pd.Timedelta(hours=encoder_hours)
+        else:
+            first_eligible = None
+        return ReadinessStatus(ready=True, reason="ok", first_eligible_init=first_eligible)
+
+    def is_inference_ready(
+        self,
+        station:       "StationConfig",
+        init_time:     pd.Timestamp,
+        encoder_hours: int = 72,
+    ) -> bool:
+        """Thin boolean wrapper over ``inference_readiness()``.
+
+        Returns True only when the encoder window is ready to use.
+        """
+        return self.inference_readiness(station, init_time, encoder_hours).ready
+
+    # ------------------------------------------------------------------
+    # Private helpers for inference_readiness
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _min_valid_time(df: pd.DataFrame) -> "pd.Timestamp | None":
+        """Return the minimum valid_time in df as a UTC Timestamp, or None."""
+        if df.empty or "valid_time" not in df.columns:
+            return None
+        try:
+            return pd.to_datetime(df["valid_time"], utc=True).min()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _estimate_first_eligible(
+        store:         "ParquetStore",
+        station_id:    str,
+        window_start:  pd.Timestamp,
+        encoder_hours: int,
+    ) -> "pd.Timestamp | None":
+        """Return first_eligible_init = first_store_row_ts + encoder_hours.
+
+        Performs a secondary historical read from _EARLIEST_DATA_START to
+        just before window_start to find the oldest available row.
+        Combines with any in-window rows to get the absolute first timestamp.
+        Returns None when the store has no data at all.
+        """
+        hist = store.read(
+            station_id,
+            _EARLIEST_DATA_START,
+            window_start - pd.Timedelta(hours=1),
+        )
+        if hist.empty or "valid_time" not in hist.columns:
+            return None
+        first_ts = pd.to_datetime(hist["valid_time"], utc=True).min()
+        if pd.isna(first_ts):
+            return None
+        return first_ts + pd.Timedelta(hours=encoder_hours)

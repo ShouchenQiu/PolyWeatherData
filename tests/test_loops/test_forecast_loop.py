@@ -557,3 +557,54 @@ def test_forecast_loop_tick_pipeline_last_tick_utc_used(db, station):
     asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
     snapshot = asyncio.run(prob_store.read("cid1", 0))
     assert snapshot.last_tick_utc == expected_ts
+
+
+# -----------------------------------------------------------------------
+# V2V04: inference readiness gate in ForecastLoop.tick
+# -----------------------------------------------------------------------
+
+def test_forecast_loop_skips_event_when_not_ready(db, station):
+    """tick() must not call pipeline.run() when DataManager reports not-ready."""
+    from data.manager import ReadinessStatus
+
+    _seed_event_and_market(db)
+
+    not_ready_status = ReadinessStatus(
+        ready=False, reason="cold_start", first_eligible_init=None
+    )
+    data_manager = MagicMock()
+    data_manager.inference_readiness.return_value = not_ready_status
+
+    pipeline = MagicMock()
+    loop = ForecastLoop(
+        pipeline     = pipeline,
+        prob_store   = ProbabilityStore(),
+        db           = db,
+        station      = station,
+        data_manager = data_manager,
+    )
+
+    written = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
+
+    pipeline.run.assert_not_called()
+    assert written == []
+
+
+def test_forecast_loop_runs_pipeline_when_data_manager_none(db, station):
+    """tick() runs pipeline normally when data_manager is None (backward-compat)."""
+    _seed_event_and_market(db)
+
+    pipeline = MagicMock()
+    pipeline.run.return_value = {"probs": {(60.0, 70.0): 0.70}, "quantiles": {}}
+    loop = ForecastLoop(
+        pipeline     = pipeline,
+        prob_store   = ProbabilityStore(),
+        db           = db,
+        station      = station,
+        data_manager = None,
+    )
+
+    written = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
+
+    pipeline.run.assert_called_once()
+    assert written == ["cid1"]

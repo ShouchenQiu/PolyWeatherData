@@ -419,6 +419,51 @@ class TestColdStartGuard:
         assert called_init == pd.Timestamp("2024-01-01 06:00:00", tz="UTC")
         assert (65.0, 75.0) in called_buckets
 
+    def test_backtest_skips_not_ready_inits_when_data_manager_provided(self):
+        """pipeline.run() is not called for inits rejected by DataManager.is_inference_ready."""
+        from unittest.mock import MagicMock
+        from data.manager import ReadinessStatus
+
+        rows = [
+            _clob_row("2024-01-02", "2024-01-01 06:00:00", "slug", 65.0, 75.0, 0.55),
+        ]
+        pipeline = _make_pipeline({"probs": {(65.0, 75.0): 0.70}})
+        data_manager = MagicMock()
+        data_manager.is_inference_ready.return_value = False
+        data_manager.inference_readiness.return_value = ReadinessStatus(
+            ready=False, reason="cold_start", first_eligible_init=None
+        )
+
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), _make_clob_df(rows), {"2024-01-02": 70.0},
+            cold_start_hours=0,
+            data_manager=data_manager,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        types.SimpleNamespace(), init_hours=[6])
+
+        # All inits should be skipped; result is empty.
+        assert df.empty
+        data_manager.is_inference_ready.assert_called()
+
+    def test_backtest_uses_cold_start_gate_when_data_manager_none(self):
+        """Old cold_start_hours gate is active when data_manager is None."""
+        pipeline = _make_pipeline({"probs": {(65.0, 75.0): 0.70}})
+        actual_highs = {"2024-01-02": 70.0}
+        rows = [
+            _clob_row("2024-01-02", "2024-01-01 06:00:00", "slug", 65.0, 75.0, 0.55),
+        ]
+        # cold_start_hours=72 means init at 2024-01-01 06:00 < cutoff (Jan 1 00:00 + 72h = Jan 4)
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), _make_clob_df(rows), actual_highs,
+            cold_start_hours=72,
+            data_manager=None,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        types.SimpleNamespace(), init_hours=[6])
+        # Init is within cold_start window; must be skipped.
+        assert df.empty
+
 
 # ---------------------------------------------------------------------------
 # BacktestAnalysis

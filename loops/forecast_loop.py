@@ -19,8 +19,10 @@ import pandas as pd
 from loguru import logger
 
 from core.probability_store import ProbabilitySnapshot, ProbabilityStore
+from model.tft import MAX_ENCODER_LENGTH
 
 if TYPE_CHECKING:
+    from data.manager import DataManager
     from db.schema import DbClient
     from model.pipeline import ModelPipeline
 
@@ -38,19 +40,29 @@ class ForecastLoop:
         DbClient for querying active events and markets.
     station:
         Station configuration for the pipeline.
+    data_manager:
+        Optional DataManager used to gate pipeline execution on encoder
+        readiness (V2V04).  When provided, each per-event tick calls
+        ``data_manager.inference_readiness()`` and skips the pipeline if
+        the encoder window is not yet ready, logging the reason and
+        ``first_eligible_init``.  When None the readiness gate is skipped
+        (backward-compatible with earlier callers that do not inject
+        DataManager).
     """
 
     def __init__(
         self,
-        pipeline:   "ModelPipeline",
-        prob_store: ProbabilityStore,
-        db:         "DbClient",
-        station:    Any,
+        pipeline:      "ModelPipeline",
+        prob_store:    ProbabilityStore,
+        db:            "DbClient",
+        station:       Any,
+        data_manager:  "DataManager | None" = None,
     ) -> None:
-        self.pipeline   = pipeline
-        self.prob_store = prob_store
-        self.db         = db
-        self.station    = station
+        self.pipeline      = pipeline
+        self.prob_store    = prob_store
+        self.db            = db
+        self.station       = station
+        self.data_manager  = data_manager
 
     # ------------------------------------------------------------------
     # Public API
@@ -106,6 +118,19 @@ class ForecastLoop:
             ]
             if not buckets:
                 continue
+
+            # --- V2V04: inference readiness gate ---
+            if self.data_manager is not None:
+                status = self.data_manager.inference_readiness(
+                    self.station, init_utc, encoder_hours=MAX_ENCODER_LENGTH
+                )
+                if not status.ready:
+                    logger.info(
+                        "ForecastLoop: skipping event {} -- reason={} "
+                        "first_eligible_init={}",
+                        condition_id, status.reason, status.first_eligible_init,
+                    )
+                    continue
 
             try:
                 result = self.pipeline.run(self.station, init_utc, buckets)
