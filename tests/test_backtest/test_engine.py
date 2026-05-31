@@ -26,7 +26,7 @@ from backtest.analysis import BacktestAnalysis, _pnl_summary
 def _make_pipeline(probs_by_bucket: dict):
     """Fake ModelPipeline that returns fixed probs."""
     pipeline = types.SimpleNamespace()
-    pipeline.run = lambda station, init_utc, buckets: {"probs": probs_by_bucket}
+    pipeline.run = lambda station, init_utc, buckets, target_date=None: {"probs": probs_by_bucket}
     return pipeline
 
 
@@ -393,11 +393,11 @@ class TestColdStartGuard:
         assert engine._cold_start_hours == 72
 
     def test_process_init_call_site_matches_pipeline_signature(self):
-        """pipeline.run() receives (station, init_utc, buckets) -- no TypeError."""
+        """pipeline.run() receives target_date kwarg (ADR-0010)."""
         received: list = []
 
-        def capturing_run(station, init_utc, buckets):
-            received.append((station, init_utc, buckets))
+        def capturing_run(station, init_utc, buckets, target_date=None):
+            received.append((station, init_utc, buckets, target_date))
             return {"probs": {(65.0, 75.0): 0.70}}
 
         pipeline      = types.SimpleNamespace()
@@ -414,10 +414,11 @@ class TestColdStartGuard:
         engine.run("2024-01-01", "2024-01-01", station, init_hours=[6])
 
         assert len(received) == 1
-        called_station, called_init, called_buckets = received[0]
+        called_station, called_init, called_buckets, called_target = received[0]
         assert called_station is station
         assert called_init == pd.Timestamp("2024-01-01 06:00:00", tz="UTC")
         assert (65.0, 75.0) in called_buckets
+        assert called_target == "2024-01-02"
 
     def test_backtest_skips_not_ready_inits_when_data_manager_provided(self):
         """pipeline.run() is not called for inits rejected by DataManager.inference_readiness.

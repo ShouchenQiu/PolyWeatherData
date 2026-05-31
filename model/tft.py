@@ -198,10 +198,10 @@ class TftModel:
         # preds_q shape: (1, 48, n_quantiles) -> quantiles [p10, p50, p90]
         arr = preds_q[0].cpu().numpy() if hasattr(preds_q[0], "cpu") else preds_q[0]
 
-        # Validate output shape: must be (MAX_PREDICTION_LENGTH, n_quantiles).
-        if arr.ndim != 2 or arr.shape[0] != MAX_PREDICTION_LENGTH:
+        # Validate output shape: must be (MAX_PREDICTION_LENGTH, 3).
+        if arr.ndim != 2 or arr.shape[0] != MAX_PREDICTION_LENGTH or arr.shape[1] < 3:
             raise ValueError(
-                f"TFT output shape must be ({MAX_PREDICTION_LENGTH}, n_quantiles), "
+                f"TFT output shape must be ({MAX_PREDICTION_LENGTH}, >=3), "
                 f"got {arr.shape}"
             )
 

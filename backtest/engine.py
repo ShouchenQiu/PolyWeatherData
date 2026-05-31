@@ -297,7 +297,9 @@ class BacktestEngine:
 
             # Run pipeline
             try:
-                result = self.pipeline.run(station, init_utc, buckets)
+                result = self.pipeline.run(
+                    station, init_utc, buckets, target_date=target_str
+                )
             except Exception:
                 continue
 

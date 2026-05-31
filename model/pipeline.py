@@ -52,9 +52,10 @@ class ModelPipeline:
         data_mgr: Any,
         registry: "ModelRegistry | None" = None,
     ) -> None:
-        if tft is None:
+        if tft is None or not callable(getattr(tft, "predict", None)):
             raise TypeError(
-                "tft must not be None; provide a TftModel instance"
+                "tft must implement predict(encoder_df, decoder_df); "
+                f"got {type(tft)!r}"
             )
         self.tft      = tft
         self.mc       = mc
@@ -137,6 +138,14 @@ class ModelPipeline:
             )
         decoder_df = decoder_raw.sort_values("fxx").reset_index(drop=True)
 
+        # Decoder fxx completeness gate.
+        actual_fxx = set(decoder_df["fxx"].astype(int).tolist())
+        if actual_fxx != set(range(1, 49)):
+            raise ValueError(
+                f"decoder_df fxx must be exactly {{1..48}}, "
+                f"got {sorted(actual_fxx)}"
+            )
+
         # 4a. Add model-specific features (time_idx, calendar, local_idx, etc.)
         encoder_df = self._add_model_features(
             encoder_df, start_idx=0, init_utc=init_utc,
@@ -180,7 +189,12 @@ class ModelPipeline:
         # 5. TFT inference -> {fxx: {p10, p50, p90}}
         quantiles = self.tft.predict(encoder_df, decoder_df)
 
-        # 5a. Quantile sanity: all finite, ordered p10 <= p50 <= p90.
+        # 5a. Quantile sanity: keys must be exactly 1..48, values finite, p10<=p50<=p90.
+        if set(quantiles.keys()) != set(range(1, 49)):
+            raise ValueError(
+                f"quantiles dict keys must be exactly {{1..48}}, "
+                f"got {sorted(quantiles.keys())}"
+            )
         for fxx in range(1, 49):
             q = quantiles[fxx]
             p10, p50, p90 = q["p10"], q["p50"], q["p90"]
@@ -254,7 +268,7 @@ class ModelPipeline:
         )
         return {
             "station":       station.station_id,
-            "init_time":     init_time,
+            "init_time":     init_utc,
             "probs":         probs,
             "p50_high_f":    p50_high_f,
             "quantiles":     quantiles,
