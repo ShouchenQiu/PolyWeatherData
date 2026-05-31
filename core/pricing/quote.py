@@ -43,7 +43,18 @@ def compute_quote(book: dict, side: str, size_usd: float) -> Quote:
         When depth is insufficient to fill ``size_usd``, ``complete_fill``
         is ``False`` and ``max_fillable_usd < size_usd``.  Callers must
         skip or cancel in that case; no partial fills are executed in v1.
+
+    Raises
+    ------
+    ValueError
+        If ``side`` is not ``"BUY"`` or ``"SELL"``, or if ``size_usd <= 0``.
     """
+    side = side.upper()
+    if side not in ("BUY", "SELL"):
+        raise ValueError(f"side must be 'BUY' or 'SELL', got {side!r}")
+    if size_usd <= 0:
+        raise ValueError(f"size_usd must be positive, got {size_usd!r}")
+
     bids: list[dict] = sorted(
         book.get("bids", []),
         key=lambda x: float(x["price"]),
@@ -56,10 +67,12 @@ def compute_quote(book: dict, side: str, size_usd: float) -> Quote:
 
     best_bid: float | None = float(bids[0]["price"]) if bids else None
     best_ask: float | None = float(asks[0]["price"]) if asks else None
-    if best_bid is not None and best_ask is not None:
-        mid_price: float | None = (best_bid + best_ask) / 2.0
-    else:
-        mid_price = best_bid if best_bid is not None else best_ask
+    # mid_price requires both sides (ADR-0011: mark price = best-bid/best-ask midpoint).
+    mid_price: float | None = (
+        (best_bid + best_ask) / 2.0
+        if best_bid is not None and best_ask is not None
+        else None
+    )
 
     levels = asks if side == "BUY" else bids
 

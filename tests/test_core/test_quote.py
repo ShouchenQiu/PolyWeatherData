@@ -160,6 +160,57 @@ def test_compute_quote_book_levels_unsorted_input() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Input validation
+# ---------------------------------------------------------------------------
+
+
+def test_compute_quote_invalid_side_raises() -> None:
+    book = {"bids": [], "asks": [{"price": 0.60, "size": 100.0}]}
+    with pytest.raises(ValueError, match="side"):
+        compute_quote(book, "HOLD", 50.0)
+
+
+def test_compute_quote_lowercase_side_accepted() -> None:
+    book = {"bids": [], "asks": [{"price": 0.60, "size": 100.0}]}
+    q = compute_quote(book, "buy", 50.0)
+    assert q.complete_fill is True
+    assert q.vwap_price == pytest.approx(0.60)
+
+
+def test_compute_quote_zero_size_raises() -> None:
+    book = {"bids": [], "asks": [{"price": 0.60, "size": 100.0}]}
+    with pytest.raises(ValueError, match="size_usd"):
+        compute_quote(book, "BUY", 0.0)
+
+
+def test_compute_quote_negative_size_raises() -> None:
+    book = {"bids": [], "asks": [{"price": 0.60, "size": 100.0}]}
+    with pytest.raises(ValueError, match="size_usd"):
+        compute_quote(book, "BUY", -10.0)
+
+
+# ---------------------------------------------------------------------------
+# mid_price requires both sides (ADR-0011: mark price = bid/ask midpoint)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_quote_mid_price_none_when_asks_only() -> None:
+    book = {"bids": [], "asks": [{"price": 0.62, "size": 100.0}]}
+    q = compute_quote(book, "BUY", 50.0)
+    assert q.mid_price is None
+    assert q.best_ask == pytest.approx(0.62)
+    assert q.best_bid is None
+
+
+def test_compute_quote_mid_price_none_when_bids_only() -> None:
+    book = {"bids": [{"price": 0.58, "size": 100.0}], "asks": []}
+    q = compute_quote(book, "SELL", 50.0)
+    assert q.mid_price is None
+    assert q.best_bid == pytest.approx(0.58)
+    assert q.best_ask is None
+
+
+# ---------------------------------------------------------------------------
 # Leaf module: must not import from other project packages
 # ---------------------------------------------------------------------------
 
