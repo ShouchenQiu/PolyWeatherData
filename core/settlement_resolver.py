@@ -4,6 +4,11 @@ Given a condition_id and the observed max temperature, resolves the YES/NO
 payout for every filled/closed order on that event.  All DB access and
 payout rules are encapsulated here so SettlementLoop only handles scheduling
 and observation loading.
+
+Payout semantics (post-V2F05):
+    Each winning share redeems for $1.00.  Payout = filled_shares for winning
+    rows.  Rows that were recorded before V2F05 (filled_shares IS NULL) fall
+    back to size_usd as a best-effort approximation, which is noted in the log.
 """
 from __future__ import annotations
 
@@ -69,20 +74,27 @@ class SettlementResolver:
 
         results: list[OrderSettlement] = []
         for order in self._db.get_orders_for_settlement(condition_id):
-            order_id = order["order_id"]
-            token_id = order["token_id"]
-            size_usd = float(order.get("size_usd") or 0.0)
+            order_id     = order["order_id"]
+            token_id     = order["token_id"]
+            size_usd     = float(order.get("size_usd") or 0.0)
+            filled_shares_raw = order.get("filled_shares")
+            if filled_shares_raw is not None:
+                win_amount = float(filled_shares_raw)
+            else:
+                # Pre-V2F05 row: filled_shares not recorded; fall back to size_usd.
+                logger.warning(
+                    "SettlementResolver: order {} has no filled_shares; "
+                    "using size_usd={:.4f} as payout approximation",
+                    order_id, size_usd,
+                )
+                win_amount = size_usd
 
             entry = token_market.get(token_id)
             if entry is not None:
                 lo, hi, outcome = entry
                 in_bucket = lo <= actual_max_temp < hi
-                # TODO(V2V12): payout should be filled_shares (not size_usd) for
-                # YES tokens.  After V2F05 a $20 @ 0.40 BUY holds 50 shares;
-                # the winning payout is 50 USDC, not 20.  Fix in the Redeem Loop
-                # slice so that PnLCalculator.realized_pnl() reflects correct
-                # settlement values.
-                payout = size_usd if (outcome == "YES") == in_bucket else 0.0
+                # TODO(V2V12): remove fallback path once all orders have filled_shares
+                payout = win_amount if (outcome == "YES") == in_bucket else 0.0
             else:
                 logger.warning(
                     "SettlementResolver: token_id {} has no market entry; payout=0",

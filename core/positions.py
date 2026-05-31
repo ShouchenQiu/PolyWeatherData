@@ -127,20 +127,17 @@ class PositionTracker:
     # Read -- exposure queries
     # ------------------------------------------------------------------
 
-    def open_positions_by_token(self) -> dict[str, int]:
-        """Count pending|filled rows per token_id.
+    def gross_open_notional_usd(self) -> float:
+        """Sum of size_usd for all pending|filled orders (both BUY and SELL).
 
-        Used by RiskPipeline for duplicate-order prevention.
+        This is a gross notional figure used by the risk gate:
+        ``current_exposure + proposed_size_usd <= max_total_usd``.
+
+        It intentionally double-counts opposite-side orders (e.g. a pending
+        SELL does not reduce this figure) so that the risk gate remains
+        conservative while a SELL order is in-flight.  Use
+        ``position_size_usd()`` or ``position_shares()`` for net exposure.
         """
-        rows = self._db.query(
-            "SELECT token_id, COUNT(*) AS cnt FROM orders"
-            " WHERE status IN ('pending', 'filled')"
-            " GROUP BY token_id"
-        )
-        return {row["token_id"]: row["cnt"] for row in rows}
-
-    def total_exposure(self) -> float:
-        """Sum of size_usd for all pending|filled orders."""
         rows = self._db.query(
             "SELECT COALESCE(SUM(size_usd), 0.0) FROM orders"
             " WHERE status IN ('pending', 'filled')"
@@ -156,35 +153,50 @@ class PositionTracker:
         )
         return float(rows[0][0])
 
-    def position_shares(self, token_id: str) -> float:
+    def position_shares(self, token_id: str, is_paper: bool | None = None) -> float:
         """Net signed token shares for *token_id* across all filled orders.
 
         Sums ``signed_shares`` for all rows where the column has been
         written (i.e. post-fill) and the order is not cancelled.
         Returns 0.0 when no fills exist for the token.
+
+        Parameters
+        ----------
+        is_paper:
+            When not None, restricts the query to paper (True) or live
+            (False) orders only.  When None (default), both are included.
         """
+        paper_sql = "" if is_paper is None else " AND is_paper=?"
+        params: tuple = (token_id,) if is_paper is None else (token_id, int(is_paper))
         rows = self._db.query(
             "SELECT COALESCE(SUM(signed_shares), 0.0) FROM orders"
             " WHERE token_id=? AND signed_shares IS NOT NULL"
-            " AND status != 'cancelled'",
-            (token_id,),
+            f" AND status != 'cancelled'{paper_sql}",
+            params,
         )
         return float(rows[0][0])
 
-    def position_size_usd(self, token_id: str) -> float:
+    def position_size_usd(self, token_id: str, is_paper: bool | None = None) -> float:
         """Net USDC cost-basis for *token_id*: sum of BUY size_usd minus SELL
         size_usd across all filled rows.
 
         Used for exposure reporting; SELL sizing must use
         ``position_shares()`` instead.
+
+        Parameters
+        ----------
+        is_paper:
+            When not None, restricts to paper (True) or live (False) rows.
         """
+        paper_sql = "" if is_paper is None else " AND is_paper=?"
+        params: tuple = (token_id,) if is_paper is None else (token_id, int(is_paper))
         rows = self._db.query(
             "SELECT COALESCE(SUM(CASE WHEN side='BUY' THEN size_usd"
             "                        WHEN side='SELL' THEN -size_usd"
             "                        ELSE 0 END), 0.0)"
             " FROM orders"
-            " WHERE token_id=? AND status='filled'",
-            (token_id,),
+            f" WHERE token_id=? AND status='filled'{paper_sql}",
+            params,
         )
         return float(rows[0][0])
 

@@ -16,7 +16,6 @@ class BaseRiskModel(ABC):
         self,
         signal:           "Signal",
         current_exposure: float,
-        open_positions:   dict[str, int] | None = None,
     ) -> bool:
         """Return True if the signal should be sent to the exchange.
 
@@ -26,10 +25,6 @@ class BaseRiskModel(ABC):
             Signal to evaluate.
         current_exposure:
             Total open USDC exposure across all positions.
-        open_positions:
-            Mapping of token_id -> open-order count (pending|filled).
-            When provided, implementations may reject signals for tokens
-            already at their position limit.  Defaults to None (no check).
         """
 
     @abstractmethod
@@ -37,7 +32,6 @@ class BaseRiskModel(ABC):
         self,
         signal:           "Signal",
         current_exposure: float,
-        open_positions:   dict[str, int] | None = None,
         positions:        object | None = None,
     ) -> float:
         """Return the USDC size to allocate for this signal.

@@ -58,7 +58,6 @@ class FixedFraction(BaseRiskModel):
         self,
         signal:           "Signal",
         current_exposure: float,
-        open_positions:   dict[str, int] | None = None,
     ) -> bool:
         """Return False unless the signal passes position-level checks.
 
@@ -82,7 +81,6 @@ class FixedFraction(BaseRiskModel):
         self,
         signal:           "Signal",
         current_exposure: float,
-        open_positions:   dict[str, int] | None = None,
         positions:        object | None = None,
     ) -> float:
         """Return the USDC amount to allocate.

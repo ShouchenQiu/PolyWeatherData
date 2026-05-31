@@ -133,29 +133,6 @@ def test_approve_signal_sell_bypasses_zero_position_usd_gate():
 
 
 # -----------------------------------------------------------------------
-# FixedFraction -- open_positions param (backward compat, no longer gates)
-# -----------------------------------------------------------------------
-
-def test_approve_signal_true_when_token_not_in_open_positions():
-    """open_positions is accepted but no longer gates approval."""
-    risk = FixedFraction(position_usd=20.0, max_total_usd=500.0)
-    sig = Signal(token_id="tok-new", side="BUY", mc_prob=0.6,
-                 clob_price=0.4, edge=0.2)
-    open_pos = {"tok-other": 1}
-    assert risk.approve_signal(sig, current_exposure=0.0,
-                               open_positions=open_pos) is True
-
-
-def test_approve_signal_no_open_positions_still_passes():
-    """open_positions=None is accepted; approval depends only on USD caps."""
-    risk = FixedFraction(position_usd=20.0, max_total_usd=500.0)
-    sig = Signal(token_id="tok1", side="BUY", mc_prob=0.6,
-                 clob_price=0.4, edge=0.2)
-    assert risk.approve_signal(sig, current_exposure=0.0,
-                               open_positions=None) is True
-
-
-# -----------------------------------------------------------------------
 # FixedFraction -- SELL sizing via positions (V2F05)
 # -----------------------------------------------------------------------
 
@@ -272,10 +249,10 @@ def test_risk_pipeline_compute_size_not_called_on_rejected():
     called: list[str] = []
 
     class SpyRisk(FixedFraction):
-        def approve_signal(self, signal, current_exposure, open_positions=None):
+        def approve_signal(self, signal, current_exposure):
             return False
 
-        def compute_size(self, signal, current_exposure, open_positions=None):
+        def compute_size(self, signal, current_exposure, positions=None):
             called.append("compute_size")
             return 20.0
 
@@ -292,20 +269,3 @@ def test_risk_pipeline_compute_size_returns_minimum():
     rp = RiskPipeline([r_big, r_small])
     size = rp.compute_size(_signal(), current_exposure=0.0)
     assert size == pytest.approx(10.0)
-
-
-def test_risk_pipeline_passes_open_positions_through():
-    """open_positions kwarg is forwarded to each sub-model."""
-    from core.risk.pipeline import RiskPipeline
-
-    received: list[dict | None] = []
-
-    class SpyRisk(FixedFraction):
-        def approve_signal(self, signal, current_exposure, open_positions=None):
-            received.append(open_positions)
-            return True
-
-    rp = RiskPipeline([SpyRisk(position_usd=20.0, max_total_usd=500.0)])
-    rp.approve_signal(_signal(), current_exposure=0.0,
-                      open_positions={"tok1": 1})
-    assert received == [{"tok1": 1}]

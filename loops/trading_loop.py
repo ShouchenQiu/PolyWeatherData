@@ -71,6 +71,7 @@ class TradingLoop:
         positions: "PositionTracker",
         db: "DbClient",
         orderbook: OrderbookReader | None = None,
+        is_paper: bool = False,
     ) -> None:
         if not isinstance(strategy, MultiStrategy):
             raise TypeError(
@@ -89,6 +90,7 @@ class TradingLoop:
         self._positions  = positions
         self._db         = db
         self._orderbook  = orderbook
+        self._is_paper   = is_paper
 
     @property
     def interval_s(self) -> int:
@@ -221,14 +223,12 @@ class TradingLoop:
 
             signals = self._strategy.compute_signals(probs, books, markets)
 
-            current_exposure = self._positions.total_exposure()
-            open_positions   = self._positions.open_positions_by_token()
+            current_exposure = self._positions.gross_open_notional_usd()
 
             for signal in signals:
                 if not self._risk.approve_signal(
                     signal,
                     current_exposure=current_exposure,
-                    open_positions=open_positions,
                 ):
                     self._emit_risk_rejected(signal, condition_id)
                     continue
@@ -236,7 +236,6 @@ class TradingLoop:
                 size_usd = self._risk.compute_size(
                     signal,
                     current_exposure=current_exposure,
-                    open_positions=open_positions,
                     positions=self._positions,
                 )
                 try:
@@ -253,12 +252,14 @@ class TradingLoop:
                         )
                         continue
                     self._positions.record_order(
-                        order_id     = order_id,
-                        token_id     = signal.token_id,
-                        condition_id = condition_id,
-                        side         = signal.side,
-                        size_usd     = size_usd,
-                        price        = signal.clob_price,
+                        order_id          = order_id,
+                        token_id          = signal.token_id,
+                        condition_id      = condition_id,
+                        side              = signal.side,
+                        size_usd          = size_usd,
+                        price             = signal.clob_price,
+                        is_paper          = self._is_paper,
+                        executable_price  = signal.executable_price,
                     )
                     submitted.append(order_id)
                     logger.info(

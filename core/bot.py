@@ -160,6 +160,7 @@ class BotManager:
             positions  = self.positions,
             db         = self.db,
             orderbook  = self.orderbook,
+            is_paper   = (settings.trading_mode != "live"),
         )
         self.discovery_loop  = DiscoveryLoop(self.discovery)
         self.settlement_loop = SettlementLoop(

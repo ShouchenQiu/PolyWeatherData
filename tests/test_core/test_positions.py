@@ -211,68 +211,30 @@ def test_cancellation_path(tracker, db):
 
 
 # ---------------------------------------------------------------------------
-# open_positions_by_token
+# gross_open_notional_usd (pending + filled only)
 # ---------------------------------------------------------------------------
 
-def test_open_positions_by_token_counts_pending_and_filled(tracker):
-    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.55)
-    tracker.record_order("ord-2", "tok-yes", "cid-1", "BUY", 20.0, 0.55)
-    tracker.mark_filled("ord-2", 0.57)
-    result = tracker.open_positions_by_token()
-    assert result.get("tok-yes", 0) == 2
-
-
-def test_open_positions_by_token_excludes_cancelled(tracker):
-    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.55)
-    tracker.mark_cancelled("ord-1")
-    result = tracker.open_positions_by_token()
-    assert result.get("tok-yes", 0) == 0
-
-
-def test_open_positions_by_token_excludes_closed(tracker):
-    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.55)
-    tracker.mark_closed("ord-1")
-    result = tracker.open_positions_by_token()
-    assert result.get("tok-yes", 0) == 0
-
-
-def test_open_positions_by_token_mixed_tokens(tracker):
-    tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.55)
-    tracker.record_order("ord-2", "tok-yes-2", "cid-1", "BUY", 20.0, 0.55)
-    result = tracker.open_positions_by_token()
-    assert result.get("tok-yes", 0) == 1
-    assert result.get("tok-yes-2", 0) == 1
-
-
-def test_open_positions_by_token_empty_when_no_orders(tracker):
-    assert tracker.open_positions_by_token() == {}
-
-
-# ---------------------------------------------------------------------------
-# total_exposure (pending + filled only)
-# ---------------------------------------------------------------------------
-
-def test_total_exposure_sums_pending_and_filled(tracker):
+def test_gross_open_notional_usd_sums_pending_and_filled(tracker):
     tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.55)
     tracker.record_order("ord-2", "tok-yes", "cid-1", "BUY", 15.0, 0.55)
     tracker.mark_filled("ord-2", 0.57)
-    assert abs(tracker.total_exposure() - 35.0) < 1e-9
+    assert abs(tracker.gross_open_notional_usd() - 35.0) < 1e-9
 
 
-def test_total_exposure_excludes_cancelled(tracker):
+def test_gross_open_notional_usd_excludes_cancelled(tracker):
     tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.55)
     tracker.mark_cancelled("ord-1")
-    assert tracker.total_exposure() == 0.0
+    assert tracker.gross_open_notional_usd() == 0.0
 
 
-def test_total_exposure_excludes_settled(tracker):
+def test_gross_open_notional_usd_excludes_settled(tracker):
     tracker.record_order("ord-1", "tok-yes", "cid-1", "BUY", 20.0, 0.55)
     tracker.mark_settled("ord-1", 20.0)
-    assert tracker.total_exposure() == 0.0
+    assert tracker.gross_open_notional_usd() == 0.0
 
 
-def test_total_exposure_zero_when_no_orders(tracker):
-    assert tracker.total_exposure() == 0.0
+def test_gross_open_notional_usd_zero_when_no_orders(tracker):
+    assert tracker.gross_open_notional_usd() == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +352,19 @@ def test_position_shares_zero_when_no_fills(tracker):
 def test_position_shares_zero_for_unknown_token(tracker):
     assert tracker.position_shares("tok-unknown") == pytest.approx(0.0)
 
+
+def test_position_shares_is_paper_filter(tracker, db):
+    """is_paper=True returns only paper shares; is_paper=False returns only live."""
+    tracker.record_order("p-ord", "tok-yes", "cid-1", "BUY", 20.0, 0.50, is_paper=True)
+    tracker.record_order("l-ord", "tok-yes", "cid-1", "BUY", 40.0, 0.50, is_paper=False)
+    tracker.mark_filled("p-ord", 0.50)
+    tracker.mark_filled("l-ord", 0.50)
+    paper_shares = tracker.position_shares("tok-yes", is_paper=True)
+    live_shares  = tracker.position_shares("tok-yes", is_paper=False)
+    all_shares   = tracker.position_shares("tok-yes")
+    assert paper_shares == pytest.approx(20.0 / 0.50)
+    assert live_shares  == pytest.approx(40.0 / 0.50)
+    assert all_shares   == pytest.approx(paper_shares + live_shares)
 
 # ---------------------------------------------------------------------------
 # V2F05: position_size_usd

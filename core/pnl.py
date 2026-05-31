@@ -126,8 +126,7 @@ class PnLCalculator:
         if not mark_prices:
             return 0.0
 
-        _, pap_p = self._paper_clause(is_paper)
-        paper_sql = "" if is_paper is None else " AND is_paper=?"
+        paper_sql, pap_p = self._paper_clause(is_paper)
 
         rows = self._db.query(
             "SELECT token_id,"
@@ -200,8 +199,7 @@ class PnLCalculator:
         is_paper: bool | None,
     ) -> float:
         """Unrealized PnL restricted to a single condition_id."""
-        _, pap_p = self._paper_clause(is_paper)
-        paper_sql = "" if is_paper is None else " AND is_paper=?"
+        paper_sql, pap_p = self._paper_clause(is_paper)
 
         rows = self._db.query(
             "SELECT token_id,"

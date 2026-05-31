@@ -38,7 +38,6 @@ class RiskPipeline(BaseRiskModel):
         self,
         signal:           "Signal",
         current_exposure: float,
-        open_positions:   dict[str, int] | None = None,
     ) -> bool:
         """Return True only when every sub-model approves.
 
@@ -46,8 +45,7 @@ class RiskPipeline(BaseRiskModel):
         called inside this method.
         """
         for model in self._models:
-            if not model.approve_signal(signal, current_exposure,
-                                        open_positions=open_positions):
+            if not model.approve_signal(signal, current_exposure):
                 return False
         return True
 
@@ -55,7 +53,6 @@ class RiskPipeline(BaseRiskModel):
         self,
         signal:           "Signal",
         current_exposure: float,
-        open_positions:   dict[str, int] | None = None,
         positions:        object | None = None,
     ) -> float:
         """Return the minimum positive size across all sub-models.
@@ -64,7 +61,6 @@ class RiskPipeline(BaseRiskModel):
         """
         sizes = [
             model.compute_size(signal, current_exposure,
-                               open_positions=open_positions,
                                positions=positions)
             for model in self._models
         ]

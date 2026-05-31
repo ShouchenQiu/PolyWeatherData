@@ -413,11 +413,11 @@ def test_tick_yes_and_no_tokens_both_submitted(db) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fix 1 -- real exposure and open_positions forwarded to RiskPipeline
+# Fix 1 -- real exposure forwarded to RiskPipeline
 # ---------------------------------------------------------------------------
 
-def test_tick_passes_real_exposure_and_positions_to_risk(db) -> None:
-    """approve_signal receives live total_exposure and open_positions from PositionTracker."""
+def test_tick_passes_real_exposure_to_risk(db) -> None:
+    """approve_signal receives live gross_open_notional_usd from PositionTracker."""
     prob_store = ProbabilityStore()
     station_id = next(iter(STATIONS))
     now        = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
@@ -466,11 +466,9 @@ def test_tick_passes_real_exposure_and_positions_to_risk(db) -> None:
 
     approve_kw = mock_risk.approve_signal.call_args.kwargs
     assert approve_kw["current_exposure"] == pytest.approx(50.0)
-    assert approve_kw["open_positions"] == {"tok-exp": 1}
 
     size_kw = mock_risk.compute_size.call_args.kwargs
     assert size_kw["current_exposure"] == pytest.approx(50.0)
-    assert size_kw["open_positions"] == {"tok-exp": 1}
 
 
 # ---------------------------------------------------------------------------

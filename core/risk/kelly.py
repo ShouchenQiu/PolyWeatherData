@@ -20,7 +20,6 @@ class KellyCriterion(BaseRiskModel):
         self,
         signal:           "Signal",
         current_exposure: float,
-        open_positions:   dict[str, int] | None = None,
     ) -> bool:
         raise NotImplementedError("KellyCriterion is not yet implemented.")
 
@@ -28,7 +27,6 @@ class KellyCriterion(BaseRiskModel):
         self,
         signal:           "Signal",
         current_exposure: float,
-        open_positions:   dict[str, int] | None = None,
         positions:        object | None = None,
     ) -> float:
         raise NotImplementedError("KellyCriterion is not yet implemented.")

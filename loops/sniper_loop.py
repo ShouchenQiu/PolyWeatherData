@@ -193,7 +193,7 @@ class SniperLoop:
             if not bucket_tokens:
                 continue
 
-            exposure = self.positions.total_exposure()
+            exposure = self.positions.gross_open_notional_usd()
 
             for (lo_f, hi_f), tokens in bucket_tokens.items():
                 is_true_bucket = lo_f <= actual_temp_f < hi_f
