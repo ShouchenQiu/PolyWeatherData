@@ -288,6 +288,113 @@ def test_migration_upgrades_v1_db_to_v2(tmp_dir) -> None:
     cur = db._conn.execute("PRAGMA table_info(markets)")
     cols = {row["name"] for row in cur.fetchall()}
     assert "discovery_status" in cols
+    # Verify migrated DB enforces CHECK constraints (not just column presence)
+    db._conn.execute("PRAGMA foreign_keys=OFF")
+    with pytest.raises(_sqlite3.IntegrityError):
+        db._conn.execute(
+            "INSERT INTO orders (order_id, is_paper) VALUES ('bad-ord', 2)"
+        )
+    db._conn.rollback()
+    with pytest.raises(_sqlite3.IntegrityError):
+        db._conn.execute(
+            "INSERT INTO markets (token_id, discovery_status) VALUES ('bad-tok', 'invalid_status')"
+        )
+    db._conn.rollback()
+    db._conn.execute("PRAGMA foreign_keys=ON")
+
+
+# ---------------------------------------------------------------------------
+# Representative inserts -- paper/live orders, signal decision row,
+# discovery_status variants (V2F01 acceptance criterion)
+# ---------------------------------------------------------------------------
+
+
+def test_orders_representative_live_and_paper_inserts() -> None:
+    db = DbClient(":memory:")
+    _seed(db)
+    now = "2026-05-31T12:00:00Z"
+    # Live order: is_paper=0, BUY fills with positive signed_shares and negative cash flow
+    db._conn.execute(
+        "INSERT INTO orders"
+        " (order_id, token_id, condition_id, side, size_usd, price,"
+        "  is_paper, executable_price, filled_shares, signed_shares, cash_flow_usd,"
+        "  status, created_at)"
+        " VALUES ('live-001', 'tok-001', 'cid-001', 'BUY', 50.0, 0.55,"
+        "  0, 0.553, 90.0, 90.0, -49.77, 'filled', ?)",
+        (now,),
+    )
+    # Paper order: is_paper=1, SELL fills with negative signed_shares, positive cash flow
+    db._conn.execute(
+        "INSERT INTO orders"
+        " (order_id, token_id, condition_id, side, size_usd, price,"
+        "  is_paper, executable_price, filled_shares, signed_shares, cash_flow_usd,"
+        "  status, created_at)"
+        " VALUES ('paper-001', 'tok-001', 'cid-001', 'SELL', 50.0, 0.62,"
+        "  1, 0.618, 80.0, -80.0, 49.44, 'filled', ?)",
+        (now,),
+    )
+    db._conn.commit()
+    rows = {
+        r["order_id"]: r
+        for r in db._conn.execute("SELECT * FROM orders").fetchall()
+    }
+    assert rows["live-001"]["is_paper"] == 0
+    assert rows["live-001"]["signed_shares"] == pytest.approx(90.0)
+    assert rows["live-001"]["cash_flow_usd"] == pytest.approx(-49.77)
+    assert rows["paper-001"]["is_paper"] == 1
+    assert rows["paper-001"]["signed_shares"] == pytest.approx(-80.0)
+    assert rows["paper-001"]["cash_flow_usd"] == pytest.approx(49.44)
+
+
+def test_signals_representative_decision_row() -> None:
+    db = DbClient(":memory:")
+    _seed(db)
+    db.upsert_market("tok-001-no", "cid-001", "will-the-high-lga-no", 88.0, 92.0, "No")
+    now = "2026-05-31T12:00:00Z"
+    db._conn.execute(
+        "INSERT INTO signals"
+        " (signal_id, yes_token_id, no_token_id, direction,"
+        "  mc_prob, reference_price, edge,"
+        "  final_token_id, final_side, executable_price,"
+        "  tick_utc, approved, computed_size)"
+        " VALUES ('sig-001', 'tok-001', 'tok-001-no', 'YES_CHEAP',"
+        "  0.72, 0.65, 0.07,"
+        "  'tok-001', 'BUY', 0.652,"
+        "  ?, 1, 45.0)",
+        (now,),
+    )
+    db._conn.commit()
+    row = db._conn.execute("SELECT * FROM signals WHERE signal_id='sig-001'").fetchone()
+    assert row["direction"] == "YES_CHEAP"
+    assert row["mc_prob"] == pytest.approx(0.72)
+    assert row["approved"] == 1
+    assert row["reject_reason"] is None
+    assert row["order_id"] is None
+
+
+def test_markets_discovery_status_valid_non_parsed_values() -> None:
+    db = DbClient(":memory:")
+    _seed(db)
+    db._conn.execute(
+        "INSERT INTO markets"
+        " (token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome, discovery_status)"
+        " VALUES ('tok-unrecog', 'cid-001', 'some-slug', NULL, NULL, NULL, 'unrecognized_slug')"
+    )
+    db._conn.execute(
+        "INSERT INTO markets"
+        " (token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome, discovery_status)"
+        " VALUES ('tok-invalid', 'cid-001', 'other-slug', NULL, NULL, NULL, 'invalid_market')"
+    )
+    db._conn.commit()
+    statuses = {
+        r["token_id"]: r["discovery_status"]
+        for r in db._conn.execute(
+            "SELECT token_id, discovery_status FROM markets WHERE token_id IN"
+            " ('tok-unrecog', 'tok-invalid')"
+        ).fetchall()
+    }
+    assert statuses["tok-unrecog"] == "unrecognized_slug"
+    assert statuses["tok-invalid"] == "invalid_market"
 
 
 def test_orders_status_default_pending() -> None:

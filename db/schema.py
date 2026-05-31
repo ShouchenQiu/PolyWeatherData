@@ -137,12 +137,17 @@ class DbClient:
     def _migrate_v2_schema(self) -> None:
         """Apply additive V2 schema changes to existing databases.
 
-        Uses try/except on OperationalError so migrations are idempotent --
-        "duplicate column name" is silently swallowed; other errors propagate.
-        For the signals table, a full DROP + recreate is safe because signals
-        are observability data, not trading state.
+        Idempotent: safe to run on fresh V2 databases (all paths are no-ops).
+
+        ALTER TABLE ADD COLUMN does not carry CHECK constraints on SQLite < 3.37,
+        so after adding any missing columns we follow up with a full table recreation
+        for orders and markets when the expected CHECK is absent from the DDL.
+        For the signals table a full DROP + recreate is safe (observability data only).
         """
-        additive_migrations = [
+        # ------------------------------------------------------------------
+        # Step 1: Add missing columns (idempotent; swallow duplicate-column errors)
+        # ------------------------------------------------------------------
+        _additive = [
             "ALTER TABLE orders ADD COLUMN is_paper         INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE orders ADD COLUMN executable_price REAL",
             "ALTER TABLE orders ADD COLUMN filled_shares    REAL",
@@ -150,16 +155,85 @@ class DbClient:
             "ALTER TABLE orders ADD COLUMN cash_flow_usd    REAL",
             "ALTER TABLE markets ADD COLUMN discovery_status TEXT NOT NULL DEFAULT 'parsed'",
         ]
-        for stmt in additive_migrations:
+        for stmt in _additive:
             try:
                 self._conn.execute(stmt)
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc):
                     raise
-        # Replace V1 signals table with V2 shape if it still has the old schema.
+
+        # ------------------------------------------------------------------
+        # Step 2: Enforce CHECK constraints via full table recreation when absent.
+        # Detection: inspect sqlite_master for the CHECK clause text.
+        # ------------------------------------------------------------------
+        def _ddl(table: str) -> str:
+            row = self._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            return row["sql"] if row else ""
+
+        if "CHECK (is_paper IN (0, 1))" not in _ddl("orders"):
+            self._conn.executescript(
+                """
+                CREATE TABLE orders_v2 (
+                    order_id         TEXT PRIMARY KEY,
+                    token_id         TEXT REFERENCES markets(token_id),
+                    condition_id     TEXT REFERENCES events(condition_id),
+                    side             TEXT,
+                    size_usd         REAL,
+                    price            REAL,
+                    fill_price       REAL,
+                    status           TEXT DEFAULT 'pending',
+                    created_at       TEXT,
+                    filled_at        TEXT,
+                    closed_at        TEXT,
+                    cancelled_at     TEXT,
+                    settled_payout   REAL,
+                    is_paper         INTEGER NOT NULL DEFAULT 0 CHECK (is_paper IN (0, 1)),
+                    executable_price REAL,
+                    filled_shares    REAL,
+                    signed_shares    REAL,
+                    cash_flow_usd    REAL
+                );
+                INSERT INTO orders_v2 SELECT
+                    order_id, token_id, condition_id, side, size_usd, price, fill_price,
+                    status, created_at, filled_at, closed_at, cancelled_at, settled_payout,
+                    COALESCE(is_paper, 0), executable_price, filled_shares,
+                    signed_shares, cash_flow_usd
+                FROM orders;
+                DROP TABLE orders;
+                ALTER TABLE orders_v2 RENAME TO orders;
+                """
+            )
+
+        if "CHECK (discovery_status IN (" not in _ddl("markets"):
+            self._conn.executescript(
+                """
+                CREATE TABLE markets_v2 (
+                    token_id          TEXT PRIMARY KEY,
+                    condition_id      TEXT REFERENCES events(condition_id),
+                    market_slug       TEXT,
+                    bucket_lo_f       REAL,
+                    bucket_hi_f       REAL,
+                    outcome           TEXT,
+                    discovery_status  TEXT NOT NULL DEFAULT 'parsed'
+                                      CHECK (discovery_status IN ('parsed', 'unrecognized_slug', 'invalid_market'))
+                );
+                INSERT INTO markets_v2 SELECT
+                    token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome,
+                    COALESCE(discovery_status, 'parsed')
+                FROM markets;
+                DROP TABLE markets;
+                ALTER TABLE markets_v2 RENAME TO markets;
+                """
+            )
+
+        # ------------------------------------------------------------------
+        # Step 3: Replace V1 signals (integer PK / old columns) with V2 shape.
+        # ------------------------------------------------------------------
         cur = self._conn.execute("PRAGMA table_info(signals)")
-        existing_cols = {row["name"] for row in cur.fetchall()}
-        if "tick_utc" not in existing_cols:
+        if "tick_utc" not in {row["name"] for row in cur.fetchall()}:
             self._conn.executescript(
                 """
                 DROP TABLE IF EXISTS signals;
