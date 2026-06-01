@@ -628,3 +628,191 @@ def test_forecast_loop_tick_passes_target_date_to_pipeline(db, station):
 
     _, kwargs = pipeline.run.call_args
     assert kwargs.get("target_date") == "2026-03-25"
+
+
+# -----------------------------------------------------------------------
+# V2V07: station_config derived from event station_id
+# -----------------------------------------------------------------------
+
+def test_forecast_loop_tick_derives_station_from_event(db):
+    """tick() calls pipeline.run with the station looked up from event station_id,
+    not the self.station fallback.
+    """
+    from config.stations import STATIONS
+    import types
+
+    # Pass a dummy station object (not a StationConfig) as self.station
+    dummy_station = types.SimpleNamespace(station_id="DUMMY")
+    _seed_event_and_market(db)
+
+    pipeline = MagicMock()
+    pipeline.run.return_value = {"probs": {(60.0, 70.0): 0.80}, "quantiles": {}}
+    loop = ForecastLoop(
+        pipeline     = pipeline,
+        prob_store   = ProbabilityStore(),
+        db           = db,
+        station      = dummy_station,
+        data_manager = None,
+    )
+
+    asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
+
+    args, _ = pipeline.run.call_args
+    # First positional arg is the station_config; must be the KLGA StationConfig
+    assert args[0] is STATIONS["KLGA"]
+
+
+def test_forecast_loop_tick_skips_event_with_unknown_station_id(db, station):
+    """tick() skips events whose station_id is not in STATIONS, with a warning."""
+    # Upsert a station "ZZZZ" that isn't in the STATIONS registry
+    db.upsert_station("ZZZZ", 0.0, 0.0, "America/Chicago")
+    db.upsert_event("bad_cid", "q", "slug", "2026-03-25", "ZZZZ", status="active")
+    db.upsert_market("bad_tok", "bad_cid", "slug-60-70", 60.0, 70.0, "YES")
+
+    pipeline = MagicMock()
+    loop = ForecastLoop(
+        pipeline     = pipeline,
+        prob_store   = ProbabilityStore(),
+        db           = db,
+        station      = station,
+        data_manager = None,
+    )
+
+    written = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
+
+    pipeline.run.assert_not_called()
+    assert written == []
+
+
+# -----------------------------------------------------------------------
+# V2V07: null bucket filtering
+# -----------------------------------------------------------------------
+
+def test_forecast_loop_tick_filters_null_bucket_bounds(db, station):
+    """tick() skips buckets with None lo or hi and passes only valid buckets to pipeline."""
+    station_id = next(iter(STATIONS))
+    db.upsert_event("cid-nb", "q", "slug", "2026-03-25", station_id, status="active")
+    db._conn.execute(
+        "INSERT INTO markets (token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        ("tok-valid", "cid-nb", "slug-60-70", 60.0, 70.0, "YES"),
+    )
+    db._conn.execute(
+        "INSERT INTO markets (token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        ("tok-null", "cid-nb", "slug-null", None, 70.0, "YES"),
+    )
+    db._conn.commit()
+
+    pipeline = MagicMock()
+    pipeline.run.return_value = {"probs": {(60.0, 70.0): 0.55}, "quantiles": {}}
+    loop = ForecastLoop(
+        pipeline     = pipeline,
+        prob_store   = ProbabilityStore(),
+        db           = db,
+        station      = station,
+        data_manager = None,
+    )
+
+    written = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
+
+    assert written == ["cid-nb"]
+    args, _ = pipeline.run.call_args
+    buckets_passed = args[2]
+    assert (60.0, 70.0) in buckets_passed
+    assert all(lo is not None and hi is not None for lo, hi in buckets_passed)
+
+
+def test_forecast_loop_tick_all_null_buckets_skips_event(db, station):
+    """tick() skips pipeline call entirely when all YES buckets have null bounds."""
+    station_id = next(iter(STATIONS))
+    db.upsert_event("cid-allnull", "q", "slug", "2026-03-25", station_id, status="active")
+    db._conn.execute(
+        "INSERT INTO markets (token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        ("tok-null2", "cid-allnull", "slug-null2", None, None, "YES"),
+    )
+    db._conn.commit()
+
+    pipeline = MagicMock()
+    loop = ForecastLoop(
+        pipeline     = pipeline,
+        prob_store   = ProbabilityStore(),
+        db           = db,
+        station      = station,
+        data_manager = None,
+    )
+
+    written = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
+
+    pipeline.run.assert_not_called()
+    assert written == []
+
+
+# -----------------------------------------------------------------------
+# V2V07: empty probs guard
+# -----------------------------------------------------------------------
+
+def test_forecast_loop_tick_skips_write_when_probs_empty(db, station):
+    """tick() does not write to ProbabilityStore when pipeline returns empty probs."""
+    from unittest.mock import AsyncMock
+
+    _seed_event_and_market(db)
+
+    pipeline = MagicMock()
+    pipeline.run.return_value = {"probs": {}, "quantiles": {}}
+
+    prob_store = MagicMock()
+    prob_store.write = AsyncMock()
+    loop = ForecastLoop(
+        pipeline     = pipeline,
+        prob_store   = prob_store,
+        db           = db,
+        station      = station,
+        data_manager = None,
+    )
+
+    written = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
+
+    prob_store.write.assert_not_called()
+    assert written == []
+
+
+# -----------------------------------------------------------------------
+# V2V07: run() outer exception guard
+# -----------------------------------------------------------------------
+
+def test_forecast_loop_run_survives_tick_exception(db, station):
+    """run() catches unhandled exceptions from tick(), logs, and continues to sleep."""
+    from unittest.mock import patch
+
+    slept_for: list[float] = []
+    tick_calls: list[int] = []
+
+    async def _exploding_tick(*args, **kwargs):
+        tick_calls.append(1)
+        raise RuntimeError("DB connection lost")
+
+    async def _spy_sleep(secs: float) -> None:
+        slept_for.append(secs)
+        raise asyncio.CancelledError
+
+    pipeline = MagicMock()
+    pipeline.run.return_value = {"probs": {}, "quantiles": {}}
+    loop = ForecastLoop(
+        pipeline   = pipeline,
+        prob_store = ProbabilityStore(),
+        db         = db,
+        station    = station,
+    )
+    loop.tick = _exploding_tick
+
+    with patch("asyncio.sleep", new=_spy_sleep):
+        try:
+            asyncio.run(loop.run())
+        except (asyncio.CancelledError, SystemExit):
+            pass
+
+    # tick was called; loop survived the exception and reached sleep
+    assert len(tick_calls) == 1
+    assert len(slept_for) == 1

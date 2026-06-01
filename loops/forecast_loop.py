@@ -19,6 +19,7 @@ import pandas as pd
 from loguru import logger
 
 from core.probability_store import ProbabilitySnapshot, ProbabilityStore
+from config.stations import STATIONS
 from model.tft import MAX_ENCODER_LENGTH
 
 if TYPE_CHECKING:
@@ -96,6 +97,16 @@ class ForecastLoop:
         for event in forecast_events:
             condition_id = event["condition_id"]
 
+            # Derive station_config from event station_id
+            station_id = event.get("station_id")
+            station_config = STATIONS.get(station_id) if station_id else None
+            if station_config is None:
+                logger.warning(
+                    "ForecastLoop: event {} has unknown station_id {!r}, skipping",
+                    condition_id, station_id,
+                )
+                continue
+
             # day_offset: days from init_utc.date() to event_end_date
             try:
                 day_offset = (
@@ -111,18 +122,32 @@ class ForecastLoop:
             markets = self.db.get_markets_for_event(condition_id)
             if not markets:
                 continue
-            buckets = [
-                (m["bucket_lo_f"], m["bucket_hi_f"])
-                for m in markets
-                if str(m["outcome"]).upper() == "YES"
-            ]
+
+            # Build bucket list; filter null bounds defensively (DB already
+            # excludes nulls via get_markets_for_event, but guard here too).
+            raw_buckets: list[tuple[float, float]] = []
+            null_count = 0
+            for m in markets:
+                if str(m["outcome"]).upper() != "YES":
+                    continue
+                lo, hi = m["bucket_lo_f"], m["bucket_hi_f"]
+                if lo is None or hi is None:
+                    null_count += 1
+                else:
+                    raw_buckets.append((lo, hi))
+            if null_count:
+                logger.warning(
+                    "ForecastLoop: event {} skipped {} bucket(s) with null bounds",
+                    condition_id, null_count,
+                )
+            buckets = raw_buckets
             if not buckets:
                 continue
 
             # --- V2V04: inference readiness gate ---
             if self.data_manager is not None:
                 status = self.data_manager.inference_readiness(
-                    self.station, init_utc, encoder_hours=MAX_ENCODER_LENGTH
+                    station_config, init_utc, encoder_hours=MAX_ENCODER_LENGTH
                 )
                 if not status.ready:
                     logger.info(
@@ -134,7 +159,7 @@ class ForecastLoop:
 
             try:
                 result = self.pipeline.run(
-                    self.station, init_utc, buckets,
+                    station_config, init_utc, buckets,
                     target_date=event["event_end_date"],
                 )
             except Exception:
@@ -146,6 +171,13 @@ class ForecastLoop:
                 "Event {} p50_high_f={:.1f}",
                 condition_id, result.get("p50_high_f", float("nan")),
             )
+
+            if not probs:
+                logger.warning(
+                    "ForecastLoop: event {} returned empty prob map, skipping write",
+                    condition_id,
+                )
+                continue
 
             last_tick = result.get("last_tick_utc") or datetime.now(timezone.utc)
             snapshot = ProbabilitySnapshot(
@@ -180,7 +212,10 @@ class ForecastLoop:
         full UTC hour so subsequent ticks land within +-5 s of the hour boundary.
         """
         while True:
-            await self.tick()
+            try:
+                await self.tick()
+            except Exception:
+                logger.exception("ForecastLoop.run: unhandled exception in tick, continuing")
             now       = datetime.now(timezone.utc)
             next_hour = (now + timedelta(hours=1)).replace(
                 minute=0, second=0, microsecond=0
