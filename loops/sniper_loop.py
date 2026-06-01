@@ -213,24 +213,40 @@ class SniperLoop:
                     )
                     continue
 
-                # Price via compute_quote; orderbook is required for
-                # execution.  Fall back to 0.95 when not wired.
+                # SniperLoop requires a live orderbook; skip when not
+                # wired (no 0.95 fallback).
                 if self.orderbook is None:
-                    price = 0.95
-                else:
-                    try:
-                        book  = self.orderbook.get_book(token_id)
-                        quote = compute_quote(book, "BUY", self._quote_size_usd)
-                        price = quote.vwap_price if quote.complete_fill else 0.95
-                    except Exception:
-                        price = 0.95
+                    logger.warning(
+                        "SniperLoop: no orderbook wired; skipping token {}",
+                        token_id,
+                    )
+                    continue
+
+                # 1. Trial quote at the proxy size to build an OrderIntent
+                #    for risk approval + sizing.
+                try:
+                    book  = self.orderbook.get_book(token_id)
+                    trial = compute_quote(book, "BUY", self._quote_size_usd)
+                except Exception:
+                    logger.exception(
+                        "SniperLoop: compute_quote failed for token {}; skipping",
+                        token_id,
+                    )
+                    continue
+                if not trial.complete_fill:
+                    logger.info(
+                        "SniperLoop: insufficient depth for token {} at "
+                        "quote_size_usd={}; skipping",
+                        token_id, self._quote_size_usd,
+                    )
+                    continue
 
                 sig = OrderIntent(
                     token_id         = token_id,
                     side             = "BUY",
                     size_usd         = None,
-                    executable_price = price,
-                    edge             = 1.0 - price,
+                    executable_price = trial.vwap_price,
+                    edge             = 1.0 - trial.vwap_price,
                     bucket_lo_f      = lo_f,
                     bucket_hi_f      = hi_f,
                     condition_id     = condition_id,
@@ -243,6 +259,25 @@ class SniperLoop:
                 )
                 if size <= 0:
                     continue
+
+                # 2. Re-quote with the actual risk-resolved size.
+                try:
+                    sized = compute_quote(book, "BUY", size)
+                except Exception:
+                    logger.exception(
+                        "SniperLoop: re-quote failed for token {}; skipping",
+                        token_id,
+                    )
+                    continue
+                if not sized.complete_fill:
+                    logger.info(
+                        "SniperLoop: insufficient depth for token {} at "
+                        "actual size={:.2f}; skipping",
+                        token_id, size,
+                    )
+                    continue
+
+                price = sized.vwap_price
 
                 logger.info(
                     "SniperLoop: placing BUY {} token {} @ {:.3f} size={:.2f}",

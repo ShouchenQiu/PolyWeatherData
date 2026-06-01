@@ -216,13 +216,20 @@ def test_handle_observation_skips_invalid_bucket(db, tracker):
 class TestV2V11SniperQuotePricing:
     """SniperLoop prices via compute_quote instead of best_ask/mid fallback."""
 
-    def test_uses_compute_quote_for_pricing(self, db, tracker):
-        """Price comes from compute_quote VWAP, not best_ask."""
+    def test_multi_level_vwap_not_best_ask(self, db, tracker):
+        """Two ask levels ensure VWAP differs from best_ask.
+
+        $20 BUY: first 5 shares @ 0.80 = $4, remaining $16 @ 0.90
+        VWAP = 20 / (5 + 17.778) = 20 / 22.778 = 0.8780...
+        This is not equal to best_ask=0.80.
+        """
         loop = _make_loop(db, tracker)
-        # Book: ask at 0.80, bid at 0.78 with plenty of depth
         loop.orderbook.get_book.return_value = {
             "bids": [{"price": 0.78, "size": 1000.0}],
-            "asks": [{"price": 0.80, "size": 1000.0}],
+            "asks": [
+                {"price": 0.80, "size": 5.0},
+                {"price": 0.90, "size": 1000.0},
+            ],
         }
         metar = "KLGA 251951Z 20/14"  # 68F -> 60-70F bucket
 
@@ -230,8 +237,10 @@ class TestV2V11SniperQuotePricing:
 
         rows = db.query("SELECT price FROM orders WHERE status='filled'")
         assert rows
-        # BUY VWAP from asks at 0.80 = 0.80
-        assert rows[0]["price"] == pytest.approx(0.80)
+        # VWAP should be between 0.80 and 0.90, not equal to best_ask
+        price = rows[0]["price"]
+        assert 0.85 < price < 0.90
+        assert price != pytest.approx(0.80)
 
 
 class TestV2V11SniperOrderRecording:
@@ -315,16 +324,67 @@ class TestV2V11SniperEventQuery:
         assert "positions" in kwargs
         assert kwargs["positions"] is tracker
 
-def test_handle_observation_orderbook_none_uses_fallback_price(db, tracker):
-    """Missing orderbook uses explicit 0.95 price fallback."""
+
+class TestV2V11SniperDepthGate:
+    """SniperLoop skips when L2 depth is insufficient."""
+
+    def test_trial_quote_incomplete_fill_skips(self, db, tracker):
+        """When trial quote at quote_size_usd has insufficient depth, skip."""
+        loop = _make_loop(db, tracker)
+        loop.orderbook.get_book.return_value = {
+            "bids": [{"price": 0.78, "size": 0.1}],
+            "asks": [{"price": 0.80, "size": 0.1}],
+        }
+        metar = "KLGA 251951Z 20/14"
+
+        asyncio.run(loop._handle_observation(metar, "NOAA", None))
+
+        rows = db.query("SELECT order_id FROM orders")
+        assert len(rows) == 0
+
+    def test_requote_incomplete_fill_skips(self, db, tracker):
+        """When re-quote at actual size has insufficient depth, skip.
+
+        Trial passes at quote_size_usd=20 but actual risk-computed size
+        is larger and fails the re-quote depth check.
+        """
+        risk_mock = MagicMock()
+        risk_mock.approve_signal.return_value = True
+        risk_mock.compute_size.return_value = 500.0  # far exceeds depth
+        loop = _make_loop(db, tracker)
+        loop.risk = risk_mock
+        # 100 shares @ 0.80 = $80 max fillable, far below 500
+        loop.orderbook.get_book.return_value = {
+            "bids": [{"price": 0.78, "size": 100.0}],
+            "asks": [{"price": 0.80, "size": 100.0}],
+        }
+        metar = "KLGA 251951Z 20/14"
+
+        asyncio.run(loop._handle_observation(metar, "NOAA", None))
+
+        rows = db.query("SELECT order_id FROM orders")
+        assert len(rows) == 0
+
+    def test_compute_quote_exception_skips(self, db, tracker):
+        """When compute_quote raises, skip the token (no fallback)."""
+        loop = _make_loop(db, tracker)
+        loop.orderbook.get_book.side_effect = RuntimeError("network down")
+        metar = "KLGA 251951Z 20/14"
+
+        asyncio.run(loop._handle_observation(metar, "NOAA", None))
+
+        rows = db.query("SELECT order_id FROM orders")
+        assert len(rows) == 0
+
+def test_handle_observation_orderbook_none_skips_without_order(db, tracker):
+    """Missing orderbook must skip entirely -- no 0.95 fallback."""
     loop = _make_loop(db, tracker)
     loop.orderbook = None
 
     asyncio.run(loop._handle_observation("KLGA 251951Z 20/14", "NOAA", None))
 
-    rows = db.query("SELECT price FROM orders WHERE status='filled'")
-    assert rows
-    assert rows[0]["price"] == pytest.approx(0.95)
+    rows = db.query("SELECT order_id FROM orders")
+    assert len(rows) == 0
 
 
 def test_handle_observation_empty_order_id_not_recorded(db, tracker):

@@ -631,16 +631,17 @@
 - ADD `redeem_loop_interval_s: int = 3600` (#73)
 
 ### loops/sniper_loop.py
-- FIX `approve_signal` call: add `open_positions` dict parameter to match V2
-  `BaseRiskModel.approve_signal` signature; read `open_positions_by_token()` from
-  `PositionTracker` once per event loop iteration (same pattern as TradingLoop)
-- FIX `compute_size` call: add `open_positions` parameter to match V2 signature
-- FIX `best_ask` read: replace `book.get("best_ask") or book.get("mid_price")`
-  with `compute_quote(book, side="BUY", size_usd=size).vwap_price` from
-  `core/pricing/quote.py`; SniperLoop is exempt from staleness gate (it fires
-  on real observed temperature, which supersedes forecast staleness)
-- FIX `record_order()` call: add `is_paper=(settings.trading_mode == "paper")`
-  and `executable_price=quote.vwap_price` keyword arguments to match V2
-  `PositionTracker.record_order()` signature (#11)
-- REMOVE `get_active_events` fallback: always use `get_tradeable_events`; raise
+- IMPLEMENTED (V2V11): `approve_signal` and `compute_size` calls use
+  `positions=self.positions` (PositionTracker) matching the V2F05 BaseRiskModel
+  contract; SELL sizing reads `positions.position_shares()` internally
+- IMPLEMENTED (V2V11): `compute_size` call passes `positions` keyword argument
+- IMPLEMENTED (V2V11): price computed via
+  `compute_quote(book, side="BUY", size_usd=size).vwap_price` with a two-pass
+  flow: trial quote at `quote_size_usd` for risk approval, then re-quote at
+  the actual risk-resolved size for the final executable price; incomplete
+  fill on either pass skips the order (no 0.95 fallback)
+- IMPLEMENTED (V2V11): `record_order()` passes `is_paper` and
+  `executable_price` keyword arguments
+- IMPLEMENTED (V2V11): `get_active_events` fallback removed; always calls
+  `get_tradeable_events`; missing method raises `AttributeError`
   `AttributeError` loudly if `db` does not have the method
