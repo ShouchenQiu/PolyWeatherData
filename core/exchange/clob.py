@@ -48,12 +48,6 @@ class ClobExchange(BaseExchange):
         exchange-assigned order ID, or an empty string on rejection.
         """
         try:
-            # NOTE(V2V09): Confirm whether SecureClient.place_limit_order()
-            # expects `size` in shares or in notional USDC.  If the SDK
-            # interprets `size` as shares, the caller must convert:
-            #   shares = size_usd / price
-            # before passing.  As of V2F02 we pass `size_usd` directly; fix
-            # belongs in V2V09 once SDK contract is verified.
             resp = self._client.place_limit_order(
                 token_id=token_id,
                 price=price,

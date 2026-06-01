@@ -9,126 +9,158 @@ from core.exchange.paper import PaperExchange
 from core.exchange.settlement import ExitSettler
 
 
+def _l2_book(ask: float, ask_size: float = 1000.0,
+             bid: float | None = None, bid_size: float = 1000.0) -> dict:
+    if bid is None:
+        bid = max(0.01, ask - 0.02)
+    return {
+        "bids": [{"price": bid, "size": bid_size}],
+        "asks": [{"price": ask, "size": ask_size}],
+    }
+
+
+class _FakeFetcher:
+    def __init__(self, book: dict) -> None:
+        self._book = book
+
+    def get_book(self, token_id: str) -> dict:
+        return self._book
+
+
 # -----------------------------------------------------------------------
-# PaperExchange.place_order
+# PaperExchange -- no fetcher
 # -----------------------------------------------------------------------
 
-def test_paper_place_order_returns_string():
-    exch = PaperExchange()
-    oid  = exch.place_order("tok1", "BUY", 20.0, 0.50)
-    assert isinstance(oid, str)
-    assert len(oid) > 0
-
-
-def test_paper_place_order_status_filled():
-    exch = PaperExchange()
-    oid  = exch.place_order("tok1", "BUY", 20.0, 0.50)
-    order = exch.get_order(oid)
-    assert order is not None
-    assert order["status"] == "filled"
-
-
-def test_paper_place_order_uses_submitted_price_when_no_fetcher():
+def test_paper_no_fetcher_returns_empty_string():
+    """Without a book_fetcher, place_order always returns empty string."""
     exch = PaperExchange(book_fetcher=None)
-    exch.place_order("tok1", "BUY", 20.0, 0.55)
-    pos = exch.get_positions()
-    assert len(pos) == 1
-    assert abs(pos[0]["avg_price"] - 0.55) < 1e-9
+    oid  = exch.place_order("tok1", "BUY", 20.0, 0.50)
+    assert oid == ""
 
 
-def test_paper_place_order_uses_mid_price_from_fetcher():
-    class FakeFetcher:
-        def get_book(self, token_id):
-            return {"mid_price": 0.48}
-
-    exch = PaperExchange(book_fetcher=FakeFetcher())
-    exch.place_order("tok1", "BUY", 20.0, 0.55)
-    pos = exch.get_positions()
-    assert abs(pos[0]["avg_price"] - 0.48) < 1e-9
-
-
-def test_paper_get_positions_after_buy():
+def test_paper_get_positions_always_empty():
+    """PaperExchange.get_positions() returns [] (state is in PositionTracker)."""
     exch = PaperExchange()
     exch.place_order("tok1", "BUY", 20.0, 0.50)
-    positions = exch.get_positions()
-    assert len(positions) == 1
-    assert positions[0]["token_id"] == "tok1"
-    assert positions[0]["size_usd"] == 20.0
+    assert exch.get_positions() == []
 
 
-def test_paper_sell_reduces_position():
+def test_paper_cancel_always_returns_false():
+    """cancel_order returns False; no in-flight tracking."""
     exch = PaperExchange()
-    exch.place_order("tok1", "BUY",  30.0, 0.50)
-    exch.place_order("tok1", "SELL", 10.0, 0.55)
-    pos = exch.get_positions()
-    assert abs(pos[0]["size_usd"] - 20.0) < 1e-9
+    assert exch.cancel_order("any-id") is False
 
 
-def test_paper_sell_closes_full_position():
-    exch = PaperExchange()
-    exch.place_order("tok1", "BUY",  20.0, 0.50)
-    exch.place_order("tok1", "SELL", 20.0, 0.55)
-    pos = exch.get_positions()
-    assert pos == []
+# -----------------------------------------------------------------------
+# PaperExchange -- BUY fills at asks VWAP
+# -----------------------------------------------------------------------
+
+def test_paper_buy_returns_order_id_on_sufficient_depth():
+    """BUY with sufficient ask depth returns a non-empty order_id."""
+    fetcher = _FakeFetcher(_l2_book(ask=0.50, ask_size=1000.0))
+    exch    = PaperExchange(book_fetcher=fetcher)
+    oid     = exch.place_order("tok1", "BUY", 20.0, 0.50)
+    assert isinstance(oid, str) and len(oid) > 0
 
 
-def test_paper_cancel_order_pending_returns_true():
-    exch = PaperExchange()
-    # We must trick the order into pending status
-    exch._orders["test-id"] = {"status": "pending", "token_id": "tok1",
-                                "size_usd": 10.0, "price": 0.5}
-    assert exch.cancel_order("test-id") is True
-    assert exch._orders["test-id"]["status"] == "cancelled"
+def test_paper_buy_returns_empty_string_on_insufficient_depth():
+    """BUY size_usd exceeds available ask depth -> empty string."""
+    # Only 5 shares at ask=0.50 -> $2.50 available; requesting $20
+    fetcher = _FakeFetcher(_l2_book(ask=0.50, ask_size=5.0))
+    exch    = PaperExchange(book_fetcher=fetcher)
+    oid     = exch.place_order("tok1", "BUY", 20.0, 0.50)
+    assert oid == ""
 
 
-def test_paper_cancel_filled_order_returns_false():
-    exch = PaperExchange()
-    oid  = exch.place_order("tok1", "BUY", 20.0, 0.50)
-    assert exch.cancel_order(oid) is False
+# -----------------------------------------------------------------------
+# PaperExchange -- SELL fills at bids VWAP
+# -----------------------------------------------------------------------
+
+def test_paper_sell_returns_order_id_on_sufficient_depth():
+    """SELL with sufficient bid depth returns a non-empty order_id."""
+    fetcher = _FakeFetcher(_l2_book(ask=0.52, ask_size=1000.0,
+                                    bid=0.48, bid_size=1000.0))
+    exch    = PaperExchange(book_fetcher=fetcher)
+    oid     = exch.place_order("tok1", "SELL", 20.0, 0.48)
+    assert isinstance(oid, str) and len(oid) > 0
 
 
-def test_paper_multiple_tokens_independent():
-    exch = PaperExchange()
-    exch.place_order("tok1", "BUY", 10.0, 0.40)
-    exch.place_order("tok2", "BUY", 20.0, 0.60)
-    pos = {p["token_id"]: p for p in exch.get_positions()}
-    assert abs(pos["tok1"]["size_usd"] - 10.0) < 1e-9
-    assert abs(pos["tok2"]["size_usd"] - 20.0) < 1e-9
+def test_paper_sell_returns_empty_string_on_insufficient_depth():
+    """SELL size_usd exceeds available bid depth -> empty string."""
+    # Only 5 shares at bid=0.48 -> $2.40 available; requesting $20
+    fetcher = _FakeFetcher(_l2_book(ask=0.52, ask_size=1000.0,
+                                    bid=0.48, bid_size=5.0))
+    exch    = PaperExchange(book_fetcher=fetcher)
+    oid     = exch.place_order("tok1", "SELL", 20.0, 0.48)
+    assert oid == ""
+
+
+# -----------------------------------------------------------------------
+# PaperExchange -- multiple orders return distinct ids
+# -----------------------------------------------------------------------
+
+def test_paper_two_orders_return_distinct_ids():
+    """Each successful place_order returns a unique order_id."""
+    fetcher = _FakeFetcher(_l2_book(ask=0.50))
+    exch    = PaperExchange(book_fetcher=fetcher)
+    oid1    = exch.place_order("tok1", "BUY", 10.0, 0.50)
+    oid2    = exch.place_order("tok1", "BUY", 10.0, 0.50)
+    assert oid1 and oid2
+    assert oid1 != oid2
 
 
 # -----------------------------------------------------------------------
 # ExitSettler
 # -----------------------------------------------------------------------
 
-def test_settler_fallback_sells_open_positions():
-    exch = PaperExchange()
-    exch.place_order("tok1", "BUY", 25.0, 0.50)
+class _FakeExchange:
+    """Minimal exchange stub for ExitSettler tests."""
 
+    def __init__(self, positions: list[dict]) -> None:
+        self._positions = list(positions)
+        self.sell_calls: list[tuple] = []
+
+    def get_positions(self) -> list[dict]:
+        return [p for p in self._positions if p.get("size_usd", 0) > 0]
+
+    def place_order(self, token_id, side, size_usd, price) -> str:
+        self.sell_calls.append((token_id, side, size_usd, price))
+        # Simulate closing the position
+        for p in self._positions:
+            if p["token_id"] == token_id:
+                p["size_usd"] = 0.0
+        return "oid-settler"
+
+    def cancel_order(self, order_id: str) -> bool:
+        return False
+
+
+def test_settler_fallback_sells_open_positions():
+    exch = _FakeExchange([{"token_id": "tok1", "size_usd": 25.0}])
     settler = ExitSettler(relayer_client=None)
     result  = settler.settle(
         event    = {"condition_id": "c1", "token_ids": ["tok1"]},
         exchange = exch,
     )
     assert result == "fallback"
-    # After settlement the position should be closed
-    pos = exch.get_positions()
-    assert pos == []
+    assert len(exch.sell_calls) == 1
+    assert exch.sell_calls[0][0] == "tok1"
+    assert exch.sell_calls[0][1] == "SELL"
 
 
 def test_settler_only_closes_relevant_tokens():
-    exch = PaperExchange()
-    exch.place_order("tok1", "BUY", 25.0, 0.50)
-    exch.place_order("tok2", "BUY", 25.0, 0.50)
-
+    exch = _FakeExchange([
+        {"token_id": "tok1", "size_usd": 25.0},
+        {"token_id": "tok2", "size_usd": 25.0},
+    ])
     settler = ExitSettler(relayer_client=None)
     settler.settle(
         event    = {"condition_id": "c1", "token_ids": ["tok1"]},
         exchange = exch,
     )
-    # tok2 should still be open
-    pos = {p["token_id"]: p for p in exch.get_positions()}
-    assert "tok2" in pos
-    assert "tok1" not in pos
+    sold_tokens = [c[0] for c in exch.sell_calls]
+    assert "tok1" in sold_tokens
+    assert "tok2" not in sold_tokens
 
 
 def test_settler_relayer_success_returns_relayer():
@@ -136,10 +168,10 @@ def test_settler_relayer_success_returns_relayer():
         def settle(self, condition_id):
             return True
 
-    exch    = PaperExchange()
+    exch    = _FakeExchange([])
     settler = ExitSettler(relayer_client=FakeRelayer())
     result  = settler.settle(
-        event = {"condition_id": "c1", "token_ids": []},
+        event    = {"condition_id": "c1", "token_ids": []},
         exchange = exch,
     )
     assert result == "relayer"
@@ -150,15 +182,14 @@ def test_settler_relayer_failure_falls_back():
         def settle(self, condition_id):
             raise RuntimeError("network error")
 
-    exch = PaperExchange()
-    exch.place_order("tok1", "BUY", 10.0, 0.50)
+    exch = _FakeExchange([{"token_id": "tok1", "size_usd": 10.0}])
     settler = ExitSettler(relayer_client=BrokenRelayer())
     result  = settler.settle(
         event    = {"condition_id": "c1", "token_ids": ["tok1"]},
         exchange = exch,
     )
     assert result == "fallback"
-    assert exch.get_positions() == []
+    assert len(exch.sell_calls) == 1
 
 
 # -----------------------------------------------------------------------
@@ -226,12 +257,8 @@ def test_paper_exchange_emits_book_fetch_failure_on_fetcher_error():
 
 
 def test_paper_exchange_no_alert_on_success():
-    """Successful get_book() must NOT emit an alert."""
+    """Successful get_book() with sufficient L2 depth must NOT emit an alert."""
     from core.alerts import AlertBus, AlertEvent
-
-    class GoodFetcher:
-        def get_book(self, token_id):
-            return {"mid_price": 0.50}
 
     emitted: list[AlertEvent] = []
 
@@ -240,10 +267,11 @@ def test_paper_exchange_no_alert_on_success():
 
     bus  = AlertBus()
     bus.subscribe(_handler)
-    exch = PaperExchange(book_fetcher=GoodFetcher(), alert_bus=bus)
+    exch = PaperExchange(book_fetcher=_FakeFetcher(_l2_book(ask=0.50)), alert_bus=bus)
 
     async def _run():
-        exch.place_order("tok1", "BUY", 20.0, 0.50)
+        oid = exch.place_order("tok1", "BUY", 20.0, 0.50)
+        assert oid != ""   # depth was sufficient
         await asyncio.sleep(0)
 
     asyncio.run(_run())

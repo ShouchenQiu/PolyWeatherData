@@ -1079,6 +1079,68 @@ def test_tick_signal_order_linkage(db) -> None:
 
 
 # ---------------------------------------------------------------------------
+# V2V09 -- paper exchange integration (is_paper + executable_price persistence)
+# ---------------------------------------------------------------------------
+
+def test_tick_paper_order_recorded_with_is_paper_and_executable_price(db) -> None:
+    """TradingLoop records is_paper=True and executable_price on paper orders."""
+    from core.exchange.paper import PaperExchange
+
+    prob_store = ProbabilityStore()
+    station_id = next(iter(STATIONS))
+    now        = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+
+    db.upsert_event("cid-paper", "q", "slug", "2026-07-04",
+                    station_id, status="active")
+    db.upsert_market("tok-paper", "cid-paper", "sl-paper", 60.0, 70.0, "YES")
+
+    sig = DirectionalSignal(
+        yes_token_id="tok-paper", no_token_id="", direction="bullish",
+        model_prob=0.75, reference_price=0.50, edge=0.25,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-paper")
+    mock_strategy = MagicMock(spec=MultiStrategy)
+    mock_strategy.compute_signals.return_value = [sig]
+    mock_risk = MagicMock(spec=RiskPipeline)
+    mock_risk.approve_signal.return_value = True
+    mock_risk.compute_size.return_value   = 20.0
+
+    mock_orderbook = MagicMock()
+    mock_orderbook.get_book.return_value = _deep_book(0.50)
+    paper_exchange = PaperExchange(book_fetcher=mock_orderbook)
+
+    loop = TradingLoop(
+        prob_store = prob_store,
+        alert_bus  = AlertBus(),
+        settings   = Settings(),
+        strategy   = mock_strategy,
+        risk       = mock_risk,
+        exchange   = paper_exchange,
+        positions  = PositionTracker(db),
+        db         = db,
+        orderbook  = mock_orderbook,
+        is_paper   = True,
+    )
+
+    async def run() -> list[str]:
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-paper", 0, snapshot)
+        return await loop.tick(now=now)
+
+    result = asyncio.run(run())
+    assert len(result) == 1
+
+    row = db._conn.execute(
+        "SELECT is_paper, executable_price FROM orders WHERE order_id=?",
+        (result[0],),
+    ).fetchone()
+    assert row is not None
+    assert row["is_paper"] == 1
+    assert row["executable_price"] is not None and row["executable_price"] > 0
+
+
+# ---------------------------------------------------------------------------
 # Candidate A -- TradingLoop.run() drives tick at interval_s
 # ---------------------------------------------------------------------------
 
