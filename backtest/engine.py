@@ -216,21 +216,23 @@ class BacktestEngine:
 
     def _clob_window(
         self, event_str: str, init_utc: pd.Timestamp
-    ) -> tuple[pd.DataFrame | None, str | None, bool]:
+    ) -> tuple[pd.DataFrame | None, str | None]:
         """Return aggregated CLOB prices in the +-CLOB_WIN_MIN window.
 
-        When the source DataFrame includes ``bids`` / ``asks`` columns (L2
-        mode), each row's book is passed through ``compute_quote()`` and
-        the median VWAP is stored as ``clob_price``.  Otherwise
-        ``mid_price_yes`` is stored as ``legacy_mid_price``.
+        Routes each row independently through L2 or legacy path based on
+        whether the row carries non-empty ``bids`` / ``asks`` columns.
+        L2 rows produce ``clob_price`` (BUY VWAP) and ``bid_vwap`` (SELL
+        VWAP); legacy rows produce only ``legacy_mid_price``.  When a
+        bucket has both L2 and legacy rows in the same window the L2
+        aggregate takes priority.
 
-        Returns ``(aggregated_df, quality, is_l2)`` or ``(None, None,
-        False)`` when no data is in range.
+        Returns ``(aggregated_df, quality)`` or ``(None, None)`` when no
+        data is in range.
 
         Prefers ``is_filled=0`` rows; falls back to all rows.
         """
         if event_str not in self._clob_index:
-            return None, None, False
+            return None, None
         grp = self._clob_index[event_str]
         lo  = init_utc - pd.Timedelta(minutes=_CLOB_WIN_MIN)
         hi  = init_utc + pd.Timedelta(minutes=_CLOB_WIN_MIN)
@@ -238,50 +240,67 @@ class BacktestEngine:
             (grp["timestamp_utc"] >= lo) & (grp["timestamp_utc"] <= hi)
         ]
         if len(win) == 0:
-            return None, None, False
+            return None, None
         real = win[win["is_filled"] == 0]
         src  = real if len(real) > 0 else win
         qual = "real" if len(real) > 0 else "filled"
 
-        # Detect L2: all rows must have non-null, non-empty bids + asks
-        has_l2 = (
-            "bids" in src.columns and "asks" in src.columns
-            and src["bids"].notna().any() and src["asks"].notna().any()
-        )
+        from core.pricing.quote import compute_quote
 
-        if has_l2:
-            from core.pricing.quote import compute_quote
+        # Per-row routing: L2 when non-empty bids+asks exist, else legacy.
+        has_bids_col = "bids" in src.columns
+        has_asks_col = "asks" in src.columns
 
-            def _row_vwap(r: pd.Series) -> float | None:
-                book = {"bids": r["bids"], "asks": r["asks"]}
-                try:
-                    q = compute_quote(book, "BUY", self._quote_size_usd)
-                    return q.vwap_price if q.complete_fill else None
-                except Exception:
-                    return None
+        def _row_prices(r: pd.Series) -> tuple[float | None, float | None, float | None]:
+            """Return (ask_vwap, bid_vwap, legacy_mid) for one CLOB row.
 
-            vwaps = src.apply(_row_vwap, axis=1)
-            src = src.copy()
-            src["_vwap"] = vwaps
-            src = src[src["_vwap"].notna()]
-            if len(src) == 0:
-                return None, None, False
-            agg = src.groupby(
-                ["market_slug", "bucket_lo_f", "bucket_hi_f"], as_index=False
-            ).agg(
-                clob_price       =("_vwap",              "median"),
-                estimated_spread =("estimated_spread",    "median"),
-            )
-            return agg, qual, True
+            L2 rows that fail the depth check are dropped entirely (legacy
+            mid is not a fallback when L2 data exists but is too shallow).
+            Only rows with no L2 data at all use the legacy mid path.
+            """
+            ask = bid = legacy = None
+            attempted_l2 = False
+            if has_bids_col and has_asks_col:
+                bids = r.get("bids")
+                asks = r.get("asks")
+                if isinstance(bids, list) and len(bids) > 0 and isinstance(asks, list) and len(asks) > 0:
+                    attempted_l2 = True
+                    book = {"bids": bids, "asks": asks}
+                    try:
+                        q_ask = compute_quote(book, "BUY", self._quote_size_usd)
+                        q_bid = compute_quote(book, "SELL", self._quote_size_usd)
+                        if q_ask.complete_fill and q_bid.complete_fill:
+                            ask = q_ask.vwap_price
+                            bid = q_bid.vwap_price
+                    except Exception:
+                        pass
+            if not attempted_l2:
+                legacy = float(r["mid_price_yes"]) if "mid_price_yes" in r.index and pd.notna(r.get("mid_price_yes")) else None
+            return ask, bid, legacy
 
-        # Legacy path: mid_price_yes only
+        src = src.copy()
+        prices = src.apply(_row_prices, axis=1, result_type="expand")
+        src["_ask_vwap"]   = prices[0]
+        src["_bid_vwap"]   = prices[1]
+        src["_legacy_mid"] = prices[2]
+
+        # Keep rows that produced at least one usable price
+        has_price = src["_ask_vwap"].notna() | src["_legacy_mid"].notna()
+        src = src[has_price]
+        if len(src) == 0:
+            return None, None
+
+        # Group by bucket: median naturally skips NaN, giving L2 priority
+        # when both L2 and legacy rows exist for the same bucket.
         agg = src.groupby(
             ["market_slug", "bucket_lo_f", "bucket_hi_f"], as_index=False
         ).agg(
-            legacy_mid_price =("mid_price_yes",      "median"),
-            estimated_spread =("estimated_spread",    "median"),
+            clob_price       =("_ask_vwap",       "median"),
+            bid_vwap         =("_bid_vwap",       "median"),
+            legacy_mid_price =("_legacy_mid",     "median"),
+            estimated_spread =("estimated_spread", "median"),
         )
-        return agg, qual, False
+        return agg, qual
 
     def _process_init(
         self,
@@ -332,7 +351,7 @@ class BacktestEngine:
             fxx_in_target = [i + 1 for i, m in enumerate(mask) if m]
 
             # Collect bucket list from CLOB window
-            agg, qual, is_l2 = self._clob_window(target_str, init_utc)
+            agg, qual = self._clob_window(target_str, init_utc)
             if agg is None:
                 continue
 
@@ -359,13 +378,20 @@ class BacktestEngine:
                 hi = float(br["bucket_hi_f"])
                 sp = float(br["estimated_spread"])
 
-                # Determine price depending on L2 vs legacy
+                # Per-row price source: L2 takes priority over legacy.
+                clob_val  = br.get("clob_price")
+                bid_val   = br.get("bid_vwap")
+                legacy_val = br.get("legacy_mid_price")
+
+                is_l2 = pd.notna(clob_val)
                 if is_l2:
-                    cp = float(br["clob_price"])
+                    cp          = float(clob_val)
+                    bv          = float(bid_val) if pd.notna(bid_val) else float("nan")
                     price_source = "l2_vwap"
                     legacy_mid  = float("nan")
                 else:
-                    cp = float(br["legacy_mid_price"])
+                    cp          = float(legacy_val) if pd.notna(legacy_val) else float("nan")
+                    bv          = float("nan")
                     price_source = "legacy_mid"
                     legacy_mid  = cp
 
@@ -379,8 +405,16 @@ class BacktestEngine:
 
                 out = _bucket_outcome(actual_f, lo, hi)
 
-                # Price used for edge/PnL is always cp (set above)
-                pnl_price = cp
+                # PnL uses side-appropriate prices:
+                #   pnl_if_yes = outcome - ask_vwap  (BUY YES)
+                #   pnl_if_no  = bid_vwap - outcome  (SELL YES), or
+                #                legacy_mid - outcome when no bid data
+                if is_l2 and not np.isnan(bv):
+                    pnl_yes = float(out) - cp
+                    pnl_no  = bv - float(out)
+                else:
+                    pnl_yes = float(out) - cp
+                    pnl_no  = cp - float(out)
 
                 records.append({
                     "target_date":        target_str,
@@ -395,6 +429,9 @@ class BacktestEngine:
                     "mc_prob":            round(mc_p, 5),
                     "clob_price":         round(cp, 5) if is_l2
                                           else float("nan"),
+                    "bid_vwap":           round(bv, 5)
+                                          if not np.isnan(bv)
+                                          else float("nan"),
                     "legacy_mid_price":   round(legacy_mid, 5)
                                           if not np.isnan(legacy_mid)
                                           else float("nan"),
@@ -405,8 +442,8 @@ class BacktestEngine:
                     "edge":               round(edge, 5),
                     "actual_max_f":       actual_f,
                     "actual_outcome":     out,
-                    "pnl_if_yes":         round(float(out) - pnl_price, 5)
+                    "pnl_if_yes":         round(pnl_yes, 5)
                                           if not np.isnan(out) else float("nan"),
-                    "pnl_if_no":          round(pnl_price - float(out), 5)
+                    "pnl_if_no":          round(pnl_no, 5)
                                           if not np.isnan(out) else float("nan"),
                 })

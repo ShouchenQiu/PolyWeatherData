@@ -507,6 +507,7 @@ def _sample_results_df(n: int = 20, seed: int = 42) -> pd.DataFrame:
         "market_slug":        ["slug60-70"] * n,
         "mc_prob":            mc,
         "clob_price":         float("nan"),
+        "bid_vwap":           float("nan"),
         "legacy_mid_price":   clob,
         "price_source":       ["legacy_mid"] * n,
         "estimated_spread":   hs * 2,
@@ -565,7 +566,10 @@ class TestBacktestAnalysisSummary:
             "bucket_hi_f":       [70.0] * n,
             "market_slug":       ["slug"] * n,
             "mc_prob":           mc,
-            "clob_price":        clob,
+            "clob_price":        float("nan"),
+            "bid_vwap":          float("nan"),
+            "legacy_mid_price":  clob,
+            "price_source":      "legacy_mid",
             "estimated_spread":  hs * 2,
             "halfspread":        hs,
             "clob_quality":      ["real"] * n,
@@ -863,3 +867,218 @@ class TestPnlSummary:
 
 def test_halfspread_drag_value():
     assert HALFSPREAD_DRAG == pytest.approx(-0.0127, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# V2V10 -- mixed L2/legacy routing (per-row, not window-level)
+# ---------------------------------------------------------------------------
+
+class TestV2V10MixedL2Legacy:
+
+    def test_l2_and_legacy_rows_same_bucket_l2_priority(self):
+        """When a bucket has both L2 and legacy rows in the same window,
+        L2 aggregate takes priority and the legacy row does not overwrite."""
+        pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
+        actual_highs = {"2024-01-02": 70.0}
+
+        rows = [
+            # Legacy row: mid=0.99, no L2 data
+            {
+                "timestamp_utc":    pd.Timestamp("2024-01-01 06:00:00", tz="UTC"),
+                "event_end_date":   pd.Timestamp("2024-01-02", tz="UTC"),
+                "market_slug":      "slug-mix",
+                "bucket_lo_f":      65.0,
+                "bucket_hi_f":      75.0,
+                "mid_price_yes":    0.99,
+                "estimated_spread": 0.04,
+                "is_filled":        0,
+            },
+            # L2 row: ask=0.55, same bucket
+            {
+                "timestamp_utc":    pd.Timestamp("2024-01-01 06:05:00", tz="UTC"),
+                "event_end_date":   pd.Timestamp("2024-01-02", tz="UTC"),
+                "market_slug":      "slug-mix",
+                "bucket_lo_f":      65.0,
+                "bucket_hi_f":      75.0,
+                "mid_price_yes":    0.50,
+                "estimated_spread": 0.04,
+                "is_filled":        0,
+                "bids":             [{"price": 0.53, "size": 1000.0}],
+                "asks":             [{"price": 0.55, "size": 1000.0}],
+            },
+        ]
+        clob_df = _make_clob_df(rows)
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), clob_df, actual_highs,
+            cold_start_hours=0, quote_size_usd=20.0,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        _make_station(), init_hours=[6])
+
+        assert not df.empty
+        # L2 takes priority: clob_price ~= 0.55 (ask VWAP), not 0.99
+        row = df.iloc[0]
+        assert row["price_source"] == "l2_vwap"
+        assert row["clob_price"] == pytest.approx(0.55, abs=1e-5)
+        assert math.isnan(row["legacy_mid_price"])
+        # Edge = 0.70 - 0.55 = 0.15
+        assert row["edge"] == pytest.approx(0.15, abs=1e-5)
+
+    def test_legacy_only_row_survives_when_l2_columns_exist_but_empty(self):
+        """A row with bids/asks columns present but empty per-row falls
+        back to legacy_mid_price (not silently dropped)."""
+        pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
+        actual_highs = {"2024-01-02": 70.0}
+
+        rows = [
+            {
+                "timestamp_utc":    pd.Timestamp("2024-01-01 06:00:00", tz="UTC"),
+                "event_end_date":   pd.Timestamp("2024-01-02", tz="UTC"),
+                "market_slug":      "slug-legacy-only",
+                "bucket_lo_f":      65.0,
+                "bucket_hi_f":      75.0,
+                "mid_price_yes":    0.55,
+                "estimated_spread": 0.04,
+                "is_filled":        0,
+                "bids":             [],   # empty list = no L2 data
+                "asks":             [],
+            },
+        ]
+        clob_df = _make_clob_df(rows)
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), clob_df, actual_highs,
+            cold_start_hours=0,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        _make_station(), init_hours=[6])
+
+        assert not df.empty
+        row = df.iloc[0]
+        assert row["price_source"] == "legacy_mid"
+        assert row["legacy_mid_price"] == pytest.approx(0.55, abs=1e-5)
+        assert math.isnan(row["clob_price"])
+
+
+# ---------------------------------------------------------------------------
+# V2V10 -- bid_vwap column and side-aware pnl_if_no
+# ---------------------------------------------------------------------------
+
+class TestV2V10BidVwap:
+
+    def test_l2_row_produces_bid_vwap_column(self):
+        """L2 rows produce a bid_vwap column from SELL-side compute_quote."""
+        pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
+        actual_highs = {"2024-01-02": 70.0}
+        rows = [
+            {
+                "timestamp_utc":    pd.Timestamp("2024-01-01 06:00:00", tz="UTC"),
+                "event_end_date":   pd.Timestamp("2024-01-02", tz="UTC"),
+                "market_slug":      "slug-l2",
+                "bucket_lo_f":      65.0,
+                "bucket_hi_f":      75.0,
+                "mid_price_yes":    0.50,
+                "estimated_spread": 0.04,
+                "is_filled":        0,
+                "bids":             [{"price": 0.53, "size": 1000.0}],
+                "asks":             [{"price": 0.55, "size": 1000.0}],
+            },
+        ]
+        clob_df = _make_clob_df(rows)
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), clob_df, actual_highs,
+            cold_start_hours=0, quote_size_usd=20.0,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        _make_station(), init_hours=[6])
+
+        assert not df.empty
+        row = df.iloc[0]
+        assert "bid_vwap" in df.columns
+        # BUY asks at 0.55, SELL bids at 0.53
+        assert row["clob_price"] == pytest.approx(0.55, abs=1e-5)
+        assert row["bid_vwap"]   == pytest.approx(0.53, abs=1e-5)
+
+    def test_pnl_if_no_uses_bid_vwap_for_l2_rows(self):
+        """For L2 rows pnl_if_no = bid_vwap - outcome, not ask_vwap - outcome."""
+        pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
+        actual_highs = {"2024-01-02": 70.0}   # outcome = 1.0 (inside bucket)
+        rows = [
+            {
+                "timestamp_utc":    pd.Timestamp("2024-01-01 06:00:00", tz="UTC"),
+                "event_end_date":   pd.Timestamp("2024-01-02", tz="UTC"),
+                "market_slug":      "slug-l2",
+                "bucket_lo_f":      65.0,
+                "bucket_hi_f":      75.0,
+                "mid_price_yes":    0.50,
+                "estimated_spread": 0.04,
+                "is_filled":        0,
+                "bids":             [{"price": 0.53, "size": 1000.0}],
+                "asks":             [{"price": 0.55, "size": 1000.0}],
+            },
+        ]
+        clob_df = _make_clob_df(rows)
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), clob_df, actual_highs,
+            cold_start_hours=0, quote_size_usd=20.0,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        _make_station(), init_hours=[6])
+
+        assert not df.empty
+        row = df.iloc[0]
+        # pnl_if_yes = outcome - ask_vwap = 1.0 - 0.55 = 0.45
+        assert row["pnl_if_yes"] == pytest.approx(1.0 - 0.55, abs=1e-5)
+        # pnl_if_no  = bid_vwap - outcome = 0.53 - 1.0 = -0.47
+        assert row["pnl_if_no"] == pytest.approx(0.53 - 1.0, abs=1e-5)
+
+    def test_legacy_row_pnl_if_no_unchanged(self):
+        """Legacy rows still use mid_price for both pnl_if_yes and pnl_if_no."""
+        pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
+        actual_highs = {"2024-01-02": 70.0}
+        rows = [
+            _clob_row("2024-01-02", "2024-01-01 06:00:00", "slug-legacy",
+                      65.0, 75.0, 0.55),
+        ]
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), _make_clob_df(rows), actual_highs,
+            cold_start_hours=0,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        _make_station(), init_hours=[6])
+
+        assert not df.empty
+        row = df.iloc[0]
+        assert row["price_source"] == "legacy_mid"
+        assert math.isnan(row["bid_vwap"])
+        assert row["pnl_if_yes"] == pytest.approx(1.0 - 0.55, abs=1e-5)
+        assert row["pnl_if_no"]  == pytest.approx(0.55 - 1.0, abs=1e-5)
+
+    def test_l2_incomplete_fill_does_not_fall_back_to_legacy(self):
+        """Row with L2 data that fails depth check is dropped; does not
+        silently use mid_price_yes as a fallback."""
+        pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
+        actual_highs = {"2024-01-02": 70.0}
+
+        rows = [
+            {
+                "timestamp_utc":    pd.Timestamp("2024-01-01 06:00:00", tz="UTC"),
+                "event_end_date":   pd.Timestamp("2024-01-02", tz="UTC"),
+                "market_slug":      "slug-shallow",
+                "bucket_lo_f":      65.0,
+                "bucket_hi_f":      75.0,
+                "mid_price_yes":    0.50,
+                "estimated_spread": 0.04,
+                "is_filled":        0,
+                "bids":             [{"price": 0.53, "size": 0.1}],
+                "asks":             [{"price": 0.55, "size": 0.1}],
+            },
+        ]
+        clob_df = _make_clob_df(rows)
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), clob_df, actual_highs,
+            cold_start_hours=0, quote_size_usd=20.0,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        _make_station(), init_hours=[6])
+        # L2 depth insufficient, mid_price_yes=0.50 must not be used
+        assert df.empty
