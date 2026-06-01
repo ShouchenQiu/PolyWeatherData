@@ -269,8 +269,8 @@ class TradingLoop:
                 if not intent_token_id:
                     self._db.update_signal_decision(
                         signal_id        = signal_id,
-                        final_token_id   = signal.yes_token_id,
-                        final_side       = intent_side,
+                        final_token_id   = None,
+                        final_side       = None,
                         executable_price = 0.0,
                         approved         = 0,
                         reject_reason    = "no_token_id_unavailable",
@@ -278,38 +278,49 @@ class TradingLoop:
                     )
                     continue
 
-                # 3. Initial depth check (skipped when no orderbook is wired)
-                if self._orderbook is not None:
-                    book = books.get(intent_token_id, {})
-                    try:
-                        init_quote = compute_quote(
-                            book, intent_side, self._settings.quote_size_usd
-                        )
-                    except Exception:
-                        self._db.update_signal_decision(
-                            signal_id        = signal_id,
-                            final_token_id   = intent_token_id,
-                            final_side       = intent_side,
-                            executable_price = 0.0,
-                            approved         = 0,
-                            reject_reason    = "depth_check_error",
-                            computed_size    = None,
-                        )
-                        continue
-                    if not init_quote.complete_fill:
-                        self._db.update_signal_decision(
-                            signal_id        = signal_id,
-                            final_token_id   = intent_token_id,
-                            final_side       = intent_side,
-                            executable_price = 0.0,
-                            approved         = 0,
-                            reject_reason    = "insufficient_depth",
-                            computed_size    = None,
-                        )
-                        continue
-                    executable_price = init_quote.vwap_price
-                else:
-                    executable_price = signal.reference_price
+                # 3. Initial depth check ¡ª orderbook is required for execution.
+                #    Reject with orderbook_unavailable when not wired so that
+                #    the execution layer contract does not depend on strategies
+                #    never emitting signals without books.
+                if self._orderbook is None:
+                    self._db.update_signal_decision(
+                        signal_id        = signal_id,
+                        final_token_id   = intent_token_id,
+                        final_side       = intent_side,
+                        executable_price = 0.0,
+                        approved         = 0,
+                        reject_reason    = "orderbook_unavailable",
+                        computed_size    = None,
+                    )
+                    continue
+                book = books.get(intent_token_id, {})
+                try:
+                    init_quote = compute_quote(
+                        book, intent_side, self._settings.quote_size_usd
+                    )
+                except Exception:
+                    self._db.update_signal_decision(
+                        signal_id        = signal_id,
+                        final_token_id   = intent_token_id,
+                        final_side       = intent_side,
+                        executable_price = 0.0,
+                        approved         = 0,
+                        reject_reason    = "depth_check_error",
+                        computed_size    = None,
+                    )
+                    continue
+                if not init_quote.complete_fill:
+                    self._db.update_signal_decision(
+                        signal_id        = signal_id,
+                        final_token_id   = intent_token_id,
+                        final_side       = intent_side,
+                        executable_price = 0.0,
+                        approved         = 0,
+                        reject_reason    = "insufficient_depth",
+                        computed_size    = None,
+                    )
+                    continue
+                executable_price = init_quote.vwap_price
 
                 # 4. Create OrderIntent
                 intent = OrderIntent(
@@ -357,56 +368,54 @@ class TradingLoop:
                     )
                     continue
 
-                # 7. Re-quote with actual size and re-check edge (skipped when
-                #    no orderbook is wired; EdgeStrategy already checked depth)
-                if self._orderbook is not None:
-                    book = books.get(intent_token_id, {})
-                    try:
-                        fresh_quote = compute_quote(book, intent_side, size_usd)
-                    except Exception:
-                        self._db.update_signal_decision(
-                            signal_id        = signal_id,
-                            final_token_id   = intent_token_id,
-                            final_side       = intent_side,
-                            executable_price = executable_price,
-                            approved         = 0,
-                            reject_reason    = "requote_error",
-                            computed_size    = size_usd,
-                        )
-                        continue
-                    if not fresh_quote.complete_fill:
-                        self._db.update_signal_decision(
-                            signal_id        = signal_id,
-                            final_token_id   = intent_token_id,
-                            final_side       = intent_side,
-                            executable_price = executable_price,
-                            approved         = 0,
-                            reject_reason    = "requote_insufficient_depth",
-                            computed_size    = size_usd,
-                        )
-                        continue
-                    # Verify edge still clears min_edge at re-quoted price
-                    if intent_side == "BUY" and intent_token_id == signal.yes_token_id:
-                        requote_edge = signal.model_prob - fresh_quote.vwap_price
-                    elif intent_side == "BUY":  # BUY NO
-                        requote_edge = (
-                            (1.0 - signal.model_prob) - fresh_quote.vwap_price
-                        )
-                    else:  # SELL YES
-                        requote_edge = fresh_quote.vwap_price - signal.model_prob
-                    if requote_edge < self._settings.min_edge:
-                        self._db.update_signal_decision(
-                            signal_id        = signal_id,
-                            final_token_id   = intent_token_id,
-                            final_side       = intent_side,
-                            executable_price = fresh_quote.vwap_price,
-                            approved         = 0,
-                            reject_reason    = "stale_edge",
-                            computed_size    = size_usd,
-                        )
-                        continue
-                    executable_price        = fresh_quote.vwap_price
-                    intent.executable_price = executable_price
+                # 7. Re-quote with actual size and re-check edge.
+                book = books.get(intent_token_id, {})
+                try:
+                    fresh_quote = compute_quote(book, intent_side, size_usd)
+                except Exception:
+                    self._db.update_signal_decision(
+                        signal_id        = signal_id,
+                        final_token_id   = intent_token_id,
+                        final_side       = intent_side,
+                        executable_price = executable_price,
+                        approved         = 0,
+                        reject_reason    = "requote_error",
+                        computed_size    = size_usd,
+                    )
+                    continue
+                if not fresh_quote.complete_fill:
+                    self._db.update_signal_decision(
+                        signal_id        = signal_id,
+                        final_token_id   = intent_token_id,
+                        final_side       = intent_side,
+                        executable_price = executable_price,
+                        approved         = 0,
+                        reject_reason    = "requote_insufficient_depth",
+                        computed_size    = size_usd,
+                    )
+                    continue
+                # Verify edge still clears min_edge at re-quoted price
+                if intent_side == "BUY" and intent_token_id == signal.yes_token_id:
+                    requote_edge = signal.model_prob - fresh_quote.vwap_price
+                elif intent_side == "BUY":  # BUY NO
+                    requote_edge = (
+                        (1.0 - signal.model_prob) - fresh_quote.vwap_price
+                    )
+                else:  # SELL YES
+                    requote_edge = fresh_quote.vwap_price - signal.model_prob
+                if requote_edge < self._settings.min_edge:
+                    self._db.update_signal_decision(
+                        signal_id        = signal_id,
+                        final_token_id   = intent_token_id,
+                        final_side       = intent_side,
+                        executable_price = fresh_quote.vwap_price,
+                        approved         = 0,
+                        reject_reason    = "stale_edge",
+                        computed_size    = size_usd,
+                    )
+                    continue
+                executable_price        = fresh_quote.vwap_price
+                intent.executable_price = executable_price
 
                 # 8. Record approved decision
                 self._db.update_signal_decision(

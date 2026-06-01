@@ -57,6 +57,17 @@ def _make_exchange() -> MagicMock:
     return exc
 
 
+def _make_orderbook(ask: float = 0.50) -> MagicMock:
+    """Return a mock orderbook that returns a deep L2 book at *ask* price."""
+    book = MagicMock()
+    bid  = max(0.01, ask - 0.02)
+    book.get_book.return_value = {
+        "bids": [{"price": bid,  "size": 1000.0}],
+        "asks": [{"price": ask,  "size": 1000.0}],
+    }
+    return book
+
+
 def _make_loop(db: DbClient, **overrides) -> TradingLoop:
     return TradingLoop(
         prob_store = overrides.pop("prob_store", ProbabilityStore()),
@@ -67,7 +78,7 @@ def _make_loop(db: DbClient, **overrides) -> TradingLoop:
         exchange   = overrides.pop("exchange",    _make_exchange()),
         positions  = overrides.pop("positions",   PositionTracker(db)),
         db         = overrides.pop("db",          db),
-        orderbook  = overrides.pop("orderbook",   None),
+        orderbook  = overrides.pop("orderbook",   _make_orderbook()),
     )
 
 
@@ -217,6 +228,57 @@ def test_tick_no_alert_when_fresh_no_signals(db) -> None:
     assert received == []
 
 
+def test_tick_orderbook_unavailable_rejects_signal(db) -> None:
+    """When no orderbook is wired, signals are rejected with orderbook_unavailable."""
+    prob_store = ProbabilityStore()
+    station_id = next(iter(STATIONS))
+    now        = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+
+    db.upsert_event("cid-nobook", "q", "slug", "2026-07-04",
+                    station_id, status="active")
+    db.upsert_market("tok-nobook", "cid-nobook", "sl-nobook", 60.0, 70.0, "YES")
+
+    sig = DirectionalSignal(
+        yes_token_id="tok-nobook", no_token_id="", direction="bullish",
+        model_prob=0.80, reference_price=0.50, edge=0.30,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-nobook")
+    mock_strategy = MagicMock(spec=MultiStrategy)
+    mock_strategy.compute_signals.return_value = [sig]
+    mock_risk = MagicMock(spec=RiskPipeline)
+    exchange  = MagicMock()
+
+    loop = TradingLoop(
+        prob_store = prob_store,
+        alert_bus  = AlertBus(),
+        settings   = Settings(),
+        strategy   = mock_strategy,
+        risk       = mock_risk,
+        exchange   = exchange,
+        positions  = PositionTracker(db),
+        db         = db,
+        orderbook  = None,
+    )
+
+    async def run() -> list[str]:
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-nobook", 0, snapshot)
+        return await loop.tick(now=now)
+
+    result = asyncio.run(run())
+    assert result == []
+    exchange.place_order.assert_not_called()
+    mock_risk.approve_signal.assert_not_called()
+
+    row = db._conn.execute(
+        "SELECT reject_reason FROM signals WHERE yes_token_id=?",
+        ("tok-nobook",),
+    ).fetchone()
+    assert row is not None
+    assert row["reject_reason"] == "orderbook_unavailable"
+
+
 # ---------------------------------------------------------------------------
 # Signal pipeline  (V11)
 # ---------------------------------------------------------------------------
@@ -257,6 +319,7 @@ def test_tick_risk_rejected_emits_alert(db) -> None:
         exchange   = exchange,
         positions  = PositionTracker(db),
         db         = db,
+        orderbook  = _make_orderbook(),
     )
 
     async def run() -> list[str]:
@@ -306,6 +369,7 @@ def test_tick_successful_submit_calls_record_order(db) -> None:
         exchange   = exchange,
         positions  = positions,
         db         = db,
+        orderbook  = _make_orderbook(),
     )
 
     async def run() -> list[str]:
@@ -360,6 +424,7 @@ def test_tick_failed_submit_no_record_order(db) -> None:
         exchange   = exchange,
         positions  = mock_positions,
         db         = db,
+        orderbook  = _make_orderbook(),
     )
 
     async def run() -> list[str]:
@@ -417,6 +482,7 @@ def test_tick_passes_real_exposure_to_risk(db) -> None:
         exchange   = exchange,
         positions  = positions,
         db         = db,
+        orderbook  = _make_orderbook(),
     )
 
     async def run() -> list[str]:
@@ -473,6 +539,7 @@ def test_tick_empty_order_id_not_recorded(db) -> None:
         exchange   = exchange,
         positions  = mock_positions,
         db         = db,
+        orderbook  = _make_orderbook(),
     )
 
     async def run() -> list[str]:
@@ -534,6 +601,7 @@ def test_tick_bullish_signal_buys_yes_token(db) -> None:
         exchange   = exchange,
         positions  = positions,
         db         = db,
+        orderbook  = _make_orderbook(),
     )
 
     async def run() -> list[str]:
@@ -583,6 +651,7 @@ def test_tick_bearish_without_yes_position_buys_no_token(db) -> None:
         exchange   = exchange,
         positions  = positions,
         db         = db,
+        orderbook  = _make_orderbook(),
     )
 
     async def run() -> list[str]:
@@ -639,6 +708,7 @@ def test_tick_bearish_with_yes_position_sells_yes_token(db) -> None:
         exchange   = exchange,
         positions  = positions,
         db         = db,
+        orderbook  = _make_orderbook(ask=0.60),
     )
 
     async def run() -> list[str]:
@@ -831,6 +901,7 @@ def test_tick_local_exposure_updates_after_each_order(db) -> None:
         exchange   = exchange,
         positions  = positions,
         db         = db,
+        orderbook  = _make_orderbook(),
     )
 
     async def run() -> list[str]:
@@ -883,6 +954,7 @@ def test_tick_signal_written_to_db_before_arbitration(db) -> None:
         exchange   = MagicMock(),
         positions  = PositionTracker(db),
         db         = db,
+        orderbook  = _make_orderbook(),
     )
 
     async def run() -> None:
@@ -931,6 +1003,7 @@ def test_tick_signal_decision_updated_after_rejection(db) -> None:
         exchange   = MagicMock(),
         positions  = PositionTracker(db),
         db         = db,
+        orderbook  = _make_orderbook(),
     )
 
     async def run() -> None:
@@ -982,6 +1055,7 @@ def test_tick_signal_order_linkage(db) -> None:
         exchange   = exchange,
         positions  = PositionTracker(db),
         db         = db,
+        orderbook  = _make_orderbook(),
     )
 
     async def run() -> list[str]:

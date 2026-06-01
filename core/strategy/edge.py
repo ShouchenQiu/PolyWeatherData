@@ -76,8 +76,10 @@ class EdgeStrategy(BaseStrategy):
 
         for mkt in markets:
             outcome = str(mkt.get("outcome", "Yes")).upper()
-            lo_f    = float(mkt.get("bucket_lo_f") or float("-inf"))
-            hi_f    = float(mkt.get("bucket_hi_f") or float("inf"))
+            lo_raw  = mkt.get("bucket_lo_f")
+            hi_raw  = mkt.get("bucket_hi_f")
+            lo_f    = float(lo_raw) if lo_raw is not None else float("-inf")
+            hi_f    = float(hi_raw) if hi_raw is not None else float("inf")
             tid     = str(mkt["token_id"])
             cond    = str(mkt.get("condition_id", ""))
             if outcome == "YES":

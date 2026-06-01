@@ -125,7 +125,12 @@ class BotManager:
         self.positions = PositionTracker(self.db)
 
         # Strategy
-        self.strategy = MultiStrategy([EdgeStrategy(min_edge=settings.min_edge)])
+        self.strategy = MultiStrategy([
+            EdgeStrategy(
+                min_edge       = settings.min_edge,
+                quote_size_usd = settings.quote_size_usd,
+            )
+        ])
 
         # Exchange wiring [ADR-0009]
         if settings.trading_mode == "live":
