@@ -88,6 +88,10 @@ class SettlementLoop:
         ``relayer.resolve_on_chain``.  Otherwise the event stays in
         ``pending_settle`` for the next check.
 
+        The observation window uses the station's local calendar day
+        (midnight to midnight in station timezone), not UTC day boundaries.
+        This matches the daily-high target semantics from ADR-0010.
+
         Parameters
         ----------
         event:
@@ -96,6 +100,10 @@ class SettlementLoop:
         station:
             IEM station identifier (e.g. ``"KLGA"``).
         """
+        from zoneinfo import ZoneInfo
+
+        from config.stations import STATIONS
+
         condition_id = event["condition_id"]
         end_date_str = event.get("event_end_date") or ""
 
@@ -112,8 +120,11 @@ class SettlementLoop:
             )
             return
 
+        # Resolve the station's local calendar day boundaries.
+        station_cfg = STATIONS.get(station)
+        tz = ZoneInfo(station_cfg.timezone) if station_cfg else ZoneInfo("UTC")
         try:
-            day_start = pd.Timestamp(end_date_str, tz="UTC")
+            local_midnight = pd.Timestamp(end_date_str).tz_localize(tz)
         except (ValueError, TypeError):
             logger.warning(
                 "SettlementLoop: unparseable event_end_date '{}' for {}; skipping",
@@ -122,12 +133,17 @@ class SettlementLoop:
             )
             return
 
-        day_end = day_start + pd.Timedelta(days=1)
-        obs_df  = self._obs_store.read(station, day_start, day_end)
+        local_day_end = local_midnight + pd.Timedelta(days=1)
+        # Convert to UTC for ParquetStore range query.
+        day_start_utc = local_midnight.tz_convert("UTC")
+        day_end_utc   = local_day_end.tz_convert("UTC")
+        obs_df        = self._obs_store.read(station, day_start_utc, day_end_utc)
 
-        if obs_df.empty or "tmpf" not in obs_df.columns:
+        # IEM source stores temperature as raw_tmpc_tenths (Celsius * 10).
+        # Convert to Fahrenheit: C / 10 * 9/5 + 32.
+        if obs_df.empty or "raw_tmpc_tenths" not in obs_df.columns:
             logger.warning(
-                "SettlementLoop: no tmpf obs for station={} date={}; event={}",
+                "SettlementLoop: no raw_tmpc_tenths obs for station={} date={}; event={}",
                 station,
                 end_date_str,
                 condition_id,
@@ -135,7 +151,8 @@ class SettlementLoop:
             self._try_relayer_fallback(condition_id)
             return
 
-        actual_max_temp: float = obs_df["tmpf"].max()
+        tmp_c = obs_df["raw_tmpc_tenths"].max() / 10.0
+        actual_max_temp: float = tmp_c * 9.0 / 5.0 + 32.0
         self._settle_from_obs(condition_id, actual_max_temp)
 
     def _settle_from_obs(self, condition_id: str, actual_max_temp: float) -> None:

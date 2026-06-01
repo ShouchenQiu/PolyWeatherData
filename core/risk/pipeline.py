@@ -54,6 +54,7 @@ class RiskPipeline(BaseRiskModel):
         signal:           "OrderIntent",
         current_exposure: float,
         positions:        object | None = None,
+        is_paper:         bool | None = None,
     ) -> float:
         """Return the minimum positive size across all sub-models.
 
@@ -61,7 +62,7 @@ class RiskPipeline(BaseRiskModel):
         """
         sizes = [
             model.compute_size(signal, current_exposure,
-                               positions=positions)
+                               positions=positions, is_paper=is_paper)
             for model in self._models
         ]
         positive = [s for s in sizes if s > 0]

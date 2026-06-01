@@ -693,9 +693,9 @@ def test_tick_bearish_with_yes_position_sells_yes_token(db) -> None:
     positions = PositionTracker(db)
     # Seed YES inventory so PositionTracker.position_shares() returns > 0.
     db._conn.execute(
-        "INSERT INTO orders(order_id,token_id,condition_id,side,size_usd,price,signed_shares)"
-        " VALUES(?,?,?,?,?,?,?)",
-        ("seed-yes-b3", "tok-yes-b3", "cid-b3", "BUY", 30.0, 0.55, 54.5),
+        "INSERT INTO orders(order_id,token_id,condition_id,side,size_usd,price,status,signed_shares)"
+        " VALUES(?,?,?,?,?,?,?,?)",
+        ("seed-yes-b3", "tok-yes-b3", "cid-b3", "BUY", 30.0, 0.55, "filled", 54.5),
     )
     db._conn.commit()
 

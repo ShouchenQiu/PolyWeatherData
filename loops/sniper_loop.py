@@ -264,6 +264,7 @@ class SniperLoop:
                     continue
                 size = self.risk.compute_size(
                     sig, exposure, positions=self.positions,
+                    is_paper=self._is_paper,
                 )
                 if size <= 0:
                     continue

@@ -41,10 +41,13 @@ def db() -> DbClient:
 @pytest.fixture
 def obs_store(tmp_path: Path) -> ParquetStore:
     store = ParquetStore(tmp_path / "obs")
+    # IEM source writes temperature as raw_tmpc_tenths (Celsius * 10).
+    # 65.1 F -> (65.1-32)*5/9 = 18.39 C -> 184 tenths
+    # 63.5 F -> (63.5-32)*5/9 = 17.50 C -> 175 tenths
     df = pd.DataFrame({
         "valid_time": [pd.Timestamp("2025-03-20 12:00", tz="UTC"),
                        pd.Timestamp("2025-03-20 15:00", tz="UTC")],
-        "tmpf":       [63.5, 65.1],   # max = 65.1 F, in bucket 60-70
+        "raw_tmpc_tenths": [175, 184],   # max = 18.4 C = 65.12 F, in bucket 60-70
     })
     store.append("KLGA", df)
     return store

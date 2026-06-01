@@ -28,5 +28,6 @@ class KellyCriterion(BaseRiskModel):
         signal:           "OrderIntent",
         current_exposure: float,
         positions:        object | None = None,
+        is_paper:         bool | None = None,
     ) -> float:
         raise NotImplementedError("KellyCriterion is not yet implemented.")

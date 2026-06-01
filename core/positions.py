@@ -171,7 +171,7 @@ class PositionTracker:
         rows = self._db.query(
             "SELECT COALESCE(SUM(signed_shares), 0.0) FROM orders"
             " WHERE token_id=? AND signed_shares IS NOT NULL"
-            f" AND status != 'cancelled'{paper_sql}",
+            f" AND status = 'filled'{paper_sql}",
             params,
         )
         return float(rows[0][0])

@@ -33,6 +33,7 @@ class BaseRiskModel(ABC):
         signal:           "OrderIntent",
         current_exposure: float,
         positions:        object | None = None,
+        is_paper:         bool | None = None,
     ) -> float:
         """Return the USDC size to allocate for this signal.
 
@@ -44,4 +45,7 @@ class BaseRiskModel(ABC):
             Optional PositionTracker used for SELL exit sizing.
             When provided, SELL sizes are derived from
             ``positions.position_shares()`` rather than a fixed USD amount.
+        is_paper:
+            When not None, restricts SELL share lookups to paper or live
+            orders only, preventing cross-mode position leakage.
         """

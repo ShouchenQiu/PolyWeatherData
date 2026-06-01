@@ -208,7 +208,7 @@ class TradingLoop:
 
         # bearish: SELL YES if YES inventory exists, else BUY NO
         has_yes = (
-            self._positions.position_shares(signal.yes_token_id) > 0
+            self._positions.position_shares(signal.yes_token_id, is_paper=self._is_paper) > 0
             or signal.yes_token_id in local_yes_buys
         )
         if has_yes:
@@ -353,6 +353,7 @@ class TradingLoop:
                     intent,
                     current_exposure = current_exposure,
                     positions        = self._positions,
+                    is_paper         = self._is_paper,
                 )
                 if size_usd <= 0:
                     self._reject_signal(signal_id, intent_token_id, intent_side,
@@ -360,9 +361,16 @@ class TradingLoop:
                     continue
 
                 # 7. Re-quote with actual size and re-check edge.
-                book = books.get(intent_token_id, {})
+                #    Fetch a fresh book to avoid stale cached prices.
+                if self._orderbook is not None:
+                    try:
+                        fresh_book = self._orderbook.get_book(intent_token_id)
+                    except Exception:
+                        fresh_book = {}
+                else:
+                    fresh_book = books.get(intent_token_id, {})
                 try:
-                    fresh_quote = compute_quote(book, intent_side, size_usd)
+                    fresh_quote = compute_quote(fresh_book, intent_side, size_usd)
                 except Exception:
                     self._reject_signal(signal_id, intent_token_id, intent_side,
                                         executable_price, size_usd, "requote_error")
@@ -435,10 +443,22 @@ class TradingLoop:
                     )
                     submitted.append(order_id)
 
-                    # 10. Update per-tick local state immediately
-                    current_exposure += size_usd
-                    if intent_side == "BUY" and intent_token_id == signal.yes_token_id:
-                        local_yes_buys.add(intent_token_id)
+                    # 10. Update per-tick local state immediately.
+                    #     BUY increases exposure and adds to local_yes_buys.
+                    #     SELL reduces exposure and decrements inventory.
+                    if intent_side == "BUY":
+                        current_exposure += size_usd
+                        if intent_token_id == signal.yes_token_id:
+                            local_yes_buys.add(intent_token_id)
+                    else:  # SELL
+                        current_exposure = max(0.0, current_exposure - size_usd)
+                        # Remove from local_yes_buys when net shares drop
+                        # to or below zero after this SELL.
+                        remaining = self._positions.position_shares(
+                            intent_token_id, is_paper=self._is_paper,
+                        ) - (size_usd / executable_price if executable_price > 0 else 0)
+                        if remaining <= 0 and intent_token_id in local_yes_buys:
+                            local_yes_buys.discard(intent_token_id)
 
                     logger.info(
                         "TradingLoop: submitted order {} for token {}",

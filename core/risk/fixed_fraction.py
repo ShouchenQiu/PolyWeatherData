@@ -82,6 +82,7 @@ class FixedFraction(BaseRiskModel):
         signal:           "OrderIntent",
         current_exposure: float,
         positions:        object | None = None,
+        is_paper:         bool | None = None,
     ) -> float:
         """Return the USDC amount to allocate.
 
@@ -93,11 +94,14 @@ class FixedFraction(BaseRiskModel):
         where net_shares comes from ``positions.position_shares()`` when
         *positions* is provided.  Returns 0.0 if net_shares <= 0 or
         *positions* is not provided.
+
+        When *is_paper* is not None, net_shares are restricted to paper
+        or live orders only, preventing cross-mode position leakage.
         """
         if signal.side == "SELL":
             if positions is None:
                 return 0.0
-            net_shares = positions.position_shares(signal.token_id)
+            net_shares = positions.position_shares(signal.token_id, is_paper=is_paper)
             if net_shares <= 0:
                 return 0.0
             return self.max_exit_fraction * net_shares * signal.executable_price
