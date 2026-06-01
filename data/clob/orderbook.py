@@ -94,7 +94,3 @@ class OrderbookFetcher:
             "mid_price": mid_price,
         }
 
-    def get_mid_price(self, token_id: str) -> float | None:
-        """Return only the mid-price (convenience wrapper)."""
-        return self.get_book(token_id)["mid_price"]
-

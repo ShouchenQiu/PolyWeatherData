@@ -5,7 +5,7 @@ import pytest
 
 from core.strategy.base import BaseStrategy
 from core.strategy.edge import EdgeStrategy
-from core.types import DirectionalSignal, Signal
+from core.types import DirectionalSignal
 
 
 # -----------------------------------------------------------------------
@@ -276,15 +276,15 @@ def test_multi_strategy_merges_signals_from_two_strategies():
         def compute_signals(self, probs, books, markets, open_positions=None):
             return list(self._signals)
 
-    sig_a = Signal(token_id="tok-a", side="BUY", mc_prob=0.6,
-                   clob_price=0.4, edge=0.2)
-    sig_b = Signal(token_id="tok-b", side="BUY", mc_prob=0.7,
-                   clob_price=0.5, edge=0.2)
+    sig_a = DirectionalSignal(yes_token_id="tok-a", no_token_id="", direction="bullish",
+                               model_prob=0.6, reference_price=0.4, edge=0.2)
+    sig_b = DirectionalSignal(yes_token_id="tok-b", no_token_id="", direction="bullish",
+                               model_prob=0.7, reference_price=0.5, edge=0.2)
 
     ms = MultiStrategy([ConstantStrategy([sig_a]), ConstantStrategy([sig_b])])
     result = ms.compute_signals({}, {}, [])
 
-    token_ids = {s.token_id for s in result}
+    token_ids = {s.yes_token_id for s in result}
     assert "tok-a" in token_ids
     assert "tok-b" in token_ids
 
@@ -304,17 +304,17 @@ def test_multi_strategy_deduplicates_by_token_id_first_wins():
         def compute_signals(self, probs, books, markets, open_positions=None):
             return list(self._signals)
 
-    sig_first  = Signal(token_id="tok1", side="BUY",  mc_prob=0.7,
-                        clob_price=0.4, edge=0.3)
-    sig_second = Signal(token_id="tok1", side="SELL", mc_prob=0.2,
-                        clob_price=0.4, edge=-0.2)
+    sig_first  = DirectionalSignal(yes_token_id="tok1", no_token_id="", direction="bullish",
+                                    model_prob=0.7, reference_price=0.4, edge=0.3)
+    sig_second = DirectionalSignal(yes_token_id="tok1", no_token_id="", direction="bearish",
+                                    model_prob=0.2, reference_price=0.4, edge=0.2)
 
     ms = MultiStrategy([ConstantStrategy([sig_first]),
                         ConstantStrategy([sig_second])])
     result = ms.compute_signals({}, {}, [])
 
     assert len(result) == 1
-    assert result[0].side == "BUY"   # first strategy wins
+    assert result[0].direction == "bullish"   # first strategy wins
 
 
 def test_multi_passes_open_positions_to_sub_strategies():

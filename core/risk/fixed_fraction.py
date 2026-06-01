@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from core.risk.base import BaseRiskModel
 
 if TYPE_CHECKING:
-    from core.types import Signal
+    from core.types import OrderIntent
 
 
 class FixedFraction(BaseRiskModel):
@@ -56,7 +56,7 @@ class FixedFraction(BaseRiskModel):
 
     def approve_signal(
         self,
-        signal:           "Signal",
+        signal:           "OrderIntent",
         current_exposure: float,
     ) -> bool:
         """Return False unless the signal passes position-level checks.
@@ -79,7 +79,7 @@ class FixedFraction(BaseRiskModel):
 
     def compute_size(
         self,
-        signal:           "Signal",
+        signal:           "OrderIntent",
         current_exposure: float,
         positions:        object | None = None,
     ) -> float:
@@ -100,8 +100,7 @@ class FixedFraction(BaseRiskModel):
             net_shares = positions.position_shares(signal.token_id)
             if net_shares <= 0:
                 return 0.0
-            price = signal.executable_price if signal.executable_price is not None else signal.clob_price
-            return self.max_exit_fraction * net_shares * price
+            return self.max_exit_fraction * net_shares * signal.executable_price
 
         headroom = max(0.0, self.max_total_usd - current_exposure)
         size     = min(self.position_usd, self.max_position_usd, headroom)

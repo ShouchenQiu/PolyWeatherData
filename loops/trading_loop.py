@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from config.settings import Settings
     from core.exchange.base import BaseExchange
     from core.positions import PositionTracker
+    from core.types import DirectionalSignal, OrderIntent
     from db.schema import DbClient
 
 
@@ -152,24 +153,69 @@ class TradingLoop:
 
         return snapshot
 
-    def _emit_risk_rejected(self, signal: "Signal", condition_id: str) -> None:
-        """Emit a risk_rejected AlertEvent."""
+    def _emit_risk_rejected(self, intent: "OrderIntent", condition_id: str) -> None:
+        """Emit a risk_rejected AlertEvent for a rejected OrderIntent."""
         self._alert_bus.emit(
             AlertEvent(
                 alert_type  = "risk_rejected",
                 station     = None,
                 message     = (
-                    f"Risk rejected signal for token {signal.token_id} "
-                    f"(edge={signal.edge:.4f})"
+                    f"Risk rejected intent for token {intent.token_id} "
+                    f"(edge={intent.edge:.4f})"
                 ),
                 occurred_at = datetime.now(timezone.utc),
                 context     = {
-                    "token_id":     signal.token_id,
+                    "token_id":     intent.token_id,
                     "condition_id": condition_id,
-                    "edge":         signal.edge,
+                    "edge":         intent.edge,
                 },
             )
         )
+
+    def _reject_signal(
+        self,
+        signal_id: str,
+        token_id:  str | None,
+        side:      str | None,
+        price:     float,
+        size:      float | None,
+        reason:    str,
+    ) -> None:
+        """Write a rejected decision row to the signals DB table."""
+        self._db.update_signal_decision(
+            signal_id        = signal_id,
+            final_token_id   = token_id,
+            final_side       = side,
+            executable_price = price,
+            approved         = 0,
+            reject_reason    = reason,
+            computed_size    = size,
+        )
+
+    def _arbitrate(
+        self,
+        signal:         "DirectionalSignal",
+        local_yes_buys: set[str],
+    ) -> tuple[str, str] | None:
+        """Resolve (intent_token_id, intent_side) from a directional signal.
+
+        Returns a ``(token_id, side)`` pair on success, or ``None`` when the
+        token_id cannot be resolved (bearish signal with neither YES inventory
+        nor a NO token_id).
+        """
+        if signal.direction == "bullish":
+            return (signal.yes_token_id, "BUY")
+
+        # bearish: SELL YES if YES inventory exists, else BUY NO
+        has_yes = (
+            self._positions.position_shares(signal.yes_token_id) > 0
+            or signal.yes_token_id in local_yes_buys
+        )
+        if has_yes:
+            return (signal.yes_token_id, "SELL")
+        if signal.no_token_id:
+            return (signal.no_token_id, "BUY")
+        return None
 
     # ------------------------------------------------------------------
     # Public API
@@ -251,47 +297,20 @@ class TradingLoop:
                 )
 
                 # 2. Directional arbitration: resolve intent token and side
-                if signal.direction == "bullish":
-                    intent_token_id = signal.yes_token_id
-                    intent_side     = "BUY"
-                else:  # bearish
-                    has_yes = (
-                        self._positions.position_shares(signal.yes_token_id) > 0
-                        or signal.yes_token_id in local_yes_buys
-                    )
-                    if has_yes:
-                        intent_token_id = signal.yes_token_id
-                        intent_side     = "SELL"
-                    else:
-                        intent_token_id = signal.no_token_id
-                        intent_side     = "BUY"
-
-                if not intent_token_id:
-                    self._db.update_signal_decision(
-                        signal_id        = signal_id,
-                        final_token_id   = None,
-                        final_side       = None,
-                        executable_price = 0.0,
-                        approved         = 0,
-                        reject_reason    = "no_token_id_unavailable",
-                        computed_size    = None,
-                    )
+                result = self._arbitrate(signal, local_yes_buys)
+                if result is None:
+                    self._reject_signal(signal_id, None, None, 0.0, None,
+                                        "no_token_id_unavailable")
                     continue
+                intent_token_id, intent_side = result
 
                 # 3. Initial depth check ¡ª orderbook is required for execution.
                 #    Reject with orderbook_unavailable when not wired so that
                 #    the execution layer contract does not depend on strategies
                 #    never emitting signals without books.
                 if self._orderbook is None:
-                    self._db.update_signal_decision(
-                        signal_id        = signal_id,
-                        final_token_id   = intent_token_id,
-                        final_side       = intent_side,
-                        executable_price = 0.0,
-                        approved         = 0,
-                        reject_reason    = "orderbook_unavailable",
-                        computed_size    = None,
-                    )
+                    self._reject_signal(signal_id, intent_token_id, intent_side,
+                                        0.0, None, "orderbook_unavailable")
                     continue
                 book = books.get(intent_token_id, {})
                 try:
@@ -299,26 +318,12 @@ class TradingLoop:
                         book, intent_side, self._settings.quote_size_usd
                     )
                 except Exception:
-                    self._db.update_signal_decision(
-                        signal_id        = signal_id,
-                        final_token_id   = intent_token_id,
-                        final_side       = intent_side,
-                        executable_price = 0.0,
-                        approved         = 0,
-                        reject_reason    = "depth_check_error",
-                        computed_size    = None,
-                    )
+                    self._reject_signal(signal_id, intent_token_id, intent_side,
+                                        0.0, None, "depth_check_error")
                     continue
                 if not init_quote.complete_fill:
-                    self._db.update_signal_decision(
-                        signal_id        = signal_id,
-                        final_token_id   = intent_token_id,
-                        final_side       = intent_side,
-                        executable_price = 0.0,
-                        approved         = 0,
-                        reject_reason    = "insufficient_depth",
-                        computed_size    = None,
-                    )
+                    self._reject_signal(signal_id, intent_token_id, intent_side,
+                                        0.0, None, "insufficient_depth")
                     continue
                 executable_price = init_quote.vwap_price
 
@@ -339,15 +344,8 @@ class TradingLoop:
                     intent, current_exposure=current_exposure
                 ):
                     self._emit_risk_rejected(intent, condition_id)
-                    self._db.update_signal_decision(
-                        signal_id        = signal_id,
-                        final_token_id   = intent_token_id,
-                        final_side       = intent_side,
-                        executable_price = executable_price,
-                        approved         = 0,
-                        reject_reason    = "risk_rejected",
-                        computed_size    = None,
-                    )
+                    self._reject_signal(signal_id, intent_token_id, intent_side,
+                                        executable_price, None, "risk_rejected")
                     continue
 
                 # 6. Compute size
@@ -357,15 +355,8 @@ class TradingLoop:
                     positions        = self._positions,
                 )
                 if size_usd <= 0:
-                    self._db.update_signal_decision(
-                        signal_id        = signal_id,
-                        final_token_id   = intent_token_id,
-                        final_side       = intent_side,
-                        executable_price = executable_price,
-                        approved         = 0,
-                        reject_reason    = "zero_size",
-                        computed_size    = size_usd,
-                    )
+                    self._reject_signal(signal_id, intent_token_id, intent_side,
+                                        executable_price, size_usd, "zero_size")
                     continue
 
                 # 7. Re-quote with actual size and re-check edge.
@@ -373,26 +364,13 @@ class TradingLoop:
                 try:
                     fresh_quote = compute_quote(book, intent_side, size_usd)
                 except Exception:
-                    self._db.update_signal_decision(
-                        signal_id        = signal_id,
-                        final_token_id   = intent_token_id,
-                        final_side       = intent_side,
-                        executable_price = executable_price,
-                        approved         = 0,
-                        reject_reason    = "requote_error",
-                        computed_size    = size_usd,
-                    )
+                    self._reject_signal(signal_id, intent_token_id, intent_side,
+                                        executable_price, size_usd, "requote_error")
                     continue
                 if not fresh_quote.complete_fill:
-                    self._db.update_signal_decision(
-                        signal_id        = signal_id,
-                        final_token_id   = intent_token_id,
-                        final_side       = intent_side,
-                        executable_price = executable_price,
-                        approved         = 0,
-                        reject_reason    = "requote_insufficient_depth",
-                        computed_size    = size_usd,
-                    )
+                    self._reject_signal(signal_id, intent_token_id, intent_side,
+                                        executable_price, size_usd,
+                                        "requote_insufficient_depth")
                     continue
                 # Verify edge still clears min_edge at re-quoted price
                 if intent_side == "BUY" and intent_token_id == signal.yes_token_id:
@@ -404,15 +382,8 @@ class TradingLoop:
                 else:  # SELL YES
                     requote_edge = fresh_quote.vwap_price - signal.model_prob
                 if requote_edge < self._settings.min_edge:
-                    self._db.update_signal_decision(
-                        signal_id        = signal_id,
-                        final_token_id   = intent_token_id,
-                        final_side       = intent_side,
-                        executable_price = fresh_quote.vwap_price,
-                        approved         = 0,
-                        reject_reason    = "stale_edge",
-                        computed_size    = size_usd,
-                    )
+                    self._reject_signal(signal_id, intent_token_id, intent_side,
+                                        fresh_quote.vwap_price, size_usd, "stale_edge")
                     continue
                 executable_price        = fresh_quote.vwap_price
                 intent.executable_price = executable_price
@@ -442,6 +413,9 @@ class TradingLoop:
                             "order not recorded",
                             intent_token_id,
                         )
+                        self._reject_signal(signal_id, intent_token_id, intent_side,
+                                            executable_price, size_usd,
+                                            "order_submission_failed")
                         continue
                     self._positions.record_order(
                         order_id         = order_id,
@@ -475,6 +449,13 @@ class TradingLoop:
                         "TradingLoop: order submission failed for token {}",
                         intent_token_id,
                     )
+                    # NOTE: if place_order raised after actually submitting the
+                    # order to the exchange, the order may exist on-exchange but
+                    # not in the local DB.  Recovery requires an order-reconcile
+                    # pass (future slice).
+                    self._reject_signal(signal_id, intent_token_id, intent_side,
+                                        executable_price, size_usd,
+                                        "order_submission_failed")
 
         logger.info(
             "TradingLoop tick done: events={} signals={} submitted={}",

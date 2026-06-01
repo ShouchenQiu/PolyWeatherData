@@ -443,12 +443,14 @@
 - REMOVE import of `py_clob_client` entirely  [ADR-0009]
 
 ### core/exchange/paper.py
-- CHANGE `_get_fill_price()`: replace `mid_price` lookup with
-  `compute_quote(book, side, size_usd).vwap_price`; reject order (return None) when
-  `complete_fill=False`; BUY fills at asks VWAP, SELL fills at bids VWAP  [ADR-0011]
-- REMOVE internal `_orders` and `_positions` memory dicts: `PaperExchange` no longer
-  owns persistence; it only computes fill price and returns order_id; `TradingLoop`
-  calls `PositionTracker.record_order(... is_paper=True)` as it does for live orders
+- IMPLEMENTED (V2V09): depth validation and VWAP computation are TradingLoop's
+  responsibility (two `compute_quote()` passes before reaching the exchange);
+  `PaperExchange` trusts the validated limit price passed by TradingLoop and returns
+  a UUID on valid inputs; degenerate inputs (price ¡Ü 0 or size_usd ¡Ü 0) return an
+  empty string  [ADR-0011]
+- IMPLEMENTED (V2V09): internal `_orders` and `_positions` memory dicts removed;
+  `PaperExchange` holds no state; `TradingLoop` calls
+  `PositionTracker.record_order()` + `mark_filled()` for paper orders
 
 ### core/positions.py
 - CHANGE `record_order()` signature: add `is_paper: bool = False` and
@@ -591,10 +593,11 @@
   `target_date` from `event["event_end_date"]`; pass both to
   `ModelPipeline.run(station_config, init_utc, target_date, buckets)` while using
   `day_offset` only as the ProbabilityStore key (#22 / ADR-0010)
-- ADD invalid bucket filter: before calling `mc.bucket_probs()`, filter out any
-  bucket where `bucket_lo_f` or `bucket_hi_f` is None; log WARNING with
-  condition_id and count of skipped buckets (#72)
-- ADD empty probs guard: if `bucket_map` is empty after filtering, log WARNING
+- IMPLEMENTED (V2V07): null-bucket guard is a DB hard gate in
+  `get_markets_for_event()` (`WHERE bucket_lo_f IS NOT NULL AND bucket_hi_f IS NOT
+  NULL`); `ForecastLoop` never receives markets with null bucket bounds and requires
+  no in-loop filter  (#72)
+- ADD empty probs guard: if `bucket_map` is empty after the DB query, log WARNING
   and skip `ProbabilityStore.write()` for this event/tick entirely (#72)
 - ADD top-level exception guard in `run()`: wrap the outer `tick()` call (not the
   per-event inner try) in `except Exception`; log ERROR with traceback and

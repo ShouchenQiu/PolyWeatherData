@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from core.strategy.base import BaseStrategy
 
 if TYPE_CHECKING:
-    from core.types import Signal
+    from core.types import DirectionalSignal
 
 
 class MultiStrategy(BaseStrategy):
@@ -43,7 +43,7 @@ class MultiStrategy(BaseStrategy):
         books:          dict[str, dict],
         markets:        list[dict],
         open_positions: dict[str, int] | None = None,
-    ) -> list["Signal"]:
+    ) -> list["DirectionalSignal"]:
         """Collect and deduplicate signals from all sub-strategies.
 
         Parameters
@@ -51,7 +51,7 @@ class MultiStrategy(BaseStrategy):
         probs:
             ``{(lo_f, hi_f): probability}`` from ``McSampler.bucket_probs()``.
         books:
-            ``{token_id: {"mid_price": float, ...}}`` live CLOB quotes.
+            ``{token_id: L2 book dict}`` live CLOB depth.
         markets:
             Market rows from the DB.
         open_positions:
@@ -59,15 +59,15 @@ class MultiStrategy(BaseStrategy):
 
         Returns
         -------
-        Deduplicated list of Signal objects; first strategy wins on token_id
-        collision.
+        Deduplicated list of DirectionalSignal objects; first strategy wins on
+        yes_token_id collision.
         """
         seen: dict = {}
         for strategy in self._strategies:
             for sig in strategy.compute_signals(
                 probs, books, markets, open_positions=open_positions
             ):
-                key = getattr(sig, "yes_token_id", None) or getattr(sig, "token_id", None)
+                key = sig.yes_token_id
                 if key and key not in seen:
                     seen[key] = sig
         return list(seen.values())

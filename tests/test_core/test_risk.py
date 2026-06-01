@@ -4,20 +4,20 @@ from __future__ import annotations
 import pytest
 
 from core.risk.fixed_fraction import FixedFraction
-from core.types import Signal
+from core.types import OrderIntent
 
 
 # -----------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------
 
-def _signal(mc_prob: float = 0.6, clob_price: float = 0.4) -> Signal:
-    return Signal(
-        token_id   = "tok1",
-        side       = "BUY",
-        mc_prob    = mc_prob,
-        clob_price = clob_price,
-        edge       = mc_prob - clob_price,
+def _signal(executable_price: float = 0.4) -> OrderIntent:
+    return OrderIntent(
+        token_id         = "tok1",
+        side             = "BUY",
+        size_usd         = None,
+        executable_price = executable_price,
+        edge             = 0.2,
     )
 
 
@@ -119,16 +119,16 @@ def test_zero_position_usd_never_approved():
 def test_approve_signal_sell_bypasses_exposure_gate():
     """SELL signals are approved even when BUY headroom is exhausted."""
     risk = FixedFraction(position_usd=20.0, max_total_usd=100.0)
-    sell_sig = Signal(token_id="tok1", side="SELL", mc_prob=0.4,
-                      clob_price=0.60, edge=-0.2)
+    sell_sig = OrderIntent(token_id="tok1", side="SELL", size_usd=None,
+                           executable_price=0.60, edge=0.2)
     assert risk.approve_signal(sell_sig, current_exposure=100.0) is True
 
 
 def test_approve_signal_sell_bypasses_zero_position_usd_gate():
     """position_usd=0 blocks BUY but must not block SELL."""
     risk = FixedFraction(position_usd=0.0, max_total_usd=500.0)
-    sell_sig = Signal(token_id="tok1", side="SELL", mc_prob=0.4,
-                      clob_price=0.60, edge=-0.2)
+    sell_sig = OrderIntent(token_id="tok1", side="SELL", size_usd=None,
+                           executable_price=0.60, edge=0.2)
     assert risk.approve_signal(sell_sig, current_exposure=0.0) is True
 
 
@@ -143,8 +143,8 @@ def test_compute_size_sell_uses_position_shares(db_with_orders):
     # 50 shares open from BUY at 0.40
     risk = FixedFraction(position_usd=20.0, max_total_usd=500.0,
                          max_exit_fraction=1.0)
-    sig = Signal(token_id="tok1", side="SELL", mc_prob=0.4,
-                 clob_price=0.60, edge=-0.2)
+    sig = OrderIntent(token_id="tok1", side="SELL", size_usd=None,
+                      executable_price=0.60, edge=0.2)
     size = risk.compute_size(sig, current_exposure=0.0, positions=tracker)
     # 1.0 * 50 * 0.60 = 30
     assert size == pytest.approx(30.0)
@@ -156,20 +156,20 @@ def test_compute_size_sell_partial_exit(db_with_orders):
     tracker = PositionTracker(db_with_orders)
     risk = FixedFraction(position_usd=20.0, max_total_usd=500.0,
                          max_exit_fraction=0.5)
-    sig = Signal(token_id="tok1", side="SELL", mc_prob=0.4,
-                 clob_price=0.60, edge=-0.2)
+    sig = OrderIntent(token_id="tok1", side="SELL", size_usd=None,
+                      executable_price=0.60, edge=0.2)
     size = risk.compute_size(sig, current_exposure=0.0, positions=tracker)
     # 0.5 * 50 * 0.60 = 15
     assert size == pytest.approx(15.0)
 
 
 def test_compute_size_sell_uses_executable_price_when_set(db_with_orders):
-    """executable_price overrides clob_price for SELL sizing."""
+    """SELL size uses executable_price for sizing."""
     from core.positions import PositionTracker
     tracker = PositionTracker(db_with_orders)
     risk = FixedFraction(position_usd=20.0, max_total_usd=500.0)
-    sig = Signal(token_id="tok1", side="SELL", mc_prob=0.4,
-                 clob_price=0.60, edge=-0.2, executable_price=0.65)
+    sig = OrderIntent(token_id="tok1", side="SELL", size_usd=None,
+                      executable_price=0.65, edge=0.2)
     size = risk.compute_size(sig, current_exposure=0.0, positions=tracker)
     # 1.0 * 50 * 0.65 = 32.5
     assert size == pytest.approx(32.5)
@@ -178,8 +178,8 @@ def test_compute_size_sell_uses_executable_price_when_set(db_with_orders):
 def test_compute_size_sell_zero_when_no_positions():
     """SELL size is 0 when no positions tracker is provided."""
     risk = FixedFraction(position_usd=20.0, max_total_usd=500.0)
-    sig = Signal(token_id="tok1", side="SELL", mc_prob=0.4,
-                 clob_price=0.60, edge=-0.2)
+    sig = OrderIntent(token_id="tok1", side="SELL", size_usd=None,
+                      executable_price=0.60, edge=0.2)
     assert risk.compute_size(sig, current_exposure=0.0) == pytest.approx(0.0)
 
 
@@ -188,8 +188,8 @@ def test_compute_size_sell_zero_when_no_net_shares(db_with_orders):
     from core.positions import PositionTracker
     tracker = PositionTracker(db_with_orders)
     risk = FixedFraction(position_usd=20.0, max_total_usd=500.0)
-    sig = Signal(token_id="tok-unknown", side="SELL", mc_prob=0.4,
-                 clob_price=0.60, edge=-0.2)
+    sig = OrderIntent(token_id="tok-unknown", side="SELL", size_usd=None,
+                      executable_price=0.60, edge=0.2)
     assert risk.compute_size(sig, current_exposure=0.0, positions=tracker) == pytest.approx(0.0)
 
 

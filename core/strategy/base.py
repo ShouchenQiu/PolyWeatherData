@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from core.types import Signal
+    from core.types import DirectionalSignal
 
 
 class BaseStrategy(ABC):
@@ -23,7 +23,7 @@ class BaseStrategy(ABC):
         books:          dict[str, dict],
         markets:        list[dict],
         open_positions: dict[str, int] | None = None,
-    ) -> list["Signal"]:
+    ) -> list["DirectionalSignal"]:
         """Compute trading signals for the current market state.
 
         Parameters
@@ -31,7 +31,7 @@ class BaseStrategy(ABC):
         probs:
             ``{(lo_f, hi_f): probability}`` from ``McSampler.bucket_probs()``.
         books:
-            ``{token_id: {"mid_price": float, ...}}`` live CLOB quotes.
+            ``{token_id: L2 book dict}`` live CLOB depth.
         markets:
             List of market dicts from the DB; each has at minimum
             ``token_id``, ``bucket_lo_f``, ``bucket_hi_f``, ``outcome``.
@@ -42,5 +42,5 @@ class BaseStrategy(ABC):
 
         Returns
         -------
-        List of ``Signal`` instances to be passed to the risk / exchange layer.
+        List of ``DirectionalSignal`` instances for the risk / exchange layer.
         """

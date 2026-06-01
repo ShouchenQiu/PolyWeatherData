@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from core.risk.base import BaseRiskModel
 
 if TYPE_CHECKING:
-    from core.types import Signal
+    from core.types import OrderIntent
 
 
 class RiskPipeline(BaseRiskModel):
@@ -36,7 +36,7 @@ class RiskPipeline(BaseRiskModel):
 
     def approve_signal(
         self,
-        signal:           "Signal",
+        signal:           "OrderIntent",
         current_exposure: float,
     ) -> bool:
         """Return True only when every sub-model approves.
@@ -51,7 +51,7 @@ class RiskPipeline(BaseRiskModel):
 
     def compute_size(
         self,
-        signal:           "Signal",
+        signal:           "OrderIntent",
         current_exposure: float,
         positions:        object | None = None,
     ) -> float:

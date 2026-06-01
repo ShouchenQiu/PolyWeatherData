@@ -16,7 +16,7 @@ from core.risk.fixed_fraction import FixedFraction
 from core.risk.pipeline import RiskPipeline
 from core.strategy.edge import EdgeStrategy
 from core.strategy.multi import MultiStrategy
-from core.types import DirectionalSignal, Signal
+from core.types import DirectionalSignal
 from db.schema import DbClient
 from loops.trading_loop import TradingLoop
 

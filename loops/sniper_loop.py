@@ -131,7 +131,7 @@ class SniperLoop:
         timestamp:  Any,
     ) -> None:
         """Parse ground-truth temperature and place BUY orders on true/false buckets."""
-        from core.types import Signal
+        from core.types import OrderIntent
 
         actual_temp_f = _parse_metar_temp_f(metar_text)
         if actual_temp_f is None:
@@ -216,15 +216,15 @@ class SniperLoop:
                     except Exception:
                         price = 0.95
 
-                sig = Signal(
-                    token_id     = token_id,
-                    side         = "BUY",
-                    mc_prob      = 1.0,
-                    clob_price   = price,
-                    edge         = 1.0 - price,
-                    bucket_lo_f  = lo_f,
-                    bucket_hi_f  = hi_f,
-                    condition_id = condition_id,
+                sig = OrderIntent(
+                    token_id         = token_id,
+                    side             = "BUY",
+                    size_usd         = None,
+                    executable_price = price,
+                    edge             = 1.0 - price,
+                    bucket_lo_f      = lo_f,
+                    bucket_hi_f      = hi_f,
+                    condition_id     = condition_id,
                 )
 
                 if not self.risk.approve_signal(sig, exposure):

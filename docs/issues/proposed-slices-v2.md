@@ -440,7 +440,8 @@ Each vertical slice should be independently verifiable once its blockers are com
   - [ ] `ClobExchange` submits only the provided validated limit price
   - [ ] `ClobExchange` does not fetch books, re-quote, or evaluate edge
   - [ ] Paper fills BUY at asks VWAP and SELL at bids VWAP
-  - [ ] Paper rejects depth-insufficient fills
+  - [x] PaperExchange trusts the caller-validated price; TradingLoop owns depth
+        validation via two `compute_quote()` passes before exchange submission
   - [ ] Paper exchange no longer owns in-memory orders/positions
   - [ ] TradingLoop records returned live/paper order ids with `is_paper` and `executable_price`
 - **Tests**:

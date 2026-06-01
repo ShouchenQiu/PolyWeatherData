@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from core.types import Signal
+    from core.types import OrderIntent
 
 
 class BaseRiskModel(ABC):
@@ -14,7 +14,7 @@ class BaseRiskModel(ABC):
     @abstractmethod
     def approve_signal(
         self,
-        signal:           "Signal",
+        signal:           "OrderIntent",
         current_exposure: float,
     ) -> bool:
         """Return True if the signal should be sent to the exchange.
@@ -22,7 +22,7 @@ class BaseRiskModel(ABC):
         Parameters
         ----------
         signal:
-            Signal to evaluate.
+            OrderIntent to evaluate.
         current_exposure:
             Total open USDC exposure across all positions.
         """
@@ -30,7 +30,7 @@ class BaseRiskModel(ABC):
     @abstractmethod
     def compute_size(
         self,
-        signal:           "Signal",
+        signal:           "OrderIntent",
         current_exposure: float,
         positions:        object | None = None,
     ) -> float:

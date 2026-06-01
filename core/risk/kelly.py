@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from core.risk.base import BaseRiskModel
 
 if TYPE_CHECKING:
-    from core.types import Signal
+    from core.types import OrderIntent
 
 
 class KellyCriterion(BaseRiskModel):
@@ -18,14 +18,14 @@ class KellyCriterion(BaseRiskModel):
 
     def approve_signal(
         self,
-        signal:           "Signal",
+        signal:           "OrderIntent",
         current_exposure: float,
     ) -> bool:
         raise NotImplementedError("KellyCriterion is not yet implemented.")
 
     def compute_size(
         self,
-        signal:           "Signal",
+        signal:           "OrderIntent",
         current_exposure: float,
         positions:        object | None = None,
     ) -> float:
