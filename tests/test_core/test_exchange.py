@@ -1,4 +1,4 @@
-"""Tests for core/exchange/ -- PaperExchange, ClobExchange, ExitSettler."""
+"""Tests for core/exchange/ -- PaperExchange, ClobExchange."""
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +6,6 @@ import asyncio
 import pytest
 
 from core.exchange.paper import PaperExchange
-from core.exchange.settlement import ExitSettler
 
 
 # -----------------------------------------------------------------------
@@ -52,89 +51,6 @@ def test_paper_cancel_always_returns_false():
     """cancel_order returns False; no in-flight tracking."""
     exch = PaperExchange()
     assert exch.cancel_order("any-id") is False
-
-
-# -----------------------------------------------------------------------
-# ExitSettler
-# -----------------------------------------------------------------------
-
-class _FakeExchange:
-    """Minimal exchange stub for ExitSettler tests."""
-
-    def __init__(self, positions: list[dict]) -> None:
-        self._positions = list(positions)
-        self.sell_calls: list[tuple] = []
-
-    def get_positions(self) -> list[dict]:
-        return [p for p in self._positions if p.get("size_usd", 0) > 0]
-
-    def place_order(self, token_id, side, size_usd, price) -> str:
-        self.sell_calls.append((token_id, side, size_usd, price))
-        # Simulate closing the position
-        for p in self._positions:
-            if p["token_id"] == token_id:
-                p["size_usd"] = 0.0
-        return "oid-settler"
-
-    def cancel_order(self, order_id: str) -> bool:
-        return False
-
-
-def test_settler_fallback_sells_open_positions():
-    exch = _FakeExchange([{"token_id": "tok1", "size_usd": 25.0}])
-    settler = ExitSettler(relayer_client=None)
-    result  = settler.settle(
-        event    = {"condition_id": "c1", "token_ids": ["tok1"]},
-        exchange = exch,
-    )
-    assert result == "fallback"
-    assert len(exch.sell_calls) == 1
-    assert exch.sell_calls[0][0] == "tok1"
-    assert exch.sell_calls[0][1] == "SELL"
-
-
-def test_settler_only_closes_relevant_tokens():
-    exch = _FakeExchange([
-        {"token_id": "tok1", "size_usd": 25.0},
-        {"token_id": "tok2", "size_usd": 25.0},
-    ])
-    settler = ExitSettler(relayer_client=None)
-    settler.settle(
-        event    = {"condition_id": "c1", "token_ids": ["tok1"]},
-        exchange = exch,
-    )
-    sold_tokens = [c[0] for c in exch.sell_calls]
-    assert "tok1" in sold_tokens
-    assert "tok2" not in sold_tokens
-
-
-def test_settler_relayer_success_returns_relayer():
-    class FakeRelayer:
-        def settle(self, condition_id):
-            return True
-
-    exch    = _FakeExchange([])
-    settler = ExitSettler(relayer_client=FakeRelayer())
-    result  = settler.settle(
-        event    = {"condition_id": "c1", "token_ids": []},
-        exchange = exch,
-    )
-    assert result == "relayer"
-
-
-def test_settler_relayer_failure_falls_back():
-    class BrokenRelayer:
-        def settle(self, condition_id):
-            raise RuntimeError("network error")
-
-    exch = _FakeExchange([{"token_id": "tok1", "size_usd": 10.0}])
-    settler = ExitSettler(relayer_client=BrokenRelayer())
-    result  = settler.settle(
-        event    = {"condition_id": "c1", "token_ids": ["tok1"]},
-        exchange = exch,
-    )
-    assert result == "fallback"
-    assert len(exch.sell_calls) == 1
 
 
 # -----------------------------------------------------------------------

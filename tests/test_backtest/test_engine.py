@@ -699,7 +699,7 @@ class TestV2V10L2QuotePath:
         assert row["pnl_if_yes"] == pytest.approx(1.0 - 0.55, abs=1e-5)
 
     def test_l2_clob_incomplete_fill_drops_row(self):
-        """When L2 depth is insufficient, the row is dropped (no signal)."""
+        """When NEITHER BUY nor SELL has sufficient depth, row is dropped."""
         pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
         actual_highs = {"2024-01-02": 70.0}
 
@@ -726,6 +726,40 @@ class TestV2V10L2QuotePath:
         df = engine.run("2024-01-01", "2024-01-01",
                         _make_station(), init_hours=[6])
         assert df.empty
+
+    def test_l2_clob_ask_complete_bid_incomplete_keeps_row(self):
+        """ASK side has enough depth for BUY VWAP but BID side does not;
+        row is still kept (clob_price set, bid_vwap NaN)."""
+        pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
+        actual_highs = {"2024-01-02": 70.0}
+
+        rows = [
+            {
+                "timestamp_utc":    pd.Timestamp("2024-01-01 06:00:00", tz="UTC"),
+                "event_end_date":   pd.Timestamp("2024-01-02", tz="UTC"),
+                "market_slug":      "slug-l2",
+                "bucket_lo_f":      65.0,
+                "bucket_hi_f":      75.0,
+                "mid_price_yes":    0.50,
+                "estimated_spread": 0.04,
+                "is_filled":        0,
+                "bids":             [{"price": 0.53, "size": 0.1}],   # insufficient
+                "asks":             [{"price": 0.55, "size": 1000.0}],  # sufficient
+            },
+        ]
+        clob_df = _make_clob_df(rows)
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), clob_df, actual_highs,
+            cold_start_hours=0, quote_size_usd=20.0,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        _make_station(), init_hours=[6])
+
+        assert not df.empty
+        row = df.iloc[0]
+        assert row["clob_price"] == pytest.approx(0.55, abs=1e-5)
+        assert math.isnan(row["bid_vwap"])
+        assert row["price_source"] == "l2_vwap"
 
 
 class TestV2V10LegacyMidFallback:

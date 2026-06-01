@@ -499,10 +499,11 @@ Before using any implementation prompt:
 - ADR-0011
 
 严格只实现 V2V11：
-- SniperLoop risk approve/size 调用带 open_positions
-- SniperLoop 用 compute_quote pricing
+- SniperLoop risk approve/size 调用带 positions (PositionTracker, matches V2F05)
+- SniperLoop 用 compute_quote pricing (two-pass flow: trial + re-quote with actual size)
 - SniperLoop record_order 写 is_paper 和 executable_price
 - SniperLoop 只用 get_tradeable_events
+- SniperLoop 过滤 events 按 station_id (避免跨站交易)
 - 不实现 TradingLoop arbitration
 - 不实现 discovery 本身
 

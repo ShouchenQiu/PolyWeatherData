@@ -10,7 +10,6 @@ from loguru import logger
 from core.settlement_resolver import SettlementResolver
 
 if TYPE_CHECKING:
-    from config.settings import Settings
     from core.exchange.settlement import SettlementRelayer
     from core.positions import PositionTracker
     from data.storage.parquet_store import ParquetStore
@@ -25,7 +24,7 @@ class SettlementLoop:
     1. Reads IEM observed max temperature from the ParquetStore.
     2. Identifies the winning bucket (bucket_lo_f <= max_temp < bucket_hi_f).
     3. Marks each filled/closed order settled with YES/NO-correct payout.
-    4. Enqueues a redeem task for live-mode winning conditions.
+    4. Enqueues a redeem task for live-mode winning conditions (when is_live=True).
     5. Calls EventLifecycle.set_settled() to finalise the event.
 
     When IEM data is unavailable, falls back to ``relayer.resolve_on_chain``
@@ -42,8 +41,10 @@ class SettlementLoop:
         ParquetStore holding IEM observed temperature data.
     db:
         DbClient for querying events, markets, and orders.
-    settings:
-        Settings instance providing ``trading_mode``.
+    is_live:
+        True when running in live trading mode (triggers redeem task
+        enqueue with status='pending'); False for paper mode (enqueues
+        with status='skipped_paper').
     relayer:
         Optional SettlementRelayer for on-chain resolution when IEM data is
         unavailable.  Defaults to None (deferred -- ADR-0007).
@@ -57,7 +58,7 @@ class SettlementLoop:
         positions:        "PositionTracker",
         obs_store:        "ParquetStore",
         db:               "DbClient",
-        settings:         "Settings",
+        is_live:          bool = False,
         relayer:          "SettlementRelayer | None" = None,
         interval_seconds: float = 3_600.0,
     ) -> None:
@@ -65,11 +66,10 @@ class SettlementLoop:
         self._positions        = positions
         self._obs_store        = obs_store
         self._db               = db
-        self._settings         = settings
+        self._is_live          = is_live
         self._relayer          = relayer
         self._interval_seconds = interval_seconds
         self._resolver         = SettlementResolver(db)
-        self._is_live          = (settings.trading_mode == "live")
 
     # ------------------------------------------------------------------
     # Settlement logic
@@ -155,17 +155,30 @@ class SettlementLoop:
     def _enqueue_redeem_if_winner(
         self, condition_id: str, settlements: list,
     ) -> None:
-        """Upsert a redeem task when any token has a net-long winning position.
+        """Upsert a redeem task when any winning token has net-long position.
 
-        Net signed_shares per token must be > 0.  A SELL-only token or a
-        BUY+SELL net-zero pair does not trigger a redeem task.
+        Only tokens with at least one winning settlement (payout > 0) are
+        considered.  A losing BUY order (signed_shares > 0, payout = 0) must
+        NOT trigger a redeem task.
+
+        Net signed_shares per winning token must be > 0.  A SELL-only token
+        or a BUY+SELL net-zero pair does not trigger a redeem task.
 
         Live mode: status='pending'.  Paper mode: status='skipped_paper'.
         """
         from collections import defaultdict
+
+        # Only tokens that actually won (at least one settlement payout > 0)
+        winning_tokens: set[str] = {
+            s.token_id for s in settlements if s.payout > 0.0
+        }
+        if not winning_tokens:
+            return
+
         net_by_token: dict[str, float] = defaultdict(float)
         for s in settlements:
-            net_by_token[s.token_id] += s.signed_shares
+            if s.token_id in winning_tokens:
+                net_by_token[s.token_id] += s.signed_shares
 
         has_net_long = any(v > 0.0 for v in net_by_token.values())
         if not has_net_long:

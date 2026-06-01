@@ -8,7 +8,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from config.settings import Settings
 from core.exchange.settlement import SettlementRelayer
 from core.positions import PositionTracker
 from data.storage.parquet_store import ParquetStore
@@ -58,13 +57,12 @@ def lifecycle() -> EventLifecycle:
 
 @pytest.fixture
 def settlement_loop(db: DbClient, obs_store: ParquetStore, lifecycle: EventLifecycle) -> SettlementLoop:
-    settings = Settings(trading_mode="paper")
     return SettlementLoop(
         lifecycle  = lifecycle,
         positions  = PositionTracker(db),
         obs_store  = obs_store,
         db         = db,
-        settings   = settings,
+        is_live    = False,
     )
 
 
@@ -184,7 +182,7 @@ def test_confirm_settlement_losing_bucket_payout_zero(
         positions  = PositionTracker(db),
         obs_store  = obs_store,
         db         = db,
-        settings   = Settings(trading_mode="paper"),
+        is_live    = False,
     )
     event = _event_row(db, "cid1")
     loop.confirm_settlement(event, "KLGA")
@@ -216,7 +214,7 @@ def test_confirm_settlement_no_obs_data_skips_without_error(
         positions  = PositionTracker(db),
         obs_store  = empty_store,
         db         = db,
-        settings   = Settings(trading_mode="paper"),
+        is_live    = False,
     )
     event = _event_row(db, "cid1")
     loop.confirm_settlement(event, "KLGA")  # must not raise
@@ -280,7 +278,7 @@ def test_confirm_settlement_no_token_not_in_bucket_wins(
         positions=PositionTracker(db),
         obs_store=obs_store,
         db=db,
-        settings=Settings(trading_mode="paper"),
+        is_live=False,
     )
     loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
     assert _order_row(db, "ord-no-outer")["settled_payout"] == pytest.approx(75.0)
@@ -304,7 +302,7 @@ def test_confirm_settlement_no_token_in_winning_bucket_zero(
         positions=PositionTracker(db),
         obs_store=obs_store,
         db=db,
-        settings=Settings(trading_mode="paper"),
+        is_live=False,
     )
     loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
     assert _order_row(db, "ord-no-inner")["settled_payout"] == pytest.approx(0.0)
@@ -334,7 +332,7 @@ def test_no_obs_data_calls_relayer_when_wired(
         positions=PositionTracker(db),
         obs_store=empty_store,
         db=db,
-        settings=Settings(trading_mode="paper"),
+        is_live=False,
         relayer=relayer,
     )
     loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
@@ -354,7 +352,7 @@ def test_no_obs_data_relayer_none_stays_pending(
         positions=PositionTracker(db),
         obs_store=empty_store,
         db=db,
-        settings=Settings(trading_mode="paper"),
+        is_live=False,
         relayer=None,
     )
     loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
@@ -374,7 +372,7 @@ def test_settlement_enqueues_pending_redeem_for_winning_live_condition(
         positions=PositionTracker(db),
         obs_store=obs_store,
         db=db,
-        settings=Settings(trading_mode="live"),
+        is_live=True,
     )
     loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
     tasks = db.get_pending_redeem_tasks()
@@ -394,7 +392,7 @@ def test_settlement_skips_redeem_for_losing_condition(
         positions=PositionTracker(db),
         obs_store=obs_store,
         db=db,
-        settings=Settings(trading_mode="live"),
+        is_live=True,
     )
     loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
     tasks = db.get_pending_redeem_tasks()
@@ -410,7 +408,7 @@ def test_settlement_paper_mode_marks_redeem_skipped_paper(
         positions=PositionTracker(db),
         obs_store=obs_store,
         db=db,
-        settings=Settings(trading_mode="paper"),
+        is_live=False,
     )
     loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
 
@@ -459,7 +457,7 @@ def test_sell_winning_token_payout_zero_no_enqueue(
         positions=PositionTracker(db_signed),
         obs_store=obs_store,
         db=db_signed,
-        settings=Settings(trading_mode="live"),
+        is_live=True,
     )
     loop.confirm_settlement(_event_row(db_signed, "cid1"), "KLGA")
 
@@ -496,7 +494,7 @@ def test_buy_then_sell_net_zero_no_redeem(
         positions=PositionTracker(db_signed),
         obs_store=obs_store,
         db=db_signed,
-        settings=Settings(trading_mode="live"),
+        is_live=True,
     )
     loop.confirm_settlement(_event_row(db_signed, "cid1"), "KLGA")
 
@@ -518,7 +516,7 @@ def test_buy_only_net_long_enqueues_redeem(
         positions=PositionTracker(db_signed),
         obs_store=obs_store,
         db=db_signed,
-        settings=Settings(trading_mode="live"),
+        is_live=True,
     )
     loop.confirm_settlement(_event_row(db_signed, "cid1"), "KLGA")
 
@@ -530,3 +528,34 @@ def test_buy_only_net_long_enqueues_redeem(
     assert len(tasks) == 1
     assert tasks[0]["condition_id"] == "cid1"
     assert tasks[0]["status"] == "pending"
+
+
+def test_losing_buy_no_redeem(
+    db_signed, obs_store, lifecycle,
+):
+    """BUY on losing token (signed_shares > 0 but payout = 0) does NOT enqueue redeem."""
+    db_signed.execute("DELETE FROM orders")
+    # Add a market in the LOSING bucket (70-80F); obs=65.1F is in 60-70
+    db_signed.upsert_market("tok-lose-70-80", "cid1", "slug-70-80", 70.0, 80.0, "YES")
+    db_signed.execute(
+        "INSERT INTO orders "
+        "(order_id, token_id, condition_id, side, size_usd, price, status,"
+        " created_at, filled_shares, signed_shares)"
+        " VALUES ('ord-lose', 'tok-lose-70-80', 'cid1', 'BUY', 100.0, 0.5,"
+        " 'filled', '2025-01-01', 200.0, 200.0)"
+    )
+    loop = SettlementLoop(
+        lifecycle=lifecycle,
+        positions=PositionTracker(db_signed),
+        obs_store=obs_store,
+        db=db_signed,
+        is_live=True,
+    )
+    loop.confirm_settlement(_event_row(db_signed, "cid1"), "KLGA")
+
+    # Losing BUY has payout = 0
+    assert _order_row(db_signed, "ord-lose")["settled_payout"] == pytest.approx(0.0)
+
+    # No redeem task (losing token, even with positive signed_shares)
+    tasks = db_signed.get_pending_redeem_tasks()
+    assert len(tasks) == 0

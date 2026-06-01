@@ -91,7 +91,7 @@ def tracker(db):
     return PositionTracker(db)
 
 
-def _make_loop(db, tracker, settings=None):
+def _make_loop(db, tracker, settings=None, station_id="KLGA"):
     mgr      = MagicMock()
     mgr.queue = MagicMock()
     mgr.start_all = AsyncMock()
@@ -119,6 +119,7 @@ def _make_loop(db, tracker, settings=None):
         positions=tracker,
         db=db,
         settings=settings,
+        station_id=station_id,
     )
 
 
@@ -396,3 +397,49 @@ def test_handle_observation_empty_order_id_not_recorded(db, tracker):
 
     rows = db.query("SELECT order_id FROM orders")
     assert len(rows) == 0
+
+
+# ---------------------------------------------------------------------------
+# V2V11 fix -- SniperLoop filters events by station_id
+# ---------------------------------------------------------------------------
+
+def test_handle_observation_filters_events_by_station(db, tracker):
+    """Only events matching SniperLoop's station_id are traded."""
+    # Add an event for a DIFFERENT station that should be ignored
+    db.upsert_station("KJFK", 40.64, -73.78, "America/New_York")
+    db.upsert_event(
+        condition_id="cid-jfk",
+        question="High temp JFK",
+        event_slug="high-temp-jfk",
+        event_end_date=datetime.now(timezone.utc).date().isoformat(),
+        station_id="KJFK",
+        status="active",
+    )
+    db.upsert_market(
+        token_id="tok-jfk-yes",
+        condition_id="cid-jfk",
+        market_slug="high-60-70f-jfk",
+        bucket_lo_f=60.0,
+        bucket_hi_f=70.0,
+        outcome="YES",
+    )
+    db.upsert_market(
+        token_id="tok-jfk-no",
+        condition_id="cid-jfk",
+        market_slug="high-60-70f-no-jfk",
+        bucket_lo_f=60.0,
+        bucket_hi_f=70.0,
+        outcome="NO",
+    )
+    loop = _make_loop(db, tracker, station_id="KLGA")
+    metar = "KLGA 251951Z 20/14"  # 68F -> 60-70F bucket
+
+    asyncio.run(loop._handle_observation(metar, "NOAA", None))
+
+    # Only orders for KLGA event (cid-1), not KJFK (cid-jfk)
+    rows = db.query(
+        "SELECT condition_id FROM orders WHERE status='filled'"
+    )
+    condition_ids = {r["condition_id"] for r in rows}
+    assert "cid-1" in condition_ids
+    assert "cid-jfk" not in condition_ids

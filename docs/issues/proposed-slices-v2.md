@@ -495,9 +495,10 @@ Each vertical slice should be independently verifiable once its blockers are com
         SELL sizing via `position_shares()`; matches V2F05 contract)
   - [x] SniperLoop prices via `compute_quote()` instead of `best_ask`/mid fallback;
         no-orderbook / incomplete-fill / quote-error all skip (no 0.95 fallback)
-  - [ ] SniperLoop records orders with `is_paper` and `executable_price`
-  - [ ] SniperLoop always uses `get_tradeable_events`
-  - [ ] Missing `get_tradeable_events` raises loudly
+  - [x] SniperLoop records orders with `is_paper` and `executable_price`
+  - [x] SniperLoop always uses `get_tradeable_events`
+  - [x] Missing `get_tradeable_events` raises loudly
+  - [x] SniperLoop filters events by `station_id` (avoids cross-station trading)
 - **Tests**:
   - SniperLoop tests for updated risk method signatures
   - SniperLoop quote-based price test

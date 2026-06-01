@@ -198,7 +198,7 @@ class BotManager:
             positions  = self.positions,
             obs_store  = self.obs_store,
             db         = self.db,
-            settings   = self.settings,
+            is_live    = (settings.trading_mode == "live"),
         )
         self.sniper_loop = SniperLoop(
             sniper_mgr = self.snipers,
@@ -208,6 +208,7 @@ class BotManager:
             positions  = self.positions,
             db         = self.db,
             settings   = self.settings,
+            station_id = self.station.station_id,
         )
 
         # RedeemLoop: only constructed in live mode when SecureClient exists.

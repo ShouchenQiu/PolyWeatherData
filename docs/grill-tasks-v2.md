@@ -589,43 +589,39 @@
   `ModelPipeline`); if `ready=False`, log one structured INFO skip message with
   `reason` and `first_eligible_init`; do not call `pipeline.run()` for this event;
   continue to next event (#3)
-- CHANGE pipeline call: derive `station_config` from `event["station_id"]` and
-  `target_date` from `event["event_end_date"]`; pass both to
-  `ModelPipeline.run(station_config, init_utc, target_date, buckets)` while using
-  `day_offset` only as the ProbabilityStore key (#22 / ADR-0010)
+- IMPLEMENTED (V2V07): pipeline call derives `station_config` from
+  `event["station_id"]` and `target_date` from `event["event_end_date"]`; passes
+  both to `ModelPipeline.run()` (#22 / ADR-0010)
 - IMPLEMENTED (V2V07): null-bucket guard is a DB hard gate in
   `get_markets_for_event()` (`WHERE bucket_lo_f IS NOT NULL AND bucket_hi_f IS NOT
   NULL`); `ForecastLoop` never receives markets with null bucket bounds and requires
   no in-loop filter  (#72)
-- ADD empty probs guard: if `bucket_map` is empty after the DB query, log WARNING
-  and skip `ProbabilityStore.write()` for this event/tick entirely (#72)
-- ADD top-level exception guard in `run()`: wrap the outer `tick()` call (not the
-  per-event inner try) in `except Exception`; log ERROR with traceback and
-  `continue` to next sleep cycle; prevents the coroutine from dying on transient
-  DB or data errors (#72)
+- IMPLEMENTED (V2V07): empty probs guard: if `bucket_map` is empty after the DB
+  query, log WARNING and skip `ProbabilityStore.write()` for this event/tick
+  entirely (#72)
+- IMPLEMENTED (V2V07): top-level exception guard in `run()`: wraps the outer
+  `tick()` call in `except Exception`; logs ERROR with traceback and `continue`
+  to next sleep cycle (#72)
 
 ### loops/settlement_loop.py
-- ADD redeem task enqueue: after marking local order payouts, if any settled order
-  for the condition has winning payout (`settled_payout > 0`) and the bot is in
-  live mode, upsert one `redeem_tasks(condition_id, status="pending")` row. In
-  paper mode, upsert `status="skipped_paper"` or skip task creation explicitly;
-  do not leave a pending redeem task that no loop will process. Do not call the SDK
-  redeem method directly from `SettlementLoop` (#73)
+- IMPLEMENTED (V2V12): redeem task enqueue after settlement: when any winning
+  token (payout > 0) has net signed_shares > 0, upserts a redeem_task row.
+  Live mode: status='pending'; paper mode: status='skipped_paper'.  Losing
+  BUY positions do NOT trigger a redeem task (#73)
+- IMPLEMENTED (V2V12): redeem enqueue gates on winning tokens only; per-token
+  net signed_shares > 0 ensures net-zero BUY+SELL pairs do not trigger redeem
 
 ### loops/redeem_loop.py  [NEW]
-- ADD `RedeemLoop`: polls `redeem_tasks` for rows where
+- IMPLEMENTED (V2V12): `RedeemLoop` polls `redeem_tasks` for rows where
   `status IN ("pending", "failed")`; calls
-  `SecureClient.ctf_redeem_positions_call(condition_id)` once per condition_id;
-  on success writes `status="redeemed"` and `redeemed_at`; on failure writes
-  `status="failed"`, increments `attempt_count`, records `last_error`, logs WARNING,
-  and retries on the next poll cycle (#73)
-- ADD paper guard: skip `ctf_redeem_positions_call` entirely when running in
-  paper mode (`settings.trading_mode == "paper"`); this is a defensive guard only,
-  because the main paper bot does not construct `RedeemLoop`. If reached, mark task
-  `skipped_paper` and log INFO "paper mode: redeem skipped for condition_id={}"
-  (#73)
-- ADD poll interval: `settings.redeem_loop_interval_s: int = 3600` (default 1h);
-  RedeemLoop sleeps between polls (#73)
+  `SecureClient.ctf_redeem_positions_call(condition_id)` once per condition_id
+  via `asyncio.to_thread()`; on success writes `status="redeemed"` and
+  `redeemed_at`; on failure writes `status="failed"` via `mark_redeem_failed()`,
+  increments `attempt_count`, records `last_error`, and retries next cycle (#73)
+- IMPLEMENTED (V2V12): paper guard: marks all pending/failed tasks as
+  `skipped_paper`, never calls the SDK; sleeps `redeem_loop_interval_s`
+- IMPLEMENTED (V2V12): poll interval `settings.redeem_loop_interval_s: int = 3600`
+  (default 1 h); RedeemLoop sleeps between polls (#73)
 
 ### config/settings.py
 - ADD `redeem_loop_interval_s: int = 3600` (#73)

@@ -254,9 +254,9 @@ class BacktestEngine:
         def _row_prices(r: pd.Series) -> tuple[float | None, float | None, float | None]:
             """Return (ask_vwap, bid_vwap, legacy_mid) for one CLOB row.
 
-            L2 rows that fail the depth check are dropped entirely (legacy
-            mid is not a fallback when L2 data exists but is too shallow).
-            Only rows with no L2 data at all use the legacy mid path.
+            Each side is evaluated independently: ask_vwap is kept when BUY
+            depth is sufficient, bid_vwap when SELL depth is sufficient.
+            Legacy mid is used only when the row has no L2 data at all.
             """
             ask = bid = legacy = None
             attempted_l2 = False
@@ -269,8 +269,9 @@ class BacktestEngine:
                     try:
                         q_ask = compute_quote(book, "BUY", self._quote_size_usd)
                         q_bid = compute_quote(book, "SELL", self._quote_size_usd)
-                        if q_ask.complete_fill and q_bid.complete_fill:
+                        if q_ask.complete_fill:
                             ask = q_ask.vwap_price
+                        if q_bid.complete_fill:
                             bid = q_bid.vwap_price
                     except Exception:
                         pass

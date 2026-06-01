@@ -75,6 +75,9 @@ class SniperLoop:
     settings:
         Settings instance providing ``quote_size_usd`` and ``trading_mode``.
         Required; must not be None.
+    station_id:
+        IEM station identifier (e.g. ``"KLGA"``).  Only events matching
+        this station_id are traded.  Required; must not be None.
     """
 
     def __init__(
@@ -86,6 +89,7 @@ class SniperLoop:
         positions:  "PositionTracker",
         db:         "DbClient",
         settings:   "Settings",
+        station_id: str,
     ) -> None:
         self.sniper_mgr       = sniper_mgr
         self.orderbook        = orderbook
@@ -94,6 +98,7 @@ class SniperLoop:
         self.positions        = positions
         self.db               = db
         self.settings         = settings
+        self._station_id      = station_id
         self._is_paper        = (settings.trading_mode == "paper")
         self._quote_size_usd  = settings.quote_size_usd
 
@@ -159,6 +164,9 @@ class SniperLoop:
         active_events = self.db.get_tradeable_events(now_date)
 
         for event in active_events:
+            # Only trade events matching this SniperLoop's station
+            if event.get("station_id") != self._station_id:
+                continue
             condition_id = event["condition_id"]
             markets      = self.db.get_markets_for_event(condition_id)
             if not markets:
