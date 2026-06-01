@@ -1083,8 +1083,30 @@ def test_tick_signal_order_linkage(db) -> None:
 # ---------------------------------------------------------------------------
 
 def test_tick_paper_order_recorded_with_is_paper_and_executable_price(db) -> None:
-    """TradingLoop records is_paper=True and executable_price on paper orders."""
+    """TradingLoop records is_paper=True, executable_price, status='filled',
+    fill_price, and filled_shares for paper orders (V2V09 acceptance criteria).
+
+    A two-level ask book is used so that the VWAP is demonstrably not a
+    round single-price number, proving that compute_quote() contributed to
+    the fill_price persisted in the DB.
+    """
     from core.exchange.paper import PaperExchange
+    from core.pricing.quote import compute_quote
+
+    # Two ask levels with ample depth: $10 at 0.50, $200 at 0.60.
+    # Initial probe (quote_size_usd=50.0) fills entirely within this range.
+    # Actual size (15.0): fully consumes L1 ($10), then $5 at 0.60
+    # VWAP = 15.0 / (20 + 8.333...) ~= 0.5294
+    two_level_book = {
+        "bids": [{"price": "0.48", "size": "1000"}],
+        "asks": [
+            {"price": "0.50", "size": "20"},
+            {"price": "0.60", "size": "1000"},
+        ],
+    }
+    expected_quote = compute_quote(two_level_book, "BUY", 15.0)
+    assert expected_quote.complete_fill
+    expected_vwap  = expected_quote.vwap_price
 
     prob_store = ProbabilityStore()
     station_id = next(iter(STATIONS))
@@ -1102,11 +1124,11 @@ def test_tick_paper_order_recorded_with_is_paper_and_executable_price(db) -> Non
     mock_strategy.compute_signals.return_value = [sig]
     mock_risk = MagicMock(spec=RiskPipeline)
     mock_risk.approve_signal.return_value = True
-    mock_risk.compute_size.return_value   = 20.0
+    mock_risk.compute_size.return_value   = 15.0
 
     mock_orderbook = MagicMock()
-    mock_orderbook.get_book.return_value = _deep_book(0.50)
-    paper_exchange = PaperExchange(book_fetcher=mock_orderbook)
+    mock_orderbook.get_book.return_value = two_level_book
+    paper_exchange = PaperExchange()
 
     loop = TradingLoop(
         prob_store = prob_store,
@@ -1132,12 +1154,16 @@ def test_tick_paper_order_recorded_with_is_paper_and_executable_price(db) -> Non
     assert len(result) == 1
 
     row = db._conn.execute(
-        "SELECT is_paper, executable_price FROM orders WHERE order_id=?",
+        "SELECT is_paper, executable_price, status, fill_price, filled_shares"
+        " FROM orders WHERE order_id=?",
         (result[0],),
     ).fetchone()
     assert row is not None
-    assert row["is_paper"] == 1
-    assert row["executable_price"] is not None and row["executable_price"] > 0
+    assert row["is_paper"]         == 1
+    assert row["status"]           == "filled"
+    assert row["executable_price"] == pytest.approx(expected_vwap, rel=1e-6)
+    assert row["fill_price"]       == pytest.approx(expected_vwap, rel=1e-6)
+    assert row["filled_shares"]    == pytest.approx(15.0 / expected_vwap, rel=1e-4)
 
 
 # ---------------------------------------------------------------------------

@@ -153,10 +153,7 @@ class BotManager:
                 self.orderbook = OrderbookFetcher(PublicClient())
             else:
                 self.orderbook = None
-            self.exchange = PaperExchange(
-                book_fetcher = self.orderbook,
-                alert_bus    = self.alert_bus,
-            )
+            self.exchange = PaperExchange(alert_bus=self.alert_bus)
 
         # Events
         self.discovery  = EventDiscovery(self.db, settings, alert_bus=self.alert_bus)

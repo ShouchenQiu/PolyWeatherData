@@ -1,43 +1,41 @@
 """Paper exchange: simulates order execution without sending real orders.
 
-Uses L2 order book depth (from a book_fetcher) to compute VWAP fill prices
-via compute_quote().  Position and order persistence is the responsibility of
-TradingLoop + PositionTracker; this class holds no in-memory state.
+Depth validation is the responsibility of TradingLoop (two compute_quote()
+passes before this is called).  This class trusts the validated limit price
+passed by the caller and returns a UUID order_id on any valid order, or an
+empty string for degenerate inputs.  No in-memory state is held.
 """
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from core.exchange.base import BaseExchange
-from core.pricing.quote import compute_quote
 
 if TYPE_CHECKING:
     from core.alerts import AlertBus
 
 
 class PaperExchange(BaseExchange):
-    """Simulate order fills using real L2 CLOB book depth.
+    """Simulate order fills without sending real orders to the CLOB.
+
+    Depth validation is performed upstream in TradingLoop via two
+    ``compute_quote()`` passes.  This adapter trusts the ``price`` already
+    validated by the caller and returns a UUID on success.
 
     Parameters
     ----------
-    book_fetcher:
-        Object exposing ``get_book(token_id) -> NormalizedBook`` (dict with
-        ``"bids"`` and ``"asks"`` lists).  When None every ``place_order``
-        call returns an empty string (cannot simulate without a book).
     alert_bus:
-        Optional alert bus for book-fetch failures.
+        Optional alert bus for exchange-level alerts.
     """
 
     def __init__(
         self,
-        book_fetcher: Any = None,
         alert_bus: "AlertBus | None" = None,
     ) -> None:
         super().__init__(alert_bus=alert_bus)
-        self._fetcher = book_fetcher
 
     # ------------------------------------------------------------------
     # BaseExchange interface
@@ -50,49 +48,26 @@ class PaperExchange(BaseExchange):
         size_usd: float,
         price:    float,
     ) -> str:
-        """Simulate a fill by walking L2 depth via compute_quote().
+        """Simulate a fill at the caller-validated limit price.
 
-        BUY orders consume asks ascending; SELL orders consume bids
-        descending.  Returns an order_id string on success, or an empty
-        string when depth is insufficient (complete_fill=False) or when
-        the book cannot be fetched.
+        Returns a UUID order_id on success, or an empty string for
+        degenerate inputs (``price <= 0`` or ``size_usd <= 0``).
 
-        The ``price`` argument is kept for interface compatibility but is
-        not used for fill calculation; the actual fill VWAP comes from the
-        live L2 book.
+        Depth has already been verified by TradingLoop via two
+        ``compute_quote()`` calls; this adapter trusts the validated
+        ``price`` and does not re-fetch the book.
         """
-        if self._fetcher is None:
+        if price <= 0 or size_usd <= 0:
             logger.warning(
-                "[PAPER] No book_fetcher; cannot simulate fill for {} {}",
-                side.upper(), token_id,
-            )
-            return ""
-
-        try:
-            book = self._fetcher.get_book(token_id)
-        except Exception as exc:
-            logger.error("[PAPER] get_book() failed for {}: {}", token_id, exc)
-            self._emit_alert("book_fetch_failure", token_id, str(exc))
-            return ""
-
-        try:
-            quote = compute_quote(book, side.upper(), size_usd)
-        except Exception as exc:
-            logger.error("[PAPER] compute_quote() failed for {}: {}", token_id, exc)
-            return ""
-
-        if not quote.complete_fill:
-            logger.info(
-                "[PAPER] Insufficient depth for {} {} ${:.2f}; "
-                "max_fillable=${:.2f}",
-                side.upper(), token_id, size_usd, quote.max_fillable_usd,
+                "[PAPER] Degenerate order rejected: {} {} size={} price={}",
+                side.upper(), token_id, size_usd, price,
             )
             return ""
 
         order_id = str(uuid.uuid4())
         logger.debug(
-            "[PAPER] {} {} ${:.2f} @ vwap={:.4f} order_id={}",
-            side.upper(), token_id, size_usd, quote.vwap_price, order_id,
+            "[PAPER] {} {} ${:.2f} @ {:.4f} order_id={}",
+            side.upper(), token_id, size_usd, price, order_id,
         )
         return order_id
 

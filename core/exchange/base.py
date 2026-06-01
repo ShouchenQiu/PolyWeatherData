@@ -54,11 +54,6 @@ class BaseExchange(ABC):
             ``"BUY"`` or ``"SELL"``.
         size_usd:
             Nominal USDC amount.
-            NOTE(V2V09): this parameter conflates "USD to spend" (BUY) with
-            "USD proceeds expected" (SELL).  V2V09 will introduce an
-            ``OrderIntent`` dataclass carrying ``size_usd``, ``filled_shares``,
-            and ``executable_price`` so adapters can compute the correct CLOB
-            quantity without ambiguity.
         price:
             Limit price (0..1, binary market convention).
 

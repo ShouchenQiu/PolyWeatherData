@@ -9,33 +9,36 @@ from core.exchange.paper import PaperExchange
 from core.exchange.settlement import ExitSettler
 
 
-def _l2_book(ask: float, ask_size: float = 1000.0,
-             bid: float | None = None, bid_size: float = 1000.0) -> dict:
-    if bid is None:
-        bid = max(0.01, ask - 0.02)
-    return {
-        "bids": [{"price": bid, "size": bid_size}],
-        "asks": [{"price": ask, "size": ask_size}],
-    }
-
-
-class _FakeFetcher:
-    def __init__(self, book: dict) -> None:
-        self._book = book
-
-    def get_book(self, token_id: str) -> dict:
-        return self._book
-
-
 # -----------------------------------------------------------------------
-# PaperExchange -- no fetcher
+# PaperExchange -- basic contract
 # -----------------------------------------------------------------------
 
-def test_paper_no_fetcher_returns_empty_string():
-    """Without a book_fetcher, place_order always returns empty string."""
-    exch = PaperExchange(book_fetcher=None)
+def test_paper_place_order_returns_uuid_on_valid_params():
+    """Valid price and size_usd returns a non-empty UUID string."""
+    exch = PaperExchange()
     oid  = exch.place_order("tok1", "BUY", 20.0, 0.50)
-    assert oid == ""
+    assert isinstance(oid, str) and len(oid) > 0
+
+
+def test_paper_place_order_returns_empty_when_price_zero():
+    """price=0 is degenerate; must return empty string."""
+    exch = PaperExchange()
+    assert exch.place_order("tok1", "BUY", 20.0, 0.0) == ""
+
+
+def test_paper_place_order_returns_empty_when_size_zero():
+    """size_usd=0 is degenerate; must return empty string."""
+    exch = PaperExchange()
+    assert exch.place_order("tok1", "BUY", 0.0, 0.50) == ""
+
+
+def test_paper_two_orders_return_distinct_ids():
+    """Each successful place_order returns a unique order_id."""
+    exch = PaperExchange()
+    oid1 = exch.place_order("tok1", "BUY", 10.0, 0.50)
+    oid2 = exch.place_order("tok1", "BUY", 10.0, 0.50)
+    assert oid1 and oid2
+    assert oid1 != oid2
 
 
 def test_paper_get_positions_always_empty():
@@ -49,64 +52,6 @@ def test_paper_cancel_always_returns_false():
     """cancel_order returns False; no in-flight tracking."""
     exch = PaperExchange()
     assert exch.cancel_order("any-id") is False
-
-
-# -----------------------------------------------------------------------
-# PaperExchange -- BUY fills at asks VWAP
-# -----------------------------------------------------------------------
-
-def test_paper_buy_returns_order_id_on_sufficient_depth():
-    """BUY with sufficient ask depth returns a non-empty order_id."""
-    fetcher = _FakeFetcher(_l2_book(ask=0.50, ask_size=1000.0))
-    exch    = PaperExchange(book_fetcher=fetcher)
-    oid     = exch.place_order("tok1", "BUY", 20.0, 0.50)
-    assert isinstance(oid, str) and len(oid) > 0
-
-
-def test_paper_buy_returns_empty_string_on_insufficient_depth():
-    """BUY size_usd exceeds available ask depth -> empty string."""
-    # Only 5 shares at ask=0.50 -> $2.50 available; requesting $20
-    fetcher = _FakeFetcher(_l2_book(ask=0.50, ask_size=5.0))
-    exch    = PaperExchange(book_fetcher=fetcher)
-    oid     = exch.place_order("tok1", "BUY", 20.0, 0.50)
-    assert oid == ""
-
-
-# -----------------------------------------------------------------------
-# PaperExchange -- SELL fills at bids VWAP
-# -----------------------------------------------------------------------
-
-def test_paper_sell_returns_order_id_on_sufficient_depth():
-    """SELL with sufficient bid depth returns a non-empty order_id."""
-    fetcher = _FakeFetcher(_l2_book(ask=0.52, ask_size=1000.0,
-                                    bid=0.48, bid_size=1000.0))
-    exch    = PaperExchange(book_fetcher=fetcher)
-    oid     = exch.place_order("tok1", "SELL", 20.0, 0.48)
-    assert isinstance(oid, str) and len(oid) > 0
-
-
-def test_paper_sell_returns_empty_string_on_insufficient_depth():
-    """SELL size_usd exceeds available bid depth -> empty string."""
-    # Only 5 shares at bid=0.48 -> $2.40 available; requesting $20
-    fetcher = _FakeFetcher(_l2_book(ask=0.52, ask_size=1000.0,
-                                    bid=0.48, bid_size=5.0))
-    exch    = PaperExchange(book_fetcher=fetcher)
-    oid     = exch.place_order("tok1", "SELL", 20.0, 0.48)
-    assert oid == ""
-
-
-# -----------------------------------------------------------------------
-# PaperExchange -- multiple orders return distinct ids
-# -----------------------------------------------------------------------
-
-def test_paper_two_orders_return_distinct_ids():
-    """Each successful place_order returns a unique order_id."""
-    fetcher = _FakeFetcher(_l2_book(ask=0.50))
-    exch    = PaperExchange(book_fetcher=fetcher)
-    oid1    = exch.place_order("tok1", "BUY", 10.0, 0.50)
-    oid2    = exch.place_order("tok1", "BUY", 10.0, 0.50)
-    assert oid1 and oid2
-    assert oid1 != oid2
 
 
 # -----------------------------------------------------------------------
@@ -222,81 +167,6 @@ def test_orderbook_fetcher_raises_on_client_error():
     fetcher = OrderbookFetcher(BrokenClient())
     with pytest.raises(RuntimeError):
         fetcher.get_book("tok1")
-
-
-# -----------------------------------------------------------------------
-# PaperExchange -- order_failure alert on get_book() failure
-# -----------------------------------------------------------------------
-
-def test_paper_exchange_emits_book_fetch_failure_on_fetcher_error():
-    """When get_book() raises, PaperExchange emits a book_fetch_failure alert."""
-    from core.alerts import AlertBus, AlertEvent
-
-    class BrokenFetcher:
-        def get_book(self, token_id):
-            raise RuntimeError("CLOB timeout")
-
-    emitted: list[AlertEvent] = []
-
-    async def _handler(event: AlertEvent) -> None:
-        emitted.append(event)
-
-    bus  = AlertBus()
-    bus.subscribe(_handler)
-    exch = PaperExchange(book_fetcher=BrokenFetcher(), alert_bus=bus)
-
-    async def _run():
-        exch.place_order("tok1", "BUY", 20.0, 0.50)
-        # give the task a chance to run
-        await asyncio.sleep(0)
-
-    asyncio.run(_run())
-
-    assert len(emitted) == 1
-    assert emitted[0].alert_type == "book_fetch_failure"
-
-
-def test_paper_exchange_no_alert_on_success():
-    """Successful get_book() with sufficient L2 depth must NOT emit an alert."""
-    from core.alerts import AlertBus, AlertEvent
-
-    emitted: list[AlertEvent] = []
-
-    async def _handler(event: AlertEvent) -> None:
-        emitted.append(event)
-
-    bus  = AlertBus()
-    bus.subscribe(_handler)
-    exch = PaperExchange(book_fetcher=_FakeFetcher(_l2_book(ask=0.50)), alert_bus=bus)
-
-    async def _run():
-        oid = exch.place_order("tok1", "BUY", 20.0, 0.50)
-        assert oid != ""   # depth was sufficient
-        await asyncio.sleep(0)
-
-    asyncio.run(_run())
-    assert emitted == []
-
-
-def test_paper_exchange_no_alert_when_no_fetcher():
-    """No fetcher -> no alert bus invoked, falls back to submitted price."""
-    from core.alerts import AlertBus, AlertEvent
-
-    emitted: list[AlertEvent] = []
-
-    async def _handler(event: AlertEvent) -> None:
-        emitted.append(event)
-
-    bus  = AlertBus()
-    bus.subscribe(_handler)
-    exch = PaperExchange(book_fetcher=None, alert_bus=bus)
-
-    async def _run():
-        exch.place_order("tok1", "BUY", 20.0, 0.50)
-        await asyncio.sleep(0)
-
-    asyncio.run(_run())
-    assert emitted == []
 
 
 # -----------------------------------------------------------------------

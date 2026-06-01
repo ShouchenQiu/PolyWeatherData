@@ -453,6 +453,8 @@ class TradingLoop:
                         is_paper         = self._is_paper,
                         executable_price = executable_price,
                     )
+                    if self._is_paper:
+                        self._positions.mark_filled(order_id, executable_price)
                     self._db.update_signal_order_id(
                         signal_id = signal_id,
                         order_id  = order_id,
