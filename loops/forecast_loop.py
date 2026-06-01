@@ -123,24 +123,14 @@ class ForecastLoop:
             if not markets:
                 continue
 
-            # Build bucket list; filter null bounds defensively (DB already
-            # excludes nulls via get_markets_for_event, but guard here too).
-            raw_buckets: list[tuple[float, float]] = []
-            null_count = 0
-            for m in markets:
-                if str(m["outcome"]).upper() != "YES":
-                    continue
-                lo, hi = m["bucket_lo_f"], m["bucket_hi_f"]
-                if lo is None or hi is None:
-                    null_count += 1
-                else:
-                    raw_buckets.append((lo, hi))
-            if null_count:
-                logger.warning(
-                    "ForecastLoop: event {} skipped {} bucket(s) with null bounds",
-                    condition_id, null_count,
-                )
-            buckets = raw_buckets
+            # get_markets_for_event already applies the DB hard gate
+            # (discovery_status='parsed' AND bucket_lo_f IS NOT NULL AND
+            # bucket_hi_f IS NOT NULL), so null-bound rows never reach here.
+            buckets: list[tuple[float, float]] = [
+                (m["bucket_lo_f"], m["bucket_hi_f"])
+                for m in markets
+                if str(m["outcome"]).upper() == "YES"
+            ]
             if not buckets:
                 continue
 

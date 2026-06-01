@@ -335,11 +335,12 @@ class DbClient:
         return [dict(r) for r in cur.fetchall()]
 
     def get_forecast_candidate_events(self, now_date: str, horizon_days: int = 2) -> list[dict]:
-        """Return events whose end date is within [today, today+horizon_days].
+        """Return active events whose end date is within [today, today+horizon_days].
 
-        Excludes resolved, cancelled, and settled events.  The date
-        window is the only filter -- callers do not need to re-implement
-        day_offset arithmetic.
+        Only 'active' events are returned; 'discovered' events are excluded
+        because they have not yet been promoted by DiscoveryLoop and their
+        markets may be incomplete.  The date window is the only other filter
+        -- callers do not need to re-implement day_offset arithmetic.
 
         Parameters
         ----------
@@ -351,7 +352,7 @@ class DbClient:
         cur = self._conn.execute(
             """
             SELECT * FROM events
-            WHERE status NOT IN ('resolved', 'cancelled', 'settled')
+            WHERE status = 'active'
               AND event_end_date >= ?
               AND event_end_date <= date(?, '+' || ? || ' days')
             """,

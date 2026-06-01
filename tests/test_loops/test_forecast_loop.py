@@ -689,7 +689,7 @@ def test_forecast_loop_tick_skips_event_with_unknown_station_id(db, station):
 # -----------------------------------------------------------------------
 
 def test_forecast_loop_tick_filters_null_bucket_bounds(db, station):
-    """tick() skips buckets with None lo or hi and passes only valid buckets to pipeline."""
+    """get_markets_for_event DB hard gate excludes null-bound rows; only valid bucket reaches pipeline."""
     station_id = next(iter(STATIONS))
     db.upsert_event("cid-nb", "q", "slug", "2026-03-25", station_id, status="active")
     db._conn.execute(
@@ -724,7 +724,7 @@ def test_forecast_loop_tick_filters_null_bucket_bounds(db, station):
 
 
 def test_forecast_loop_tick_all_null_buckets_skips_event(db, station):
-    """tick() skips pipeline call entirely when all YES buckets have null bounds."""
+    """All YES buckets with null bounds are excluded by DB hard gate; empty markets list skips pipeline."""
     station_id = next(iter(STATIONS))
     db.upsert_event("cid-allnull", "q", "slug", "2026-03-25", station_id, status="active")
     db._conn.execute(
