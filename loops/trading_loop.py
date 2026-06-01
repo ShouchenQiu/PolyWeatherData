@@ -21,11 +21,13 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import date, datetime, timezone
+import time
 from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from core.alerts import AlertBus, AlertEvent
+from core.observability import ObservabilityRecorder
 from core.pricing.quote import compute_quote
 from core.probability_store import ProbabilitySnapshot, ProbabilityStore
 from core.risk.pipeline import RiskPipeline
@@ -98,6 +100,7 @@ class TradingLoop:
         self._db         = db
         self._orderbook  = orderbook
         self._is_paper   = is_paper
+        self._observability = ObservabilityRecorder(db)
 
     @property
     def interval_s(self) -> int:
@@ -236,10 +239,12 @@ class TradingLoop:
         """
         if now is None:
             now = datetime.now(timezone.utc)
+        started = time.perf_counter()
 
         active_events  = self._db.get_tradeable_events(now.date().isoformat())
         submitted: list[str] = []
         total_signals  = 0
+        mark_prices: dict[str, float] = {}
 
         for event in active_events:
             condition_id = event["condition_id"]
@@ -269,6 +274,14 @@ class TradingLoop:
                     tid = mkt["token_id"]
                     try:
                         books[tid] = self._orderbook.get_book(tid)
+                        mid_price = self._observability.record_market_book(
+                            token_id=tid,
+                            condition_id=condition_id,
+                            tick_utc=now,
+                            book=books[tid],
+                        )
+                        if mid_price is not None:
+                            mark_prices[tid] = mid_price
                     except Exception:
                         logger.warning(
                             "TradingLoop: book fetch failed for token {}", tid
@@ -304,7 +317,7 @@ class TradingLoop:
                     continue
                 intent_token_id, intent_side = result
 
-                # 3. Initial depth check ¡ª orderbook is required for execution.
+                # 3. Initial depth check -- orderbook is required for execution.
                 #    Reject with orderbook_unavailable when not wired so that
                 #    the execution layer contract does not depend on strategies
                 #    never emitting signals without books.
@@ -476,6 +489,20 @@ class TradingLoop:
                     self._reject_signal(signal_id, intent_token_id, intent_side,
                                         executable_price, size_usd,
                                         "order_submission_failed")
+
+        try:
+            self._observability.record_trading_tick(
+                tick_utc=now,
+                duration_ms=(time.perf_counter() - started) * 1000.0,
+                events_processed=len(active_events),
+                signals_processed=total_signals,
+                orders_submitted=len(submitted),
+                positions=self._positions,
+                is_paper=self._is_paper,
+                mark_prices=mark_prices,
+            )
+        except Exception:
+            logger.exception("TradingLoop: failed to record observability snapshot")
 
         logger.info(
             "TradingLoop tick done: events={} signals={} submitted={}",

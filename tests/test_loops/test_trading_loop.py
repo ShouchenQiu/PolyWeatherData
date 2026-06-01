@@ -337,6 +337,52 @@ def test_tick_risk_rejected_emits_alert(db) -> None:
     exchange.place_order.assert_not_called()
 
 
+def test_tick_risk_rejected_records_loop_tick_summary(db) -> None:
+    """Risk rejection persists a TradingLoop tick summary for the UI."""
+    prob_store = ProbabilityStore()
+    station_id = next(iter(STATIONS))
+    now = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+
+    db.upsert_event("cid-r-obs", "q", "slug", "2026-07-04",
+                    station_id, status="active")
+    db.upsert_market("tok-r-obs", "cid-r-obs", "slug-r", 60.0, 70.0, "YES")
+
+    sig = DirectionalSignal(
+        yes_token_id="tok-r-obs", no_token_id="", direction="bullish",
+        model_prob=0.8, reference_price=0.5, edge=0.3,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-r-obs")
+    mock_strategy = MagicMock(spec=MultiStrategy)
+    mock_strategy.compute_signals.return_value = [sig]
+    mock_risk = MagicMock(spec=RiskPipeline)
+    mock_risk.approve_signal.return_value = False
+
+    loop = TradingLoop(
+        prob_store=prob_store,
+        alert_bus=AlertBus(),
+        settings=Settings(),
+        strategy=mock_strategy,
+        risk=mock_risk,
+        exchange=MagicMock(),
+        positions=PositionTracker(db),
+        db=db,
+        orderbook=_make_orderbook(),
+    )
+
+    async def run() -> list[str]:
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-r-obs", 0, snapshot)
+        return await loop.tick(now=now)
+
+    assert asyncio.run(run()) == []
+    tick = db.query("SELECT * FROM loop_ticks WHERE loop_name='TradingLoop'")[0]
+    assert tick["status"] == "success"
+    assert tick["events_processed"] == 1
+    assert tick["signals_processed"] == 1
+    assert tick["orders_submitted"] == 0
+
+
 def test_tick_successful_submit_calls_record_order(db) -> None:
     """Approved signal: exchange order_id forwarded to PositionTracker.record_order."""
     prob_store = ProbabilityStore()
@@ -388,6 +434,63 @@ def test_tick_successful_submit_calls_record_order(db) -> None:
     assert row is not None
     assert row["token_id"]     == "tok-s"
     assert row["condition_id"] == "cid-s"
+
+
+def test_tick_successful_submit_records_price_and_pnl_snapshots(db) -> None:
+    """Approved order persists CLOB price and PnL snapshots for UI charts."""
+    prob_store = ProbabilityStore()
+    station_id = next(iter(STATIONS))
+    now = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+
+    db.upsert_event("cid-ui", "q", "slug", "2026-07-04",
+                    station_id, status="active")
+    db.upsert_market("tok-ui", "cid-ui", "slug-ui", 60.0, 70.0, "YES")
+
+    sig = DirectionalSignal(
+        yes_token_id="tok-ui", no_token_id="", direction="bullish",
+        model_prob=0.8, reference_price=0.5, edge=0.3,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-ui")
+    mock_strategy = MagicMock(spec=MultiStrategy)
+    mock_strategy.compute_signals.return_value = [sig]
+    mock_risk = MagicMock(spec=RiskPipeline)
+    mock_risk.approve_signal.return_value = True
+    mock_risk.compute_size.return_value = 20.0
+    exchange = MagicMock()
+    exchange.place_order.return_value = "oid-ui"
+
+    loop = TradingLoop(
+        prob_store=prob_store,
+        alert_bus=AlertBus(),
+        settings=Settings(),
+        strategy=mock_strategy,
+        risk=mock_risk,
+        exchange=exchange,
+        positions=PositionTracker(db),
+        db=db,
+        orderbook=_make_orderbook(ask=0.50),
+        is_paper=True,
+    )
+
+    async def run() -> list[str]:
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-ui", 0, snapshot)
+        return await loop.tick(now=now)
+
+    assert asyncio.run(run()) == ["oid-ui"]
+    price = db.query(
+        "SELECT * FROM market_price_snapshots WHERE token_id='tok-ui'"
+    )[0]
+    pnl = db.query("SELECT * FROM pnl_snapshots ORDER BY pnl_snapshot_id DESC")[0]
+    tick = db.query("SELECT * FROM loop_ticks WHERE loop_name='TradingLoop'")[0]
+
+    assert price["condition_id"] == "cid-ui"
+    assert price["best_ask"] == pytest.approx(0.50)
+    assert price["mid_price"] == pytest.approx(0.49)
+    assert pnl["is_paper"] == 1
+    assert pnl["gross_exposure"] == pytest.approx(20.0)
+    assert tick["orders_submitted"] == 1
 
 
 def test_tick_failed_submit_no_record_order(db) -> None:

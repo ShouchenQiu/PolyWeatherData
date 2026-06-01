@@ -40,6 +40,68 @@ class Quote:
     complete_fill: bool
 
 
+@dataclass(frozen=True)
+class BookMetrics:
+    """Top-of-book metrics for display, mark prices, and observability."""
+
+    best_bid: float | None
+    best_ask: float | None
+    mid_price: float | None
+    spread: float | None
+    depth_bid: float
+    depth_ask: float
+
+    def as_record(self) -> dict[str, float | None]:
+        return {
+            "best_bid": self.best_bid,
+            "best_ask": self.best_ask,
+            "mid_price": self.mid_price,
+            "vwap_price": None,
+            "spread": self.spread,
+            "depth_bid": self.depth_bid,
+            "depth_ask": self.depth_ask,
+        }
+
+
+def compute_book_metrics(book: NormalizedBook) -> BookMetrics:
+    """Extract display/mark metrics from a normalized L2 book.
+
+    Uses the same sorting and mark-price semantics as ``compute_quote``:
+    best bid is highest bid, best ask is lowest ask, and mid_price exists
+    only when both sides are present.
+    """
+    bids: list[dict] = sorted(
+        book.get("bids", []),
+        key=lambda x: float(x["price"]),
+        reverse=True,
+    )
+    asks: list[dict] = sorted(
+        book.get("asks", []),
+        key=lambda x: float(x["price"]),
+    )
+
+    best_bid: float | None = float(bids[0]["price"]) if bids else None
+    best_ask: float | None = float(asks[0]["price"]) if asks else None
+    mid_price: float | None = (
+        (best_bid + best_ask) / 2.0
+        if best_bid is not None and best_ask is not None
+        else None
+    )
+    spread: float | None = (
+        best_ask - best_bid
+        if best_bid is not None and best_ask is not None
+        else None
+    )
+    return BookMetrics(
+        best_bid=best_bid,
+        best_ask=best_ask,
+        mid_price=mid_price,
+        spread=spread,
+        depth_bid=sum(float(level.get("size", 0.0)) for level in bids),
+        depth_ask=sum(float(level.get("size", 0.0)) for level in asks),
+    )
+
+
 def compute_quote(book: NormalizedBook, side: str, size_usd: float) -> Quote:
     """Walk L2 depth for the requested side and target size.
 
@@ -83,15 +145,10 @@ def compute_quote(book: NormalizedBook, side: str, size_usd: float) -> Quote:
         book.get("asks", []),
         key=lambda x: float(x["price"]),
     )
-
-    best_bid: float | None = float(bids[0]["price"]) if bids else None
-    best_ask: float | None = float(asks[0]["price"]) if asks else None
-    # mid_price requires both sides (ADR-0011: mark price = best-bid/best-ask midpoint).
-    mid_price: float | None = (
-        (best_bid + best_ask) / 2.0
-        if best_bid is not None and best_ask is not None
-        else None
-    )
+    metrics = compute_book_metrics(book)
+    best_bid = metrics.best_bid
+    best_ask = metrics.best_ask
+    mid_price = metrics.mid_price
 
     levels = asks if side == "BUY" else bids
 

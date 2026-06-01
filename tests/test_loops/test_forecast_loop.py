@@ -389,6 +389,65 @@ def test_forecast_loop_tick_writes_prob_store(db, station):
     assert snapshot.quantiles_by_fxx[1]["p50"] == pytest.approx(5.0)
 
 
+def test_forecast_loop_tick_writes_observability_snapshot(db, station):
+    """Successful tick persists forecast snapshot rows for the UI."""
+    _seed_event_and_market(db)
+    pipeline = MagicMock()
+    pipeline.run.return_value = {
+        "probs": {(60.0, 70.0): 0.70},
+        "p50_high_f": 65.0,
+        "quantiles": {
+            1: {"p10": 61.0, "p50": 65.0, "p90": 69.0},
+            2: {"p10": 62.0, "p50": 66.0, "p90": 70.0},
+        },
+    }
+    loop = ForecastLoop(
+        pipeline=pipeline,
+        prob_store=ProbabilityStore(),
+        db=db,
+        station=station,
+    )
+
+    written = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
+
+    assert written == ["cid1"]
+    snapshot = db.query("SELECT * FROM forecast_snapshots WHERE condition_id='cid1'")[0]
+    bucket = db.query(
+        "SELECT * FROM forecast_bucket_probs WHERE snapshot_id=?",
+        (snapshot["snapshot_id"],),
+    )[0]
+    quantiles = db.query(
+        "SELECT * FROM forecast_quantiles WHERE snapshot_id=? ORDER BY fxx",
+        (snapshot["snapshot_id"],),
+    )
+    assert snapshot["station_id"] == next(iter(STATIONS))
+    assert snapshot["p50_high_f"] == pytest.approx(65.0)
+    assert bucket["token_id"] == "tok1"
+    assert bucket["mc_prob"] == pytest.approx(0.70)
+    assert [row["fxx"] for row in quantiles] == [1, 2]
+
+
+def test_forecast_loop_tick_records_failed_loop_tick_on_pipeline_failure(db, station):
+    """Pipeline failure is reflected in loop_ticks for production monitoring."""
+    _seed_event_and_market(db)
+    broken_pipeline = MagicMock()
+    broken_pipeline.run.side_effect = RuntimeError("model unavailable")
+    loop = ForecastLoop(
+        pipeline=broken_pipeline,
+        prob_store=ProbabilityStore(),
+        db=db,
+        station=station,
+    )
+
+    written = asyncio.run(loop.tick(pd.Timestamp("2026-03-25 12:00:00+00:00")))
+
+    assert written == []
+    tick = db.query("SELECT * FROM loop_ticks WHERE loop_name='ForecastLoop'")[0]
+    assert tick["status"] == "failed"
+    assert tick["events_processed"] == 1
+    assert "model unavailable" in tick["error"]
+
+
 def test_forecast_loop_tick_skips_event_outside_day_offset(db, station):
     """Events whose end date is > 2 days from init_time are silently skipped."""
     station_id = next(iter(STATIONS))

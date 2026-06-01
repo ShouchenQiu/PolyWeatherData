@@ -4,11 +4,13 @@ Run with:
     streamlit run ui/app.py
 
 Sidebar navigation:
-    Dashboard  -- real-time P&L and station status
-    Positions  -- order history and paper/live toggle
-    Events     -- event list, lifecycle, bucket prices
-    Backtest   -- interactive backtest controls
-    Model      -- model versions and per-station RMSE
+    Overview          -- production monitoring summary
+    Data Health       -- ingestion and forecast freshness
+    Polymarket        -- events, markets, tokens, latest prices
+    Signals & Orders  -- decision funnel and order lifecycle
+    Forecast & Model  -- forecast snapshots, TFT quantiles, MC buckets
+    PNL & Risk        -- PnL and exposure
+    Backtest & Replay -- backtest result analysis
 """
 from __future__ import annotations
 
@@ -63,7 +65,15 @@ def _load_staleness_from_db(db: DbClient) -> StalenessState:
 # Sidebar navigation
 # ---------------------------------------------------------------------------
 
-PAGES = ["Dashboard", "Positions", "Events", "Backtest", "Model"]
+PAGES = [
+    "Overview",
+    "Data Health",
+    "Polymarket",
+    "Signals & Orders",
+    "Forecast & Model",
+    "PNL & Risk",
+    "Backtest & Replay",
+]
 
 st.sidebar.title("PolyWeatherBot")
 st.sidebar.markdown("---")
@@ -84,22 +94,32 @@ st.sidebar.markdown(
 db = _get_db()
 staleness_state = _load_staleness_from_db(db)
 
-if page == "Dashboard":
-    from ui.pages import dashboard
-    dashboard.render(db, staleness_state=staleness_state)
+is_paper = settings.trading_mode != "live"
 
-elif page == "Positions":
-    from ui.pages import positions
-    positions.render(db, trading_mode=settings.trading_mode)
+if page == "Overview":
+    from ui.pages import overview
+    overview.render(db, staleness_state=staleness_state, is_paper=is_paper)
 
-elif page == "Events":
-    from ui.pages import events
-    events.render(db)
+elif page == "Data Health":
+    from ui.pages import data_health
+    data_health.render(db)
 
-elif page == "Backtest":
-    from ui.pages import backtest
-    backtest.render()
+elif page == "Polymarket":
+    from ui.pages import polymarket
+    polymarket.render(db)
 
-elif page == "Model":
-    from ui.pages import model
-    model.render(db)
+elif page == "Signals & Orders":
+    from ui.pages import signals_orders
+    signals_orders.render(db, is_paper=is_paper)
+
+elif page == "Forecast & Model":
+    from ui.pages import forecast_model
+    forecast_model.render(db)
+
+elif page == "PNL & Risk":
+    from ui.pages import pnl_risk
+    pnl_risk.render(db, is_paper=is_paper)
+
+elif page == "Backtest & Replay":
+    from ui.pages import backtest_replay
+    backtest_replay.render()

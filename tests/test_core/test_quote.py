@@ -1,6 +1,12 @@
 import pytest
 
-from core.pricing.quote import BookLevel, NormalizedBook, Quote, compute_quote
+from core.pricing.quote import (
+    BookLevel,
+    NormalizedBook,
+    Quote,
+    compute_book_metrics,
+    compute_quote,
+)
 from config.settings import Settings
 
 
@@ -263,3 +269,18 @@ def test_normalized_book_typeddict_accepted_by_compute_quote() -> None:
     assert q.vwap_price == pytest.approx(0.62)
     assert q.mid_price == pytest.approx(0.60)
 
+
+def test_compute_book_metrics_sorts_and_summarizes_book() -> None:
+    book = {
+        "bids": [{"price": 0.55, "size": 4.0}, {"price": 0.59, "size": 5.0}],
+        "asks": [{"price": 0.64, "size": 8.0}, {"price": 0.61, "size": 7.0}],
+    }
+
+    metrics = compute_book_metrics(book)
+
+    assert metrics.best_bid == pytest.approx(0.59)
+    assert metrics.best_ask == pytest.approx(0.61)
+    assert metrics.mid_price == pytest.approx(0.60)
+    assert metrics.spread == pytest.approx(0.02)
+    assert metrics.depth_bid == pytest.approx(9.0)
+    assert metrics.depth_ask == pytest.approx(15.0)

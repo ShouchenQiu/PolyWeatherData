@@ -132,6 +132,77 @@ class DbClient:
                 updated_at    TEXT NOT NULL,
                 redeemed_at   TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS loop_ticks (
+                tick_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                loop_name         TEXT NOT NULL,
+                tick_utc          TEXT NOT NULL,
+                status            TEXT NOT NULL
+                                  CHECK (status IN ('success', 'partial', 'failed', 'skipped')),
+                duration_ms       REAL,
+                events_processed  INTEGER NOT NULL DEFAULT 0,
+                signals_processed INTEGER NOT NULL DEFAULT 0,
+                orders_submitted  INTEGER NOT NULL DEFAULT 0,
+                message           TEXT,
+                error             TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS forecast_snapshots (
+                snapshot_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                condition_id   TEXT NOT NULL REFERENCES events(condition_id),
+                station_id     TEXT REFERENCES stations(station_id),
+                init_time      TEXT NOT NULL,
+                event_end_date TEXT,
+                day_offset     INTEGER,
+                tick_utc       TEXT NOT NULL,
+                status         TEXT NOT NULL
+                               CHECK (status IN ('success', 'failed', 'skipped')),
+                p50_high_f     REAL,
+                error          TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS forecast_bucket_probs (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id   INTEGER NOT NULL REFERENCES forecast_snapshots(snapshot_id) ON DELETE CASCADE,
+                token_id      TEXT REFERENCES markets(token_id),
+                bucket_lo_f   REAL,
+                bucket_hi_f   REAL,
+                mc_prob       REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS forecast_quantiles (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id INTEGER NOT NULL REFERENCES forecast_snapshots(snapshot_id) ON DELETE CASCADE,
+                fxx         INTEGER NOT NULL,
+                p10         REAL NOT NULL,
+                p50         REAL NOT NULL,
+                p90         REAL NOT NULL,
+                UNIQUE(snapshot_id, fxx)
+            );
+
+            CREATE TABLE IF NOT EXISTS market_price_snapshots (
+                price_snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_id          TEXT NOT NULL REFERENCES markets(token_id),
+                condition_id      TEXT REFERENCES events(condition_id),
+                tick_utc          TEXT NOT NULL,
+                best_bid          REAL,
+                best_ask          REAL,
+                mid_price         REAL,
+                vwap_price        REAL,
+                spread            REAL,
+                depth_bid         REAL,
+                depth_ask         REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS pnl_snapshots (
+                pnl_snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tick_utc        TEXT NOT NULL,
+                is_paper        INTEGER CHECK (is_paper IN (0, 1)),
+                realized_pnl    REAL NOT NULL,
+                unrealized_pnl  REAL NOT NULL,
+                total_pnl       REAL NOT NULL,
+                gross_exposure  REAL NOT NULL
+            );
             """
         )
         self._conn.commit()
@@ -700,6 +771,166 @@ class DbClient:
             """,
         )
         return [dict(r) for r in cur.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Observability
+    # ------------------------------------------------------------------
+
+    def record_loop_tick(
+        self,
+        loop_name: str,
+        tick_utc: str,
+        status: str,
+        duration_ms: float | None = None,
+        events_processed: int = 0,
+        signals_processed: int = 0,
+        orders_submitted: int = 0,
+        message: str | None = None,
+        error: str | None = None,
+    ) -> int:
+        """Persist one loop execution summary for UI observability."""
+        cur = self._conn.execute(
+            """
+            INSERT INTO loop_ticks
+                (loop_name, tick_utc, status, duration_ms,
+                 events_processed, signals_processed, orders_submitted,
+                 message, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                loop_name, tick_utc, status, duration_ms,
+                events_processed, signals_processed, orders_submitted,
+                message, error,
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def record_forecast_snapshot(
+        self,
+        condition_id: str,
+        station_id: str | None,
+        init_time: str,
+        event_end_date: str | None,
+        day_offset: int | None,
+        tick_utc: str,
+        status: str,
+        p50_high_f: float | None = None,
+        error: str | None = None,
+    ) -> int:
+        """Persist one ForecastLoop model-output snapshot."""
+        cur = self._conn.execute(
+            """
+            INSERT INTO forecast_snapshots
+                (condition_id, station_id, init_time, event_end_date,
+                 day_offset, tick_utc, status, p50_high_f, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                condition_id, station_id, init_time, event_end_date,
+                day_offset, tick_utc, status, p50_high_f, error,
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def record_forecast_bucket_prob(
+        self,
+        snapshot_id: int,
+        token_id: str | None,
+        bucket_lo_f: float | None,
+        bucket_hi_f: float | None,
+        mc_prob: float,
+    ) -> int:
+        """Persist one bucket probability row for a forecast snapshot."""
+        cur = self._conn.execute(
+            """
+            INSERT INTO forecast_bucket_probs
+                (snapshot_id, token_id, bucket_lo_f, bucket_hi_f, mc_prob)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (snapshot_id, token_id, bucket_lo_f, bucket_hi_f, mc_prob),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def record_forecast_quantile(
+        self,
+        snapshot_id: int,
+        fxx: int,
+        p10: float,
+        p50: float,
+        p90: float,
+    ) -> int:
+        """Persist one fxx quantile row for a forecast snapshot."""
+        cur = self._conn.execute(
+            """
+            INSERT INTO forecast_quantiles
+                (snapshot_id, fxx, p10, p50, p90)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (snapshot_id, fxx, p10, p50, p90),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def record_market_price_snapshot(
+        self,
+        token_id: str,
+        condition_id: str | None,
+        tick_utc: str,
+        best_bid: float | None = None,
+        best_ask: float | None = None,
+        mid_price: float | None = None,
+        vwap_price: float | None = None,
+        spread: float | None = None,
+        depth_bid: float | None = None,
+        depth_ask: float | None = None,
+    ) -> int:
+        """Persist one CLOB price/depth observation."""
+        cur = self._conn.execute(
+            """
+            INSERT INTO market_price_snapshots
+                (token_id, condition_id, tick_utc, best_bid, best_ask,
+                 mid_price, vwap_price, spread, depth_bid, depth_ask)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                token_id, condition_id, tick_utc, best_bid, best_ask,
+                mid_price, vwap_price, spread, depth_bid, depth_ask,
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def record_pnl_snapshot(
+        self,
+        tick_utc: str,
+        is_paper: bool | None,
+        realized_pnl: float,
+        unrealized_pnl: float,
+        total_pnl: float,
+        gross_exposure: float,
+    ) -> int:
+        """Persist one PnL/exposure snapshot for UI time-series charts."""
+        cur = self._conn.execute(
+            """
+            INSERT INTO pnl_snapshots
+                (tick_utc, is_paper, realized_pnl, unrealized_pnl,
+                 total_pnl, gross_exposure)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                tick_utc,
+                None if is_paper is None else int(is_paper),
+                realized_pnl,
+                unrealized_pnl,
+                total_pnl,
+                gross_exposure,
+            ),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
 
     # ------------------------------------------------------------------
     # Model versions

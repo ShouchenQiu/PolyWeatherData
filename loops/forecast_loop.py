@@ -13,11 +13,13 @@ from __future__ import annotations
 import asyncio
 
 from datetime import date, datetime, timedelta, timezone
+import time
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 from loguru import logger
 
+from core.observability import ObservabilityRecorder
 from core.probability_store import ProbabilitySnapshot, ProbabilityStore
 from config.stations import STATIONS
 from model.tft import MAX_ENCODER_LENGTH
@@ -64,6 +66,7 @@ class ForecastLoop:
         self.db            = db
         self.station       = station
         self.data_manager  = data_manager
+        self.observability = ObservabilityRecorder(db)
 
     # ------------------------------------------------------------------
     # Public API
@@ -89,10 +92,12 @@ class ForecastLoop:
             else init_time.tz_convert("UTC")
         )
 
+        started = time.perf_counter()
         logger.info("ForecastLoop tick: init_time={}", init_utc)
         forecast_events = self.db.get_forecast_candidate_events(init_utc.date().isoformat())
         logger.debug("ForecastLoop: {} forecast event(s)", len(forecast_events))
         written: list[str] = []
+        errors: list[str] = []
 
         for event in forecast_events:
             condition_id = event["condition_id"]
@@ -152,8 +157,21 @@ class ForecastLoop:
                     station_config, init_utc, buckets,
                     target_date=event["event_end_date"],
                 )
-            except Exception:
+            except Exception as exc:
                 logger.exception("Pipeline failed for event {}", condition_id)
+                errors.append(f"{condition_id}: {exc}")
+                try:
+                    self.observability.record_forecast_failure(
+                        event=event,
+                        init_utc=init_utc,
+                        day_offset=day_offset,
+                        error=exc,
+                    )
+                except Exception:
+                    logger.exception(
+                        "ForecastLoop: failed to record failed snapshot for {}",
+                        condition_id,
+                    )
                 continue
             probs    = result.get("probs", {})
             quantiles = result.get("quantiles", {})
@@ -180,17 +198,51 @@ class ForecastLoop:
             )
             try:
                 await self.prob_store.write(condition_id, day_offset, snapshot)
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "ForecastLoop: prob_store.write failed for event {}", condition_id
                 )
+                errors.append(f"{condition_id}: {exc}")
                 continue
+
+            try:
+                self.observability.record_forecast_success(
+                    event=event,
+                    init_utc=init_utc,
+                    day_offset=day_offset,
+                    markets=markets,
+                    result=result,
+                    snapshot=snapshot,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "ForecastLoop: failed to record observability snapshot for {}",
+                    condition_id,
+                )
+                errors.append(f"{condition_id}: observability write failed: {exc}")
 
             logger.info(
                 "ForecastLoop: wrote {} bucket(s) for event {}",
                 len(snapshot.buckets), condition_id,
             )
             written.append(condition_id)
+
+        if errors and written:
+            status = "partial"
+        elif errors:
+            status = "failed"
+        else:
+            status = "success"
+        try:
+            self.observability.record_forecast_tick(
+                tick_utc=datetime.now(timezone.utc),
+                status=status,
+                duration_ms=(time.perf_counter() - started) * 1000.0,
+                events_processed=len(forecast_events),
+                error="; ".join(errors) if errors else None,
+            )
+        except Exception:
+            logger.exception("ForecastLoop: failed to record loop tick")
 
         logger.info("ForecastLoop tick done: {} event(s) written", len(written))
         return written
