@@ -171,7 +171,7 @@ def test_clob_exchange_place_order_calls_place_limit_order():
     assert len(placed) == 1
     assert placed[0]["token_id"] == "tok1"
     assert placed[0]["price"] == pytest.approx(0.55)
-    assert placed[0]["size"] == pytest.approx(50.0)
+    assert placed[0]["size"] == pytest.approx(50.0 / 0.55, rel=1e-4)  # shares = size_usd / price
     assert placed[0]["side"] == "BUY"
 
 

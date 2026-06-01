@@ -44,14 +44,21 @@ class ClobExchange(BaseExchange):
     ) -> str:
         """Submit a limit order via the CLOB API.
 
-        Delegates to ``SecureClient.place_limit_order()``.  Returns the
-        exchange-assigned order ID, or an empty string on rejection.
+        Delegates to ``SecureClient.place_limit_order()``.  Converts
+        size_usd to shares (size_usd / price) since the CLOB API ``size``
+        parameter is in outcome shares, not USD notional.
+
+        Returns the exchange-assigned order ID, or an empty string on
+        rejection.
         """
+        # Convert USD notional to shares: size_usd / price.
+        # price is in (0,1]; size_usd is in USD.
+        shares = size_usd / price if price > 0 else 0.0
         try:
             resp = self._client.place_limit_order(
                 token_id=token_id,
                 price=price,
-                size=size_usd,
+                size=shares,
                 side=side.upper(),
             )
         except Exception as exc:

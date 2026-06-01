@@ -5,10 +5,13 @@ import asyncio
 from typing import TYPE_CHECKING
 
 try:
-    from polymarket_client import PublicClient, SecureClient  # type: ignore[import-untyped]
+    from polymarket import PublicClient, SecureClient  # type: ignore[import-untyped]
 except ImportError:
-    PublicClient = None  # type: ignore[assignment,misc]
-    SecureClient = None  # type: ignore[assignment,misc]
+    try:
+        from polymarket_client import PublicClient, SecureClient  # type: ignore[import-untyped]
+    except ImportError:
+        PublicClient = None  # type: ignore[assignment,misc]
+        SecureClient = None  # type: ignore[assignment,misc]
 
 if TYPE_CHECKING:
     from config.settings import Settings

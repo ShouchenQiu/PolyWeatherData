@@ -252,16 +252,36 @@ class EventDiscovery:
         """Fetch events from the Gamma API.
 
         Uses ``PublicClient.list_events(live=True, tag_slug="weather")`` when
-        the SDK is available (ADR-0009).  Falls back to a raw ``requests.get``
-        call when the SDK is not installed (offline / test mode).
-        """
-        try:
-            from polymarket_client import PublicClient  # type: ignore[import-untyped]
-            client = PublicClient()
-            return list(client.list_events(live=True, tag_slug="weather"))
-        except ImportError:
-            pass
+        the unified SDK is available (ADR-0009).  The SDK returns a paginator;
+        iterate through pages and convert typed models to dicts for downstream
+        compatibility.
 
+        Falls back to a raw ``requests.get`` call when the SDK is not installed
+        (offline / test mode).
+        """
+        # Try the unified Python SDK first (package: polymarket-client).
+        try:
+            from polymarket import PublicClient  # type: ignore[import-untyped]
+        except ImportError:
+            try:
+                from polymarket_client import PublicClient  # type: ignore[import-untyped]
+            except ImportError:
+                PublicClient = None  # type: ignore[assignment]
+
+        if PublicClient is not None:
+            try:
+                with PublicClient() as client:
+                    paginator = client.list_events(live=True, tag_slug="weather")
+                    events: list[dict] = []
+                    for page in paginator:
+                        for ev in page.items:
+                            # Convert SDK typed model to dict for downstream
+                            events.append(self._event_to_dict(ev))
+                    return events
+            except Exception as exc:
+                logger.warning("EventDiscovery: SDK fetch failed ({}); falling back to raw requests", exc)
+
+        # Raw requests fallback.
         import requests
         url = self._gamma_api_url + self._EVENTS_ENDPOINT
         try:
@@ -272,6 +292,44 @@ class EventDiscovery:
             raise RuntimeError(
                 f"Gamma API request failed: {exc}"
             ) from exc
+
+    @staticmethod
+    def _event_to_dict(ev: object) -> dict:
+        """Convert an SDK Event model to a plain dict for downstream processing.
+
+        The unified SDK returns typed models (Event, Market) with attribute
+        access.  This adapter converts them to the dict shape the remaining
+        discovery pipeline expects.
+        """
+        markets_raw: list[dict] = []
+        for mkt in getattr(ev, "markets", ()):
+            mkt_dict: dict = {}
+            for field in ("id", "slug", "condition_id", "question",
+                          "description", "category", "icon", "image"):
+                val = getattr(mkt, field, None)
+                if val is not None:
+                    mkt_dict[field] = str(val) if not isinstance(val, (str, type(None))) else val
+            # clobTokenIds: serialise token_id tuples to JSON
+            outcomes = getattr(mkt, "outcomes", None)
+            if outcomes is not None:
+                yes_tok = getattr(outcomes, "yes", None)
+                no_tok  = getattr(outcomes, "no", None)
+                yes_tid = getattr(yes_tok, "token_id", None) if yes_tok else None
+                no_tid  = getattr(no_tok, "token_id", None) if no_tok else None
+                token_ids = [tid for tid in (yes_tid, no_tid) if tid is not None]
+                mkt_dict["clobTokenIds"] = json.dumps(token_ids)
+                mkt_dict["outcomes"] = json.dumps(["Yes", "No"])
+            markets_raw.append(mkt_dict)
+
+        return {
+            "id":           str(getattr(ev, "id", "")),
+            "slug":         getattr(ev, "slug", None) or "",
+            "title":        getattr(ev, "title", None) or "",
+            "markets":      markets_raw,
+            "created_at":   str(getattr(ev, "created_at", "")) if getattr(ev, "created_at", None) else "",
+            "updated_at":   str(getattr(ev, "updated_at", "")) if getattr(ev, "updated_at", None) else "",
+            "closed":       getattr(ev, "closed", False),
+        }
 
     def _normalize_market_rows(
         self, markets: list[dict], condition_id: str

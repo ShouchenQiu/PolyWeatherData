@@ -89,10 +89,16 @@ class RedeemLoop:
 
         Runs in a thread via ``asyncio.to_thread`` to avoid blocking the
         bot's event loop on slow RPC calls.
+
+        The unified SDK uses ``redeem_positions(condition_id=...)`` which
+        returns a handle; call ``handle.wait()`` for confirmation.
         """
         logger.info("RedeemLoop: processing {}", condition_id)
         try:
-            self._secure.ctf_redeem_positions_call(condition_id)
+            handle = self._secure.redeem_positions(condition_id=condition_id)
+            # Wait for the on-chain transaction to confirm.
+            if hasattr(handle, "wait"):
+                handle.wait()
         except Exception as exc:
             err_msg = f"{type(exc).__name__}: {exc}"
             logger.warning(

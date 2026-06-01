@@ -37,7 +37,7 @@ def test_run_processes_pending_task_and_marks_redeemed(db):
     db.enqueue_redeem_task("cid-1", status="pending")
 
     secure = MagicMock()
-    secure.ctf_redeem_positions_call.return_value = None  # no error
+    secure.redeem_positions.return_value = None  # no error
 
     loop = RedeemLoop(db, secure, _settings())
 
@@ -54,7 +54,7 @@ def test_run_processes_pending_task_and_marks_redeemed(db):
 
     asyncio.run(_run_one_cycle())
 
-    secure.ctf_redeem_positions_call.assert_called_once_with("cid-1")
+    secure.redeem_positions.assert_called_once_with(condition_id="cid-1")
     # After success, no pending/failed tasks remain
     remaining = db.get_pending_redeem_tasks()
     assert len(remaining) == 0
@@ -74,7 +74,7 @@ def test_run_failure_increments_attempt_and_records_error(db):
     db.enqueue_redeem_task("cid-2", status="pending")
 
     secure = MagicMock()
-    secure.ctf_redeem_positions_call.side_effect = RuntimeError("rpc timeout")
+    secure.redeem_positions.side_effect = RuntimeError("rpc timeout")
 
     loop = RedeemLoop(db, secure, _settings())
 
@@ -126,7 +126,7 @@ def test_paper_mode_marks_pending_tasks_skipped_paper(db):
     asyncio.run(_run())
 
     # SDK must not have been called
-    secure.ctf_redeem_positions_call.assert_not_called()
+    secure.redeem_positions.assert_not_called()
 
     # Both tasks should be skipped_paper
     for cid in ("cid-3", "cid-4-fail"):
@@ -157,4 +157,4 @@ def test_run_no_pending_tasks_does_not_call_sdk(db):
             pass
 
     asyncio.run(_run())
-    secure.ctf_redeem_positions_call.assert_not_called()
+    secure.redeem_positions.assert_not_called()
