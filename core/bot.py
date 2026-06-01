@@ -205,6 +205,7 @@ class BotManager:
             exchange   = self.exchange,
             positions  = self.positions,
             db         = self.db,
+            settings   = self.settings,
         )
 
     # ------------------------------------------------------------------

@@ -46,6 +46,7 @@ def _parse_metar_temp_f(metar_text: str) -> float | None:
     return None
 
 if TYPE_CHECKING:
+    from config.settings import Settings
     from core.exchange.base import BaseExchange
     from core.positions import PositionTracker
     from core.risk.base import BaseRiskModel
@@ -61,7 +62,8 @@ class SniperLoop:
     sniper_mgr:
         SniperManager whose queue yields (metar_text, source, timestamp).
     orderbook:
-        Duck-typed fetcher with ``get_book(token_id) -> dict``.
+        Duck-typed fetcher with ``get_book(token_id) -> dict`` that returns
+        a normalized L2 book (bids/asks).
     risk:
         BaseRiskModel implementation.
     exchange:
@@ -70,6 +72,9 @@ class SniperLoop:
         PositionTracker backed by the DB.
     db:
         DbClient for querying active events and markets.
+    settings:
+        Settings instance providing ``quote_size_usd`` and ``trading_mode``.
+        Required; must not be None.
     """
 
     def __init__(
@@ -80,13 +85,17 @@ class SniperLoop:
         exchange:   "BaseExchange",
         positions:  "PositionTracker",
         db:         "DbClient",
+        settings:   "Settings",
     ) -> None:
-        self.sniper_mgr = sniper_mgr
-        self.orderbook  = orderbook
-        self.risk       = risk
-        self.exchange   = exchange
-        self.positions  = positions
-        self.db         = db
+        self.sniper_mgr       = sniper_mgr
+        self.orderbook        = orderbook
+        self.risk             = risk
+        self.exchange         = exchange
+        self.positions        = positions
+        self.db               = db
+        self.settings         = settings
+        self._is_paper        = (settings.trading_mode == "paper")
+        self._quote_size_usd  = settings.quote_size_usd
 
     # ------------------------------------------------------------------
     # Public API
@@ -131,6 +140,7 @@ class SniperLoop:
         timestamp:  Any,
     ) -> None:
         """Parse ground-truth temperature and place BUY orders on true/false buckets."""
+        from core.pricing.quote import compute_quote
         from core.types import OrderIntent
 
         actual_temp_f = _parse_metar_temp_f(metar_text)
@@ -146,10 +156,7 @@ class SniperLoop:
         )
 
         now_date = datetime.now(timezone.utc).date().isoformat()
-        if hasattr(self.db, "get_tradeable_events"):
-            active_events = self.db.get_tradeable_events(now_date)
-        else:
-            active_events = self.db.get_active_events()
+        active_events = self.db.get_tradeable_events(now_date)
 
         for event in active_events:
             condition_id = event["condition_id"]
@@ -206,13 +213,15 @@ class SniperLoop:
                     )
                     continue
 
-                # Fetch best ask from orderbook; fall back to 0.95
+                # Price via compute_quote; orderbook is required for
+                # execution.  Fall back to 0.95 when not wired.
                 if self.orderbook is None:
                     price = 0.95
                 else:
                     try:
                         book  = self.orderbook.get_book(token_id)
-                        price = book.get("best_ask") or book.get("mid_price") or 0.95
+                        quote = compute_quote(book, "BUY", self._quote_size_usd)
+                        price = quote.vwap_price if quote.complete_fill else 0.95
                     except Exception:
                         price = 0.95
 
@@ -229,7 +238,9 @@ class SniperLoop:
 
                 if not self.risk.approve_signal(sig, exposure):
                     continue
-                size = self.risk.compute_size(sig, exposure)
+                size = self.risk.compute_size(
+                    sig, exposure, positions=self.positions,
+                )
                 if size <= 0:
                     continue
 
@@ -245,6 +256,15 @@ class SniperLoop:
                     )
                     continue
                 self.positions.record_order(
-                    order_id, token_id, condition_id, "BUY", size, price
+                    order_id         = order_id,
+                    token_id         = token_id,
+                    condition_id     = condition_id,
+                    side             = "BUY",
+                    size_usd         = size,
+                    price            = price,
+                    is_paper         = self._is_paper,
+                    executable_price = price,
                 )
+                if self._is_paper:
+                    self.positions.mark_filled(order_id, price)
                 exposure += size

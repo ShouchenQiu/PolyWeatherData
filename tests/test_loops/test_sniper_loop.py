@@ -91,16 +91,26 @@ def tracker(db):
     return PositionTracker(db)
 
 
-def _make_loop(db, tracker):
+def _make_loop(db, tracker, settings=None):
     mgr      = MagicMock()
     mgr.queue = MagicMock()
     mgr.start_all = AsyncMock()
     mgr.stop_all = AsyncMock()
     book_fetcher = MagicMock()
-    book_fetcher.get_book.return_value = {"best_ask": 0.80}
+    book_fetcher.get_book.return_value = {
+        "bids": [{"price": 0.78, "size": 1000.0}],
+        "asks": [{"price": 0.80, "size": 1000.0}],
+        "best_bid": 0.78,
+        "best_ask": 0.80,
+        "mid_price": 0.79,
+    }
     exchange = MagicMock()
     exchange.place_order.return_value = "ord-sniper-1"
     risk = FixedFraction(position_usd=20.0, max_total_usd=1000.0)
+    if settings is None:
+        settings = MagicMock()
+        settings.trading_mode   = "paper"
+        settings.quote_size_usd = 20.0
     return SniperLoop(
         sniper_mgr=mgr,
         orderbook=book_fetcher,
@@ -108,6 +118,7 @@ def _make_loop(db, tracker):
         exchange=exchange,
         positions=tracker,
         db=db,
+        settings=settings,
     )
 
 
@@ -124,8 +135,8 @@ def test_handle_observation_calls_record_order(db, tracker):
 
     asyncio.run(loop._handle_observation(metar, "NOAA", None))
 
-    # At least one pending order recorded
-    rows = db.query("SELECT order_id, status FROM orders WHERE status='pending'")
+    # At least one filled order recorded (paper mode fills immediately)
+    rows = db.query("SELECT order_id, status FROM orders WHERE status='filled'")
     assert len(rows) >= 1
 
 
@@ -198,6 +209,111 @@ def test_handle_observation_skips_invalid_bucket(db, tracker):
     rows = db.query("SELECT order_id FROM orders")
     assert len(rows) == 0
 
+# ---------------------------------------------------------------------------
+# V2V11 -- SniperLoop alignment with V2 contracts
+# ---------------------------------------------------------------------------
+
+class TestV2V11SniperQuotePricing:
+    """SniperLoop prices via compute_quote instead of best_ask/mid fallback."""
+
+    def test_uses_compute_quote_for_pricing(self, db, tracker):
+        """Price comes from compute_quote VWAP, not best_ask."""
+        loop = _make_loop(db, tracker)
+        # Book: ask at 0.80, bid at 0.78 with plenty of depth
+        loop.orderbook.get_book.return_value = {
+            "bids": [{"price": 0.78, "size": 1000.0}],
+            "asks": [{"price": 0.80, "size": 1000.0}],
+        }
+        metar = "KLGA 251951Z 20/14"  # 68F -> 60-70F bucket
+
+        asyncio.run(loop._handle_observation(metar, "NOAA", None))
+
+        rows = db.query("SELECT price FROM orders WHERE status='filled'")
+        assert rows
+        # BUY VWAP from asks at 0.80 = 0.80
+        assert rows[0]["price"] == pytest.approx(0.80)
+
+
+class TestV2V11SniperOrderRecording:
+    """SniperLoop records orders with is_paper and executable_price."""
+
+    def test_record_order_passes_is_paper_and_executable_price(self, db, tracker):
+        """Verifies record_order receives the V2 keyword arguments."""
+        loop = _make_loop(db, tracker)
+        metar = "KLGA 251951Z 20/14"
+
+        asyncio.run(loop._handle_observation(metar, "NOAA", None))
+
+        rows = db.query(
+            "SELECT is_paper, executable_price FROM orders WHERE status='filled'"
+        )
+        assert rows
+        assert rows[0]["is_paper"] == 1   # paper mode
+        assert rows[0]["executable_price"] == pytest.approx(0.80)
+
+    def test_paper_mode_calls_mark_filled(self, db, tracker):
+        """Paper mode marks orders filled immediately after recording."""
+        loop = _make_loop(db, tracker)
+        metar = "KLGA 251951Z 20/14"
+
+        asyncio.run(loop._handle_observation(metar, "NOAA", None))
+
+        rows = db.query(
+            "SELECT status, fill_price FROM orders WHERE status='filled'"
+        )
+        assert rows
+        assert rows[0]["status"] == "filled"
+        assert rows[0]["fill_price"] == pytest.approx(0.80)
+
+
+class TestV2V11SniperEventQuery:
+    """SniperLoop always uses get_tradeable_events."""
+
+    def test_get_tradeable_events_called_with_today_date(self, db, tracker):
+        """SniperLoop calls get_tradeable_events; no more get_active_events fallback."""
+        db_mock = MagicMock(wraps=db)
+        db_mock.get_tradeable_events.return_value = db.get_tradeable_events(
+            datetime.now(timezone.utc).date().isoformat()
+        )
+        loop = _make_loop(db_mock, tracker)
+        metar = "KLGA 251951Z 20/14"
+
+        asyncio.run(loop._handle_observation(metar, "NOAA", None))
+
+        db_mock.get_tradeable_events.assert_called_once()
+        # get_active_events must not be called (no fallback)
+        get_active = getattr(db_mock, "get_active_events", None)
+        if get_active is not None:
+            get_active.assert_not_called()
+
+    def test_missing_get_tradeable_events_raises(self, db, tracker):
+        """A DbClient without get_tradeable_errors raises AttributeError (no
+        silent fallback to get_active_events)."""
+        db_mock = MagicMock()
+        del db_mock.get_tradeable_events  # remove the method
+        # Must also provide the other methods used by _handle_observation
+        db_mock.get_markets_for_event.return_value = []
+        loop = _make_loop(db_mock, tracker)
+        metar = "KLGA 251951Z 20/14"
+
+        with pytest.raises(AttributeError):
+            asyncio.run(loop._handle_observation(metar, "NOAA", None))
+
+    def test_compute_size_receives_positions(self, db, tracker):
+        """compute_size() is called with positions=self.positions."""
+        risk_mock = MagicMock()
+        risk_mock.approve_signal.return_value = True
+        risk_mock.compute_size.return_value = 20.0
+        loop = _make_loop(db, tracker)
+        loop.risk = risk_mock
+        metar = "KLGA 251951Z 20/14"
+
+        asyncio.run(loop._handle_observation(metar, "NOAA", None))
+
+        # compute_size must have been called with positions= keyword
+        _, kwargs = risk_mock.compute_size.call_args
+        assert "positions" in kwargs
+        assert kwargs["positions"] is tracker
 
 def test_handle_observation_orderbook_none_uses_fallback_price(db, tracker):
     """Missing orderbook uses explicit 0.95 price fallback."""
@@ -206,7 +322,7 @@ def test_handle_observation_orderbook_none_uses_fallback_price(db, tracker):
 
     asyncio.run(loop._handle_observation("KLGA 251951Z 20/14", "NOAA", None))
 
-    rows = db.query("SELECT price FROM orders WHERE status='pending'")
+    rows = db.query("SELECT price FROM orders WHERE status='filled'")
     assert rows
     assert rows[0]["price"] == pytest.approx(0.95)
 
