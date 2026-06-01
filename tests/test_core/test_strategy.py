@@ -5,7 +5,7 @@ import pytest
 
 from core.strategy.base import BaseStrategy
 from core.strategy.edge import EdgeStrategy
-from core.types import Signal
+from core.types import DirectionalSignal, Signal
 
 
 # -----------------------------------------------------------------------
@@ -23,41 +23,51 @@ def _market(lo_f: float, hi_f: float, token_id: str,
     }
 
 
-def _book(token_id: str, mid: float) -> dict[str, dict]:
-    return {token_id: {"mid_price": mid}}
+def _l2_book(token_id: str, ask_price: float,
+             bid_price: float | None = None) -> dict[str, dict]:
+    """L2 book with 1000-share depth so quote_size_usd always fills."""
+    if bid_price is None:
+        bid_price = max(0.01, ask_price - 0.02)
+    return {
+        token_id: {
+            "bids": [{"price": bid_price, "size": 1000.0}],
+            "asks": [{"price": ask_price, "size": 1000.0}],
+        }
+    }
 
 
 # -----------------------------------------------------------------------
 # Basic signal generation
 # -----------------------------------------------------------------------
 
-def test_buy_signal_when_edge_exceeds_threshold():
+def test_bullish_signal_when_edge_exceeds_threshold():
     strat   = EdgeStrategy(min_edge=0.04)
     probs   = {(60.0, 70.0): 0.55}   # model says 55%
-    books   = _book("tok1", 0.48)     # CLOB says 48%  => edge = 0.07
+    books   = _l2_book("tok1", 0.48) # YES ask = 0.48  => edge = 0.07
     markets = [_market(60.0, 70.0, "tok1")]
 
     sigs = strat.compute_signals(probs, books, markets)
     assert len(sigs) == 1
-    assert sigs[0].side == "BUY"
+    assert sigs[0].direction == "bullish"
     assert abs(sigs[0].edge - 0.07) < 1e-9
 
 
-def test_sell_signal_when_edge_below_negative_threshold():
+def test_bearish_signal_when_yes_overpriced():
     strat   = EdgeStrategy(min_edge=0.04)
     probs   = {(60.0, 70.0): 0.30}   # model says 30%
-    books   = _book("tok1", 0.38)     # CLOB says 38%  => edge = -0.08
+    books   = _l2_book("tok1", 0.38) # YES ask = 0.38  => edge = -0.08
     markets = [_market(60.0, 70.0, "tok1")]
 
     sigs = strat.compute_signals(probs, books, markets)
     assert len(sigs) == 1
-    assert sigs[0].side == "SELL"
+    assert sigs[0].direction == "bearish"
+    assert abs(sigs[0].edge - 0.08) < 1e-9
 
 
 def test_no_signal_when_edge_below_threshold():
     strat   = EdgeStrategy(min_edge=0.04)
     probs   = {(60.0, 70.0): 0.50}
-    books   = _book("tok1", 0.49)     # edge = 0.01  < min_edge
+    books   = _l2_book("tok1", 0.49)  # edge = 0.01  < min_edge
     markets = [_market(60.0, 70.0, "tok1")]
 
     sigs = strat.compute_signals(probs, books, markets)
@@ -68,7 +78,7 @@ def test_no_signal_below_threshold():
     """Edge below min_edge produces no signal (min_edge=0.05, edge~=0.04)."""
     strat   = EdgeStrategy(min_edge=0.05)
     probs   = {(60.0, 70.0): 0.54}   # edge ~0.04 < 0.05
-    books   = _book("tok1", 0.50)
+    books   = _l2_book("tok1", 0.50)
     markets = [_market(60.0, 70.0, "tok1")]
 
     sigs = strat.compute_signals(probs, books, markets)
@@ -76,14 +86,71 @@ def test_no_signal_below_threshold():
 
 
 # -----------------------------------------------------------------------
-# NO-outcome tokens are skipped
+# NO-outcome market alone produces no signal (YES drives signal generation)
 # -----------------------------------------------------------------------
 
-def test_no_outcome_tokens_are_skipped():
+def test_no_outcome_market_produces_no_signal():
+    """A bucket with only a NO-outcome market does not produce a signal.
+
+    Signal generation is driven by YES market; NO token_id is carried
+    in the signal for arbitration but does not trigger its own signal.
+    """
     strat   = EdgeStrategy(min_edge=0.04)
     probs   = {(60.0, 70.0): 0.70}
-    books   = _book("tok-no", 0.30)
+    books   = _l2_book("tok-no", 0.30)
     markets = [_market(60.0, 70.0, "tok-no", outcome="No")]
+
+    sigs = strat.compute_signals(probs, books, markets)
+    assert sigs == []
+
+
+def test_bullish_signal_includes_no_token_id():
+    """When YES and NO markets exist for the same bucket, no_token_id is populated."""
+    strat   = EdgeStrategy(min_edge=0.04)
+    probs   = {(60.0, 70.0): 0.70}
+    books   = _l2_book("tok-yes", 0.50)
+    markets = [
+        _market(60.0, 70.0, "tok-yes", outcome="Yes"),
+        _market(60.0, 70.0, "tok-no",  outcome="No"),
+    ]
+
+    sigs = strat.compute_signals(probs, books, markets)
+    assert len(sigs) == 1
+    assert sigs[0].yes_token_id == "tok-yes"
+    assert sigs[0].no_token_id  == "tok-no"
+
+
+def test_bearish_signal_includes_no_token_id():
+    """Bearish signal also carries no_token_id for SELL YES vs BUY NO arbitration."""
+    strat   = EdgeStrategy(min_edge=0.04)
+    probs   = {(60.0, 70.0): 0.30}
+    books   = _l2_book("tok-yes", 0.45)
+    markets = [
+        _market(60.0, 70.0, "tok-yes", outcome="Yes"),
+        _market(60.0, 70.0, "tok-no",  outcome="No"),
+    ]
+
+    sigs = strat.compute_signals(probs, books, markets)
+    assert len(sigs) == 1
+    assert sigs[0].direction   == "bearish"
+    assert sigs[0].no_token_id == "tok-no"
+
+
+# -----------------------------------------------------------------------
+# Incomplete fill: skip signal
+# -----------------------------------------------------------------------
+
+def test_incomplete_fill_produces_no_signal():
+    """When the YES book lacks depth for quote_size_usd, no signal is emitted."""
+    strat   = EdgeStrategy(min_edge=0.04, quote_size_usd=50.0)
+    probs   = {(60.0, 70.0): 0.70}
+    books   = {
+        "tok1": {
+            "bids": [{"price": 0.40, "size": 0.1}],  # only 0.1 share = ~$0.04
+            "asks": [{"price": 0.50, "size": 0.1}],  # not enough to fill $50
+        }
+    }
+    markets = [_market(60.0, 70.0, "tok1")]
 
     sigs = strat.compute_signals(probs, books, markets)
     assert sigs == []
@@ -96,7 +163,7 @@ def test_no_outcome_tokens_are_skipped():
 def test_missing_prob_produces_no_signal():
     strat   = EdgeStrategy()
     probs   = {}   # no prob for (60,70)
-    books   = _book("tok1", 0.40)
+    books   = _l2_book("tok1", 0.40)
     markets = [_market(60.0, 70.0, "tok1")]
     assert strat.compute_signals(probs, books, markets) == []
 
@@ -110,16 +177,25 @@ def test_missing_book_produces_no_signal():
 
 
 # -----------------------------------------------------------------------
-# Multiple markets -- sorting by absolute edge
+# Multiple markets -- sorting by edge
 # -----------------------------------------------------------------------
 
-def test_multiple_signals_sorted_by_abs_edge():
+def test_multiple_signals_sorted_by_edge():
     strat   = EdgeStrategy(min_edge=0.04)
     probs   = {
         (60.0, 70.0): 0.60,   # edge 0.60 - 0.40 = 0.20
         (70.0, 80.0): 0.80,   # edge 0.80 - 0.45 = 0.35
     }
-    books   = {"tok1": {"mid_price": 0.40}, "tok2": {"mid_price": 0.45}}
+    books   = {
+        "tok1": {
+            "bids": [{"price": 0.38, "size": 1000.0}],
+            "asks": [{"price": 0.40, "size": 1000.0}],
+        },
+        "tok2": {
+            "bids": [{"price": 0.43, "size": 1000.0}],
+            "asks": [{"price": 0.45, "size": 1000.0}],
+        },
+    }
     markets = [
         _market(60.0, 70.0, "tok1"),
         _market(70.0, 80.0, "tok2"),
@@ -128,27 +204,28 @@ def test_multiple_signals_sorted_by_abs_edge():
     sigs = strat.compute_signals(probs, books, markets)
     assert len(sigs) == 2
     # Strongest edge first
-    assert sigs[0].token_id == "tok2"
-    assert sigs[1].token_id == "tok1"
+    assert sigs[0].yes_token_id == "tok2"
+    assert sigs[1].yes_token_id == "tok1"
 
 
 # -----------------------------------------------------------------------
 # Signal fields
 # -----------------------------------------------------------------------
 
-def test_signal_fields_populated():
+def test_directional_signal_fields_populated():
     strat   = EdgeStrategy(min_edge=0.04)
     probs   = {(60.0, 70.0): 0.60}
-    books   = _book("tok1", 0.40)
+    books   = _l2_book("tok1", 0.40)
     markets = [_market(60.0, 70.0, "tok1", condition_id="cond-99")]
 
     sig = strat.compute_signals(probs, books, markets)[0]
-    assert sig.token_id     == "tok1"
-    assert sig.mc_prob      == 0.60
-    assert sig.clob_price   == 0.40
-    assert sig.bucket_lo_f  == 60.0
-    assert sig.bucket_hi_f  == 70.0
-    assert sig.condition_id == "cond-99"
+    assert sig.yes_token_id    == "tok1"
+    assert sig.model_prob      == 0.60
+    assert sig.reference_price == pytest.approx(0.40)
+    assert sig.bucket_lo_f     == 60.0
+    assert sig.bucket_hi_f     == 70.0
+    assert sig.condition_id    == "cond-99"
+    assert sig.direction       == "bullish"
 
 
 def test_empty_markets_returns_empty():
@@ -162,51 +239,6 @@ def test_empty_markets_returns_empty():
 
 def test_edge_strategy_name():
     assert EdgeStrategy().name == "edge"
-
-
-# -----------------------------------------------------------------------
-# EdgeStrategy -- NO token path
-# -----------------------------------------------------------------------
-
-def test_no_token_buy_signal_when_no_edge_exceeds_threshold():
-    """NO edge = (1 - mc_prob) - clob_price_no; BUY when NO edge > min_edge."""
-    strat   = EdgeStrategy(min_edge=0.04)
-    # mc_prob for YES = 0.30 -> NO fair value = 0.70
-    # clob_price for NO token = 0.60  => NO edge = 0.70 - 0.60 = 0.10 > 0.04
-    probs   = {(60.0, 70.0): 0.30}
-    books   = {"tok-no": {"mid_price": 0.60}}
-    markets = [_market(60.0, 70.0, "tok-no", outcome="No")]
-
-    sigs = strat.compute_signals(probs, books, markets)
-    assert len(sigs) == 1
-    sig = sigs[0]
-    assert sig.side == "BUY"
-    assert abs(sig.edge - 0.10) < 1e-9
-    assert sig.mc_prob == pytest.approx(0.30)
-    assert sig.clob_price == pytest.approx(0.60)
-
-
-def test_no_token_no_signal_when_no_edge_below_threshold():
-    strat   = EdgeStrategy(min_edge=0.04)
-    probs   = {(60.0, 70.0): 0.50}   # NO fair = 0.50
-    books   = {"tok-no": {"mid_price": 0.48}}  # NO edge = 0.02 < 0.04
-    markets = [_market(60.0, 70.0, "tok-no", outcome="No")]
-
-    sigs = strat.compute_signals(probs, books, markets)
-    assert sigs == []
-
-
-def test_no_token_sell_signal_when_no_edge_negative():
-    """NO edge < -min_edge => SELL signal."""
-    strat   = EdgeStrategy(min_edge=0.04)
-    probs   = {(60.0, 70.0): 0.80}   # NO fair = 0.20
-    books   = {"tok-no": {"mid_price": 0.30}}  # NO edge = 0.20 - 0.30 = -0.10
-    markets = [_market(60.0, 70.0, "tok-no", outcome="No")]
-
-    sigs = strat.compute_signals(probs, books, markets)
-    assert len(sigs) == 1
-    assert sigs[0].side == "SELL"
-    assert abs(sigs[0].edge - (-0.10)) < 1e-9
 
 
 # -----------------------------------------------------------------------

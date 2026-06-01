@@ -62,11 +62,12 @@ class MultiStrategy(BaseStrategy):
         Deduplicated list of Signal objects; first strategy wins on token_id
         collision.
         """
-        seen: dict[str, "Signal"] = {}
+        seen: dict = {}
         for strategy in self._strategies:
             for sig in strategy.compute_signals(
                 probs, books, markets, open_positions=open_positions
             ):
-                if sig.token_id not in seen:
-                    seen[sig.token_id] = sig
+                key = getattr(sig, "yes_token_id", None) or getattr(sig, "token_id", None)
+                if key and key not in seen:
+                    seen[key] = sig
         return list(seen.values())

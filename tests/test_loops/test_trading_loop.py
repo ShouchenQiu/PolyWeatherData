@@ -16,7 +16,7 @@ from core.risk.fixed_fraction import FixedFraction
 from core.risk.pipeline import RiskPipeline
 from core.strategy.edge import EdgeStrategy
 from core.strategy.multi import MultiStrategy
-from core.types import Signal
+from core.types import DirectionalSignal, Signal
 from db.schema import DbClient
 from loops.trading_loop import TradingLoop
 
@@ -238,8 +238,10 @@ def test_tick_risk_rejected_emits_alert(db) -> None:
                     station_id, status="active")
     db.upsert_market("tok-r", "cid-r", "slug-r", 60.0, 70.0, "YES")
 
-    sig = Signal(token_id="tok-r", side="BUY", mc_prob=0.8, clob_price=0.5,
-                 edge=0.3, bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-r")
+    sig = DirectionalSignal(
+        yes_token_id="tok-r", no_token_id="", direction="bullish",
+        model_prob=0.8, reference_price=0.5, edge=0.3,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-r")
     mock_strategy = MagicMock(spec=MultiStrategy)
     mock_strategy.compute_signals.return_value = [sig]
     mock_risk     = MagicMock(spec=RiskPipeline)
@@ -282,8 +284,10 @@ def test_tick_successful_submit_calls_record_order(db) -> None:
                     station_id, status="active")
     db.upsert_market("tok-s", "cid-s", "slug-s", 60.0, 70.0, "YES")
 
-    sig = Signal(token_id="tok-s", side="BUY", mc_prob=0.8, clob_price=0.5,
-                 edge=0.3, bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-s")
+    sig = DirectionalSignal(
+        yes_token_id="tok-s", no_token_id="", direction="bullish",
+        model_prob=0.8, reference_price=0.5, edge=0.3,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-s")
     mock_strategy = MagicMock(spec=MultiStrategy)
     mock_strategy.compute_signals.return_value = [sig]
     mock_risk     = MagicMock(spec=RiskPipeline)
@@ -291,7 +295,7 @@ def test_tick_successful_submit_calls_record_order(db) -> None:
     mock_risk.compute_size.return_value   = 20.0
     exchange      = MagicMock()
     exchange.place_order.return_value = "oid-123"
-    mock_positions = MagicMock(spec=PositionTracker)
+    positions = PositionTracker(db)
 
     loop = TradingLoop(
         prob_store = prob_store,
@@ -300,7 +304,7 @@ def test_tick_successful_submit_calls_record_order(db) -> None:
         strategy   = mock_strategy,
         risk       = mock_risk,
         exchange   = exchange,
-        positions  = mock_positions,
+        positions  = positions,
         db         = db,
     )
 
@@ -313,11 +317,13 @@ def test_tick_successful_submit_calls_record_order(db) -> None:
 
     result = asyncio.run(run())
     assert result == ["oid-123"]
-    mock_positions.record_order.assert_called_once()
-    kw = mock_positions.record_order.call_args.kwargs
-    assert kw["order_id"]     == "oid-123"
-    assert kw["token_id"]     == "tok-s"
-    assert kw["condition_id"] == "cid-s"
+    row = db._conn.execute(
+        "SELECT token_id, condition_id FROM orders WHERE order_id=?",
+        ("oid-123",),
+    ).fetchone()
+    assert row is not None
+    assert row["token_id"]     == "tok-s"
+    assert row["condition_id"] == "cid-s"
 
 
 def test_tick_failed_submit_no_record_order(db) -> None:
@@ -330,8 +336,10 @@ def test_tick_failed_submit_no_record_order(db) -> None:
                     station_id, status="active")
     db.upsert_market("tok-fe", "cid-fe", "slug-fe", 60.0, 70.0, "YES")
 
-    sig = Signal(token_id="tok-fe", side="BUY", mc_prob=0.8, clob_price=0.5,
-                 edge=0.3, bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-fe")
+    sig = DirectionalSignal(
+        yes_token_id="tok-fe", no_token_id="", direction="bullish",
+        model_prob=0.8, reference_price=0.5, edge=0.3,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-fe")
     mock_strategy = MagicMock(spec=MultiStrategy)
     mock_strategy.compute_signals.return_value = [sig]
     mock_risk     = MagicMock(spec=RiskPipeline)
@@ -340,6 +348,8 @@ def test_tick_failed_submit_no_record_order(db) -> None:
     exchange      = MagicMock()
     exchange.place_order.side_effect = RuntimeError("exchange offline")
     mock_positions = MagicMock(spec=PositionTracker)
+    mock_positions.gross_open_notional_usd.return_value = 0.0
+    mock_positions.position_shares.return_value = 0.0
 
     loop = TradingLoop(
         prob_store = prob_store,
@@ -364,54 +374,6 @@ def test_tick_failed_submit_no_record_order(db) -> None:
     mock_positions.record_order.assert_not_called()
 
 
-def test_tick_yes_and_no_tokens_both_submitted(db) -> None:
-    """Strategy signals for both YES and NO tokens each produce an exchange call."""
-    prob_store = ProbabilityStore()
-    station_id = next(iter(STATIONS))
-    now        = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
-
-    db.upsert_event("cid-yn", "q", "slug", "2026-07-04",
-                    station_id, status="active")
-    db.upsert_market("tok-yes", "cid-yn", "slug-yes", 60.0, 70.0, "YES")
-    db.upsert_market("tok-no",  "cid-yn", "slug-no",  60.0, 70.0, "NO")
-
-    yes_sig = Signal(token_id="tok-yes", side="BUY", mc_prob=0.8, clob_price=0.5,
-                     edge=0.3, bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-yn")
-    no_sig  = Signal(token_id="tok-no",  side="BUY", mc_prob=0.2, clob_price=0.15,
-                     edge=0.05, bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-yn")
-    mock_strategy = MagicMock(spec=MultiStrategy)
-    mock_strategy.compute_signals.return_value = [yes_sig, no_sig]
-    mock_risk     = MagicMock(spec=RiskPipeline)
-    mock_risk.approve_signal.return_value = True
-    mock_risk.compute_size.return_value   = 20.0
-    exchange      = MagicMock()
-    exchange.place_order.side_effect = ["oid-yes", "oid-no"]
-    mock_positions = MagicMock(spec=PositionTracker)
-
-    loop = TradingLoop(
-        prob_store = prob_store,
-        alert_bus  = AlertBus(),
-        settings   = Settings(),
-        strategy   = mock_strategy,
-        risk       = mock_risk,
-        exchange   = exchange,
-        positions  = mock_positions,
-        db         = db,
-    )
-
-    async def run() -> list[str]:
-        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
-                                       quantiles_by_fxx={},
-                                       last_tick_utc=now - timedelta(minutes=5))
-        await prob_store.write("cid-yn", 0, snapshot)
-        return await loop.tick(now=now)
-
-    result = asyncio.run(run())
-    assert set(result) == {"oid-yes", "oid-no"}
-    assert exchange.place_order.call_count        == 2
-    assert mock_positions.record_order.call_count == 2
-
-
 # ---------------------------------------------------------------------------
 # Fix 1 -- real exposure forwarded to RiskPipeline
 # ---------------------------------------------------------------------------
@@ -434,8 +396,10 @@ def test_tick_passes_real_exposure_to_risk(db) -> None:
         size_usd=50.0, price=0.5,
     )
 
-    sig = Signal(token_id="tok-exp", side="BUY", mc_prob=0.8, clob_price=0.5,
-                 edge=0.3, bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-exp")
+    sig = DirectionalSignal(
+        yes_token_id="tok-exp", no_token_id="", direction="bullish",
+        model_prob=0.8, reference_price=0.5, edge=0.3,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-exp")
     mock_strategy = MagicMock(spec=MultiStrategy)
     mock_strategy.compute_signals.return_value = [sig]
     mock_risk = MagicMock(spec=RiskPipeline)
@@ -485,8 +449,10 @@ def test_tick_empty_order_id_not_recorded(db) -> None:
                     station_id, status="active")
     db.upsert_market("tok-empty", "cid-empty", "slug-e", 60.0, 70.0, "YES")
 
-    sig = Signal(token_id="tok-empty", side="BUY", mc_prob=0.8, clob_price=0.5,
-                 edge=0.3, bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-empty")
+    sig = DirectionalSignal(
+        yes_token_id="tok-empty", no_token_id="", direction="bullish",
+        model_prob=0.8, reference_price=0.5, edge=0.3,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-empty")
     mock_strategy = MagicMock(spec=MultiStrategy)
     mock_strategy.compute_signals.return_value = [sig]
     mock_risk = MagicMock(spec=RiskPipeline)
@@ -495,6 +461,8 @@ def test_tick_empty_order_id_not_recorded(db) -> None:
     exchange = MagicMock()
     exchange.place_order.return_value = ""   # rejected / no order id
     mock_positions = MagicMock(spec=PositionTracker)
+    mock_positions.gross_open_notional_usd.return_value = 0.0
+    mock_positions.position_shares.return_value = 0.0
 
     loop = TradingLoop(
         prob_store = prob_store,
@@ -517,6 +485,523 @@ def test_tick_empty_order_id_not_recorded(db) -> None:
     result = asyncio.run(run())
     assert result == []
     mock_positions.record_order.assert_not_called()
+
+
+
+# ---------------------------------------------------------------------------
+# V2V08 -- directional arbitration paths
+# ---------------------------------------------------------------------------
+
+def _deep_book(ask: float, bid: float | None = None) -> dict:
+    if bid is None:
+        bid = max(0.01, ask - 0.02)
+    return {
+        "bids": [{"price": bid,  "size": 1000.0}],
+        "asks": [{"price": ask,  "size": 1000.0}],
+    }
+
+
+def test_tick_bullish_signal_buys_yes_token(db) -> None:
+    """Bullish DirectionalSignal -> TradingLoop submits BUY order for YES token."""
+    prob_store = ProbabilityStore()
+    station_id = next(iter(STATIONS))
+    now        = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+
+    db.upsert_event("cid-b1", "q", "slug", "2026-07-04",
+                    station_id, status="active")
+    db.upsert_market("tok-yes-b1", "cid-b1", "slug-yes-b1", 60.0, 70.0, "YES")
+    db.upsert_market("tok-no-b1",  "cid-b1", "slug-no-b1",  60.0, 70.0, "NO")
+
+    sig = DirectionalSignal(
+        yes_token_id="tok-yes-b1", no_token_id="tok-no-b1", direction="bullish",
+        model_prob=0.75, reference_price=0.50, edge=0.25,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-b1")
+    mock_strategy = MagicMock(spec=MultiStrategy)
+    mock_strategy.compute_signals.return_value = [sig]
+    mock_risk = MagicMock(spec=RiskPipeline)
+    mock_risk.approve_signal.return_value = True
+    mock_risk.compute_size.return_value   = 20.0
+    exchange = MagicMock()
+    exchange.place_order.return_value = "oid-yes-b1"
+    positions = PositionTracker(db)
+
+    loop = TradingLoop(
+        prob_store = prob_store,
+        alert_bus  = AlertBus(),
+        settings   = Settings(),
+        strategy   = mock_strategy,
+        risk       = mock_risk,
+        exchange   = exchange,
+        positions  = positions,
+        db         = db,
+    )
+
+    async def run() -> list[str]:
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-b1", 0, snapshot)
+        return await loop.tick(now=now)
+
+    result = asyncio.run(run())
+    assert result == ["oid-yes-b1"]
+    call_kw = exchange.place_order.call_args.kwargs
+    assert call_kw["token_id"] == "tok-yes-b1"
+    assert call_kw["side"]     == "BUY"
+
+
+def test_tick_bearish_without_yes_position_buys_no_token(db) -> None:
+    """Bearish signal + no YES inventory -> BUY NO token."""
+    prob_store = ProbabilityStore()
+    station_id = next(iter(STATIONS))
+    now        = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+
+    db.upsert_event("cid-b2", "q", "slug", "2026-07-04",
+                    station_id, status="active")
+    db.upsert_market("tok-yes-b2", "cid-b2", "slug-yes-b2", 60.0, 70.0, "YES")
+    db.upsert_market("tok-no-b2",  "cid-b2", "slug-no-b2",  60.0, 70.0, "NO")
+
+    sig = DirectionalSignal(
+        yes_token_id="tok-yes-b2", no_token_id="tok-no-b2", direction="bearish",
+        model_prob=0.30, reference_price=0.55, edge=0.25,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-b2")
+    mock_strategy = MagicMock(spec=MultiStrategy)
+    mock_strategy.compute_signals.return_value = [sig]
+    mock_risk = MagicMock(spec=RiskPipeline)
+    mock_risk.approve_signal.return_value = True
+    mock_risk.compute_size.return_value   = 20.0
+    exchange = MagicMock()
+    exchange.place_order.return_value = "oid-no-b2"
+    positions = PositionTracker(db)
+
+    loop = TradingLoop(
+        prob_store = prob_store,
+        alert_bus  = AlertBus(),
+        settings   = Settings(),
+        strategy   = mock_strategy,
+        risk       = mock_risk,
+        exchange   = exchange,
+        positions  = positions,
+        db         = db,
+    )
+
+    async def run() -> list[str]:
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-b2", 0, snapshot)
+        return await loop.tick(now=now)
+
+    result = asyncio.run(run())
+    assert result == ["oid-no-b2"]
+    call_kw = exchange.place_order.call_args.kwargs
+    assert call_kw["token_id"] == "tok-no-b2"
+    assert call_kw["side"]     == "BUY"
+
+
+def test_tick_bearish_with_yes_position_sells_yes_token(db) -> None:
+    """Bearish signal + existing YES inventory -> SELL YES token."""
+    prob_store = ProbabilityStore()
+    station_id = next(iter(STATIONS))
+    now        = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+
+    db.upsert_event("cid-b3", "q", "slug", "2026-07-04",
+                    station_id, status="active")
+    db.upsert_market("tok-yes-b3", "cid-b3", "slug-yes-b3", 60.0, 70.0, "YES")
+    db.upsert_market("tok-no-b3",  "cid-b3", "slug-no-b3",  60.0, 70.0, "NO")
+
+    sig = DirectionalSignal(
+        yes_token_id="tok-yes-b3", no_token_id="tok-no-b3", direction="bearish",
+        model_prob=0.30, reference_price=0.55, edge=0.25,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-b3")
+    mock_strategy = MagicMock(spec=MultiStrategy)
+    mock_strategy.compute_signals.return_value = [sig]
+    mock_risk = MagicMock(spec=RiskPipeline)
+    mock_risk.approve_signal.return_value = True
+    mock_risk.compute_size.return_value   = 15.0
+    exchange = MagicMock()
+    exchange.place_order.return_value = "oid-sell-b3"
+    positions = PositionTracker(db)
+    # Seed YES inventory so PositionTracker.position_shares() returns > 0.
+    db._conn.execute(
+        "INSERT INTO orders(order_id,token_id,condition_id,side,size_usd,price,signed_shares)"
+        " VALUES(?,?,?,?,?,?,?)",
+        ("seed-yes-b3", "tok-yes-b3", "cid-b3", "BUY", 30.0, 0.55, 54.5),
+    )
+    db._conn.commit()
+
+    loop = TradingLoop(
+        prob_store = prob_store,
+        alert_bus  = AlertBus(),
+        settings   = Settings(),
+        strategy   = mock_strategy,
+        risk       = mock_risk,
+        exchange   = exchange,
+        positions  = positions,
+        db         = db,
+    )
+
+    async def run() -> list[str]:
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-b3", 0, snapshot)
+        return await loop.tick(now=now)
+
+    result = asyncio.run(run())
+    assert result == ["oid-sell-b3"]
+    call_kw = exchange.place_order.call_args.kwargs
+    assert call_kw["token_id"] == "tok-yes-b3"
+    assert call_kw["side"]     == "SELL"
+
+
+# ---------------------------------------------------------------------------
+# V2V08 -- re-quote rejection
+# ---------------------------------------------------------------------------
+
+def test_tick_requote_skips_when_stale_edge(db) -> None:
+    """Re-quote VWAP moves close to model_prob so edge < min_edge: order not placed.
+
+    The market book shows ask=0.57 at tick time. Initial depth check passes
+    (complete_fill). Re-quote at actual size also completes, but edge
+    model_prob(0.60) - vwap(0.57) = 0.03 < min_edge(0.04) -> stale_edge skip.
+    """
+    prob_store = ProbabilityStore()
+    station_id = next(iter(STATIONS))
+    now        = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+    settings   = _make_settings(min_edge=0.04, quote_size_usd=50.0)
+
+    db.upsert_event("cid-rq1", "q", "slug", "2026-07-04",
+                    station_id, status="active")
+    db.upsert_market("tok-rq1", "cid-rq1", "sl-rq1", 60.0, 70.0, "YES")
+
+    sig = DirectionalSignal(
+        yes_token_id="tok-rq1", no_token_id="", direction="bullish",
+        model_prob=0.60, reference_price=0.50, edge=0.10,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-rq1")
+    mock_strategy = MagicMock(spec=MultiStrategy)
+    mock_strategy.compute_signals.return_value = [sig]
+    mock_risk = MagicMock(spec=RiskPipeline)
+    mock_risk.approve_signal.return_value = True
+    mock_risk.compute_size.return_value   = 20.0
+    exchange = MagicMock()
+    mock_positions = MagicMock(spec=PositionTracker)
+    mock_positions.gross_open_notional_usd.return_value = 0.0
+    mock_positions.position_shares.return_value = 0.0
+
+    # Book has ask=0.57 (1000 shares). Both initial check and re-quote use it.
+    # vwap=0.57; edge=0.60-0.57=0.03 < min_edge=0.04 -> stale_edge rejection.
+    mock_orderbook = MagicMock()
+    mock_orderbook.get_book.return_value = _deep_book(0.57)
+
+    loop = TradingLoop(
+        prob_store = prob_store,
+        alert_bus  = AlertBus(),
+        settings   = settings,
+        strategy   = mock_strategy,
+        risk       = mock_risk,
+        exchange   = exchange,
+        positions  = mock_positions,
+        db         = db,
+        orderbook  = mock_orderbook,
+    )
+
+    async def run() -> list[str]:
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-rq1", 0, snapshot)
+        return await loop.tick(now=now)
+
+    result = asyncio.run(run())
+    assert result == []
+    exchange.place_order.assert_not_called()
+
+
+def test_tick_requote_skips_when_insufficient_depth(db) -> None:
+    """Re-quote at actual size has complete_fill=False: order not placed.
+
+    The market book has only 90 shares at ask=0.50 (worth $45).
+    quote_size_usd=$20 fills fine (needs 40 shares). But compute_size
+    returns $50 which needs 100 shares -> complete_fill=False on re-quote.
+    """
+    prob_store = ProbabilityStore()
+    station_id = next(iter(STATIONS))
+    now        = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+    settings   = _make_settings(min_edge=0.04, quote_size_usd=20.0)
+
+    db.upsert_event("cid-rq2", "q", "slug", "2026-07-04",
+                    station_id, status="active")
+    db.upsert_market("tok-rq2", "cid-rq2", "sl-rq2", 60.0, 70.0, "YES")
+
+    sig = DirectionalSignal(
+        yes_token_id="tok-rq2", no_token_id="", direction="bullish",
+        model_prob=0.70, reference_price=0.50, edge=0.20,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-rq2")
+    mock_strategy = MagicMock(spec=MultiStrategy)
+    mock_strategy.compute_signals.return_value = [sig]
+    mock_risk = MagicMock(spec=RiskPipeline)
+    mock_risk.approve_signal.return_value = True
+    mock_risk.compute_size.return_value   = 50.0  # larger than available depth ($45)
+    exchange = MagicMock()
+    mock_positions = MagicMock(spec=PositionTracker)
+    mock_positions.gross_open_notional_usd.return_value = 0.0
+    mock_positions.position_shares.return_value = 0.0
+
+    # 90 shares at ask=0.50 -> $45 available.
+    # Initial check at $20 (40 shares needed, 90 available): complete_fill=True.
+    # Re-quote at $50 (100 shares needed, 90 available): complete_fill=False.
+    mock_orderbook = MagicMock()
+    mock_orderbook.get_book.return_value = {
+        "bids": [{"price": 0.48, "size": 90.0}],
+        "asks": [{"price": 0.50, "size": 90.0}],
+    }
+
+    loop = TradingLoop(
+        prob_store = prob_store,
+        alert_bus  = AlertBus(),
+        settings   = settings,
+        strategy   = mock_strategy,
+        risk       = mock_risk,
+        exchange   = exchange,
+        positions  = mock_positions,
+        db         = db,
+        orderbook  = mock_orderbook,
+    )
+
+    async def run() -> list[str]:
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-rq2", 0, snapshot)
+        return await loop.tick(now=now)
+
+    result = asyncio.run(run())
+    assert result == []
+    exchange.place_order.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# V2V08 -- per-tick local exposure update
+# ---------------------------------------------------------------------------
+
+def test_tick_local_exposure_updates_after_each_order(db) -> None:
+    """Second signal's risk call sees exposure increased by the first order."""
+    prob_store = ProbabilityStore()
+    station_id = next(iter(STATIONS))
+    now        = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+
+    db.upsert_event("cid-exp2", "q", "slug", "2026-07-04",
+                    station_id, status="active")
+    db.upsert_market("tok-e1", "cid-exp2", "sl-e1", 60.0, 70.0, "YES")
+    db.upsert_market("tok-e2", "cid-exp2", "sl-e2", 70.0, 80.0, "YES")
+
+    sig1 = DirectionalSignal(
+        yes_token_id="tok-e1", no_token_id="", direction="bullish",
+        model_prob=0.70, reference_price=0.50, edge=0.20,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-exp2")
+    sig2 = DirectionalSignal(
+        yes_token_id="tok-e2", no_token_id="", direction="bullish",
+        model_prob=0.80, reference_price=0.55, edge=0.25,
+        bucket_lo_f=70.0, bucket_hi_f=80.0, condition_id="cid-exp2")
+    mock_strategy = MagicMock(spec=MultiStrategy)
+    mock_strategy.compute_signals.return_value = [sig1, sig2]
+    mock_risk = MagicMock(spec=RiskPipeline)
+    mock_risk.approve_signal.return_value = True
+    mock_risk.compute_size.return_value   = 25.0
+    exchange = MagicMock()
+    exchange.place_order.side_effect = ["oid-e1", "oid-e2"]
+
+    # Seed $10 of pre-existing open exposure in a third market (tok-e0).
+    db.upsert_market("tok-e0", "cid-exp2", "sl-e0", 55.0, 60.0, "YES")
+    db._conn.execute(
+        "INSERT INTO orders(order_id,token_id,condition_id,side,size_usd,"
+        "price,status,is_paper) VALUES(?,?,?,?,?,?,?,?)",
+        ("seed-exp", "tok-e0", "cid-exp2", "BUY", 10.0, 0.50, "pending", 0),
+    )
+    db._conn.commit()
+    positions = PositionTracker(db)
+
+    loop = TradingLoop(
+        prob_store = prob_store,
+        alert_bus  = AlertBus(),
+        settings   = Settings(),
+        strategy   = mock_strategy,
+        risk       = mock_risk,
+        exchange   = exchange,
+        positions  = positions,
+        db         = db,
+    )
+
+    async def run() -> list[str]:
+        snapshot = ProbabilitySnapshot(
+            buckets={(60.0, 70.0): 0.7, (70.0, 80.0): 0.8},
+            quantiles_by_fxx={},
+            last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-exp2", 0, snapshot)
+        return await loop.tick(now=now)
+
+    asyncio.run(run())
+
+    calls = mock_risk.approve_signal.call_args_list
+    assert len(calls) == 2
+    # First call sees initial exposure = 10.0
+    assert calls[0].kwargs["current_exposure"] == pytest.approx(10.0)
+    # Second call sees 10.0 + 25.0 = 35.0 (updated after first order)
+    assert calls[1].kwargs["current_exposure"] == pytest.approx(35.0)
+
+
+# ---------------------------------------------------------------------------
+# V2V08 -- signal DB lifecycle
+# ---------------------------------------------------------------------------
+
+def test_tick_signal_written_to_db_before_arbitration(db) -> None:
+    """Pending signal row is written to DB before risk evaluation."""
+    prob_store = ProbabilityStore()
+    station_id = next(iter(STATIONS))
+    now        = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+
+    db.upsert_event("cid-db1", "q", "slug", "2026-07-04",
+                    station_id, status="active")
+    db.upsert_market("tok-db1", "cid-db1", "sl-db1", 60.0, 70.0, "YES")
+
+    sig = DirectionalSignal(
+        yes_token_id="tok-db1", no_token_id="", direction="bullish",
+        model_prob=0.70, reference_price=0.50, edge=0.20,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-db1")
+    mock_strategy = MagicMock(spec=MultiStrategy)
+    mock_strategy.compute_signals.return_value = [sig]
+    mock_risk = MagicMock(spec=RiskPipeline)
+    mock_risk.approve_signal.return_value = False  # rejected so no order placed
+
+    loop = TradingLoop(
+        prob_store = prob_store,
+        alert_bus  = AlertBus(),
+        settings   = Settings(),
+        strategy   = mock_strategy,
+        risk       = mock_risk,
+        exchange   = MagicMock(),
+        positions  = PositionTracker(db),
+        db         = db,
+    )
+
+    async def run() -> None:
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-db1", 0, snapshot)
+        await loop.tick(now=now)
+
+    asyncio.run(run())
+
+    row = db._conn.execute(
+        "SELECT direction, mc_prob, edge FROM signals WHERE yes_token_id=?",
+        ("tok-db1",),
+    ).fetchone()
+    assert row is not None
+    assert row["direction"] == "bullish"
+    assert abs(row["mc_prob"] - 0.70) < 1e-9
+
+
+def test_tick_signal_decision_updated_after_rejection(db) -> None:
+    """After risk rejection, signal row has approved=0 and reject_reason set."""
+    prob_store = ProbabilityStore()
+    station_id = next(iter(STATIONS))
+    now        = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+
+    db.upsert_event("cid-db2", "q", "slug", "2026-07-04",
+                    station_id, status="active")
+    db.upsert_market("tok-db2", "cid-db2", "sl-db2", 60.0, 70.0, "YES")
+
+    sig = DirectionalSignal(
+        yes_token_id="tok-db2", no_token_id="", direction="bullish",
+        model_prob=0.70, reference_price=0.50, edge=0.20,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-db2")
+    mock_strategy = MagicMock(spec=MultiStrategy)
+    mock_strategy.compute_signals.return_value = [sig]
+    mock_risk = MagicMock(spec=RiskPipeline)
+    mock_risk.approve_signal.return_value = False
+
+    loop = TradingLoop(
+        prob_store = prob_store,
+        alert_bus  = AlertBus(),
+        settings   = Settings(),
+        strategy   = mock_strategy,
+        risk       = mock_risk,
+        exchange   = MagicMock(),
+        positions  = PositionTracker(db),
+        db         = db,
+    )
+
+    async def run() -> None:
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-db2", 0, snapshot)
+        await loop.tick(now=now)
+
+    asyncio.run(run())
+
+    row = db._conn.execute(
+        "SELECT approved, reject_reason FROM signals WHERE yes_token_id=?",
+        ("tok-db2",),
+    ).fetchone()
+    assert row is not None
+    assert row["approved"]      == 0
+    assert row["reject_reason"] == "risk_rejected"
+
+
+def test_tick_signal_order_linkage(db) -> None:
+    """After a successful order, signal row has approved=1 and order_id linked."""
+    prob_store = ProbabilityStore()
+    station_id = next(iter(STATIONS))
+    now        = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+
+    db.upsert_event("cid-db3", "q", "slug", "2026-07-04",
+                    station_id, status="active")
+    db.upsert_market("tok-db3", "cid-db3", "sl-db3", 60.0, 70.0, "YES")
+
+    sig = DirectionalSignal(
+        yes_token_id="tok-db3", no_token_id="", direction="bullish",
+        model_prob=0.70, reference_price=0.50, edge=0.20,
+        bucket_lo_f=60.0, bucket_hi_f=70.0, condition_id="cid-db3")
+    mock_strategy = MagicMock(spec=MultiStrategy)
+    mock_strategy.compute_signals.return_value = [sig]
+    mock_risk = MagicMock(spec=RiskPipeline)
+    mock_risk.approve_signal.return_value = True
+    mock_risk.compute_size.return_value   = 20.0
+    exchange = MagicMock()
+    exchange.place_order.return_value = "oid-linked"
+
+    loop = TradingLoop(
+        prob_store = prob_store,
+        alert_bus  = AlertBus(),
+        settings   = Settings(),
+        strategy   = mock_strategy,
+        risk       = mock_risk,
+        exchange   = exchange,
+        positions  = PositionTracker(db),
+        db         = db,
+    )
+
+    async def run() -> list[str]:
+        snapshot = ProbabilitySnapshot(buckets={(60.0, 70.0): 0.7},
+                                       quantiles_by_fxx={},
+                                       last_tick_utc=now - timedelta(minutes=5))
+        await prob_store.write("cid-db3", 0, snapshot)
+        return await loop.tick(now=now)
+
+    result = asyncio.run(run())
+    assert result == ["oid-linked"]
+
+    row = db._conn.execute(
+        "SELECT approved, order_id, computed_size FROM signals WHERE yes_token_id=?",
+        ("tok-db3",),
+    ).fetchone()
+    assert row is not None
+    assert row["approved"]      == 1
+    assert row["order_id"]      == "oid-linked"
+    assert abs(row["computed_size"] - 20.0) < 1e-9
 
 
 # ---------------------------------------------------------------------------

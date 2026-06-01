@@ -531,6 +531,93 @@ class DbClient:
                 tick_utc, approved, reject_reason, computed_size, order_id,
             ),
         )
+    def record_signal(
+        self,
+        signal_id:       str,
+        yes_token_id:    str,
+        no_token_id:     str,
+        direction:       str,
+        mc_prob:         float,
+        reference_price: float,
+        edge:            float,
+        tick_utc:        str,
+    ) -> None:
+        """Insert a pending signal row before arbitration begins.
+
+        All decision fields (final_token_id, final_side, executable_price,
+        approved, reject_reason, computed_size, order_id) default to NULL / 0
+        and are filled by subsequent update calls.
+
+        no_token_id is stored as NULL when empty string (no paired NO market).
+        """
+        self._conn.execute(
+            """
+            INSERT INTO signals
+                (signal_id, yes_token_id, no_token_id, direction,
+                 mc_prob, reference_price, edge, tick_utc)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                yes_token_id,
+                no_token_id or None,
+                direction,
+                mc_prob,
+                reference_price,
+                edge,
+                tick_utc,
+            ),
+        )
+        self._conn.commit()
+
+    def update_signal_decision(
+        self,
+        signal_id:        str,
+        final_token_id:   str,
+        final_side:       str,
+        executable_price: float,
+        approved:         int,
+        reject_reason:    str | None,
+        computed_size:    float | None,
+    ) -> None:
+        """Update signal row with arbitration decision and risk outcome.
+
+        Called after directional arbitration and risk pipeline evaluation.
+        approved=1 for approved signals, 0 for rejected.
+        """
+        self._conn.execute(
+            """
+            UPDATE signals
+               SET final_token_id   = ?,
+                   final_side       = ?,
+                   executable_price = ?,
+                   approved         = ?,
+                   reject_reason    = ?,
+                   computed_size    = ?
+             WHERE signal_id = ?
+            """,
+            (
+                final_token_id,
+                final_side,
+                executable_price,
+                approved,
+                reject_reason,
+                computed_size,
+                signal_id,
+            ),
+        )
+        self._conn.commit()
+
+    def update_signal_order_id(
+        self,
+        signal_id: str,
+        order_id:  str,
+    ) -> None:
+        """Link a placed order_id to its originating signal row."""
+        self._conn.execute(
+            "UPDATE signals SET order_id = ? WHERE signal_id = ?",
+            (order_id, signal_id),
+        )
         self._conn.commit()
 
     # ------------------------------------------------------------------

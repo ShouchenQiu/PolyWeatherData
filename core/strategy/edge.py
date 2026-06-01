@@ -1,16 +1,14 @@
 """Edge-based trading strategy.
 
-For each YES market token:
-    edge = mc_prob - clob_price
+For each YES bucket token:
+    reference_price = compute_quote(book, "BUY", quote_size_usd).vwap_price
+    edge = mc_prob - reference_price
 
-    edge >  min_edge  =>  BUY signal
-    edge < -min_edge  =>  SELL signal  (used to unwind existing positions)
+    edge >  min_edge  =>  DirectionalSignal(direction="bullish")
+    edge < -min_edge  =>  DirectionalSignal(direction="bearish")
 
-For each NO market token:
-    NO edge = (1 - mc_prob) - clob_price_no
-
-    NO edge >  min_edge  =>  BUY signal on the NO token
-    NO edge < -min_edge  =>  SELL signal on the NO token
+Bearish means YES is overpriced; TradingLoop decides SELL YES vs BUY NO.
+Both YES and NO token_ids are carried in the signal for arbitration.
 
 Reference: Herbie-main/_sniper_backtest.py  (edge = mc_p - cp)
 Threshold: min_edge = 0.04 (configurable via Settings.min_edge)
@@ -19,25 +17,28 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from core.pricing.quote import compute_quote
 from core.strategy.base import BaseStrategy
-from core.types import Signal
+from core.types import DirectionalSignal
 
 if TYPE_CHECKING:
     pass
 
 
 class EdgeStrategy(BaseStrategy):
-    """Generate BUY / SELL signals based on model-vs-market edge.
+    """Generate directional mispricing signals based on model-vs-VWAP edge.
 
     Parameters
     ----------
     min_edge:
         Minimum absolute edge required to generate a signal.
-        Default matches the project constant (0.04).
+    quote_size_usd:
+        Proxy order size passed to compute_quote for VWAP estimation.
     """
 
-    def __init__(self, min_edge: float = 0.04) -> None:
-        self.min_edge = min_edge
+    def __init__(self, min_edge: float = 0.04, quote_size_usd: float = 50.0) -> None:
+        self.min_edge      = min_edge
+        self.quote_size_usd = quote_size_usd
 
     @property
     def name(self) -> str:
@@ -49,81 +50,90 @@ class EdgeStrategy(BaseStrategy):
         books:          dict[str, dict],
         markets:        list[dict],
         open_positions: dict[str, int] | None = None,
-    ) -> list[Signal]:
-        """Return signals for markets whose edge exceeds the threshold.
-
-        YES and NO outcome tokens are both evaluated.  For YES tokens,
-        edge = mc_prob - clob_price.  For NO tokens,
-        edge = (1 - mc_prob) - clob_price_no.
+    ) -> list[DirectionalSignal]:
+        """Return directional signals for buckets whose YES VWAP edge clears the threshold.
 
         Parameters
         ----------
         probs:
             ``{(lo_f, hi_f): probability}`` from ``McSampler.bucket_probs()``.
         books:
-            ``{token_id: {"mid_price": float, ...}}`` live CLOB quotes.
+            ``{token_id: {"bids": [...], "asks": [...]}}`` full L2 order books.
             Tokens absent from this dict are skipped.
         markets:
-            Market rows from the DB.
+            Market rows from the DB; YES and NO rows for the same bucket are
+            paired to populate both token IDs in the emitted signal.
         open_positions:
             Accepted for interface compatibility; not used by EdgeStrategy.
 
         Returns
         -------
-        Sorted list of ``Signal`` objects (by absolute edge descending).
+        Sorted list of ``DirectionalSignal`` objects (by edge descending).
         """
-        signals: list[Signal] = []
+        bucket_yes:  dict[tuple[float, float], str] = {}
+        bucket_no:   dict[tuple[float, float], str] = {}
+        bucket_cond: dict[tuple[float, float], str] = {}
 
         for mkt in markets:
             outcome = str(mkt.get("outcome", "Yes")).upper()
-            token_id    = str(mkt["token_id"])
-            lo_f        = float(mkt.get("bucket_lo_f") or float("-inf"))
-            hi_f        = float(mkt.get("bucket_hi_f") or float("inf"))
-            condition_id = str(mkt.get("condition_id", ""))
+            lo_f    = float(mkt.get("bucket_lo_f") or float("-inf"))
+            hi_f    = float(mkt.get("bucket_hi_f") or float("inf"))
+            tid     = str(mkt["token_id"])
+            cond    = str(mkt.get("condition_id", ""))
+            if outcome == "YES":
+                bucket_yes[(lo_f, hi_f)]  = tid
+                bucket_cond[(lo_f, hi_f)] = cond
+            elif outcome == "NO":
+                bucket_no[(lo_f, hi_f)] = tid
 
-            mc_prob = probs.get((lo_f, hi_f))
+        signals: list[DirectionalSignal] = []
+
+        for bucket, yes_token_id in bucket_yes.items():
+            lo_f, hi_f = bucket
+            mc_prob = probs.get(bucket)
             if mc_prob is None:
                 continue
 
-            book = books.get(token_id)
+            book = books.get(yes_token_id)
             if book is None:
                 continue
-            mid = book.get("mid_price")
-            if mid is None:
+
+            try:
+                quote = compute_quote(book, "BUY", self.quote_size_usd)
+            except Exception:
+                continue
+            if not quote.complete_fill:
                 continue
 
-            clob_price = float(mid)
+            reference_price = quote.vwap_price
+            yes_edge        = mc_prob - reference_price
+            no_token_id     = bucket_no.get(bucket, "")
+            condition_id    = bucket_cond.get(bucket, "")
 
-            if outcome == "YES":
-                edge = mc_prob - clob_price
-            elif outcome == "NO":
-                edge = (1.0 - mc_prob) - clob_price
-            else:
-                continue
-
-            if edge > self.min_edge:
-                signals.append(Signal(
-                    token_id     = token_id,
-                    side         = "BUY",
-                    mc_prob      = mc_prob,
-                    clob_price   = clob_price,
-                    edge         = edge,
-                    bucket_lo_f  = lo_f,
-                    bucket_hi_f  = hi_f,
-                    condition_id = condition_id,
+            if yes_edge > self.min_edge:
+                signals.append(DirectionalSignal(
+                    yes_token_id    = yes_token_id,
+                    no_token_id     = no_token_id,
+                    direction       = "bullish",
+                    model_prob      = mc_prob,
+                    reference_price = reference_price,
+                    edge            = yes_edge,
+                    bucket_lo_f     = lo_f,
+                    bucket_hi_f     = hi_f,
+                    condition_id    = condition_id,
                 ))
-            elif edge < -self.min_edge:
-                signals.append(Signal(
-                    token_id     = token_id,
-                    side         = "SELL",
-                    mc_prob      = mc_prob,
-                    clob_price   = clob_price,
-                    edge         = edge,
-                    bucket_lo_f  = lo_f,
-                    bucket_hi_f  = hi_f,
-                    condition_id = condition_id,
+            elif yes_edge < -self.min_edge:
+                signals.append(DirectionalSignal(
+                    yes_token_id    = yes_token_id,
+                    no_token_id     = no_token_id,
+                    direction       = "bearish",
+                    model_prob      = mc_prob,
+                    reference_price = reference_price,
+                    edge            = abs(yes_edge),
+                    bucket_lo_f     = lo_f,
+                    bucket_hi_f     = hi_f,
+                    condition_id    = condition_id,
                 ))
 
-        # Sort: strongest absolute edge first
-        signals.sort(key=lambda s: abs(s.edge), reverse=True)
+        signals.sort(key=lambda s: s.edge, reverse=True)
         return signals
