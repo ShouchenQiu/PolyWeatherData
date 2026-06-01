@@ -503,8 +503,8 @@ All sources return a `pd.DataFrame` with the following columns:
 | Column | Type | Description |
 |---|---|---|
 | `valid_time` | UTC-aware datetime | Observation timestamp |
-| `raw_tmpc_tenths` | float | Temperature in tenths of ¡ãC (e.g. 225 = 22.5¡ãC) |
-| `raw_dwpc_tenths` | float | Dew point in tenths of ¡ãC |
+| `raw_tmpc_tenths` | float | Temperature in degrees C; historical name preserves METAR T-group tenths precision (e.g. 22.5 = 22.5 C) |
+| `raw_dwpc_tenths` | float | Dew point in degrees C; historical name preserves METAR T-group tenths precision |
 | `raw_wind_spd_kt` | float | Wind speed in knots |
 | `raw_wind_gust_kt` | float | Wind gust in knots |
 | `obs_U` | float | U-wind component (m/s) |
@@ -817,7 +817,7 @@ Returns a list of `{"token_id": str, "size": float, "avg_price": float}` for all
 
 ### `core/exchange/clob.py` — `ClobExchange`
 
-Live Polymarket CLOB adapter. Wraps `polymarket_client.SecureClient`.
+Live Polymarket CLOB adapter. Wraps the unified `polymarket.SecureClient` from `polymarket-client`.
 
 **`place_order(token_id, side, size_usd, price) -> str`**:
 Calls `SecureClient.place_limit_order(token_id, price, size, side)`.
@@ -1029,7 +1029,8 @@ SQLite database, WAL mode, foreign keys enabled.
 | Column | Type | Constraints | Description |
 |---|---|---|---|
 | `token_id` | TEXT | PRIMARY KEY | Polymarket YES token ID |
-| `condition_id` | TEXT | FK ¡ú events | Parent event |
+| `condition_id` | TEXT | FK ï¿½ï¿½ events | Parent event |
+| `market_id` | TEXT | | Polymarket SDK market ID for redeem |
 | `market_slug` | TEXT | | Market-level slug |
 | `bucket_lo_f` | REAL | | Lower bound (¡ãF), NULL = -inf |
 | `bucket_hi_f` | REAL | | Upper bound (¡ãF), NULL = +inf |

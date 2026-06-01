@@ -175,6 +175,20 @@ def test_clob_exchange_place_order_calls_place_limit_order():
     assert placed[0]["side"] == "BUY"
 
 
+def test_clob_exchange_rejects_sdk_not_ok_response():
+    """Unified SDK order responses must check ok before reading order_id."""
+    from types import SimpleNamespace
+    from core.exchange.clob import ClobExchange
+
+    class FakeSecureClient:
+        def place_limit_order(self, **kwargs):
+            return SimpleNamespace(ok=False, order_id="ord-ignored", message="bad price")
+
+    exch = ClobExchange(clob_client=FakeSecureClient())
+
+    assert exch.place_order("tok1", "BUY", 50.0, 0.55) == ""
+
+
 def test_clob_exchange_cancel_order_calls_cancel_orders():
     """cancel_order() must delegate to SecureClient.cancel_orders()."""
     from core.exchange.clob import ClobExchange

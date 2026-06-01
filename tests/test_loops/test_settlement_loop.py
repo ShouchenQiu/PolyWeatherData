@@ -29,7 +29,10 @@ def db() -> DbClient:
         "cid1", "Will it be 60-70F?", "temp-60-70",
         "2025-03-20", "KLGA", status="pending_settle",
     )
-    d.upsert_market("tok-yes", "cid1", "slug-60-70", 60.0, 70.0, "YES")
+    d.upsert_market(
+        "tok-yes", "cid1", "slug-60-70", 60.0, 70.0, "YES",
+        market_id="mkt-60-70",
+    )
     d.execute(
         "INSERT INTO orders "
         "(order_id, token_id, condition_id, side, size_usd, price, status, created_at)"
@@ -41,13 +44,14 @@ def db() -> DbClient:
 @pytest.fixture
 def obs_store(tmp_path: Path) -> ParquetStore:
     store = ParquetStore(tmp_path / "obs")
-    # IEM source writes temperature as raw_tmpc_tenths (Celsius * 10).
-    # 65.1 F -> (65.1-32)*5/9 = 18.39 C -> 184 tenths
-    # 63.5 F -> (63.5-32)*5/9 = 17.50 C -> 175 tenths
+    # IEM source writes raw_tmpc_tenths as degrees Celsius floats. The column
+    # name is historical; T-group tenths have already been divided by 10.
+    # 65.1 F -> (65.1-32)*5/9 = 18.39 C
+    # 63.5 F -> (63.5-32)*5/9 = 17.50 C
     df = pd.DataFrame({
         "valid_time": [pd.Timestamp("2025-03-20 12:00", tz="UTC"),
                        pd.Timestamp("2025-03-20 15:00", tz="UTC")],
-        "raw_tmpc_tenths": [175, 184],   # max = 18.4 C = 65.12 F, in bucket 60-70
+        "raw_tmpc_tenths": [17.5, 18.4],   # max = 65.12 F, in bucket 60-70
     })
     store.append("KLGA", df)
     return store
@@ -381,6 +385,7 @@ def test_settlement_enqueues_pending_redeem_for_winning_live_condition(
     tasks = db.get_pending_redeem_tasks()
     assert len(tasks) == 1
     assert tasks[0]["condition_id"] == "cid1"
+    assert tasks[0]["market_id"] == "mkt-60-70"
     assert tasks[0]["status"] == "pending"
 
 

@@ -53,6 +53,7 @@ class DbClient:
             CREATE TABLE IF NOT EXISTS markets (
                 token_id          TEXT PRIMARY KEY,
                 condition_id      TEXT REFERENCES events(condition_id),
+                market_id         TEXT,
                 market_slug       TEXT,
                 bucket_lo_f       REAL,
                 bucket_hi_f       REAL,
@@ -122,6 +123,7 @@ class DbClient:
 
             CREATE TABLE IF NOT EXISTS redeem_tasks (
                 condition_id  TEXT PRIMARY KEY,
+                market_id     TEXT,
                 status        TEXT NOT NULL DEFAULT 'pending'
                               CHECK (status IN ('pending', 'redeemed', 'failed', 'skipped_paper')),
                 attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -154,6 +156,8 @@ class DbClient:
             "ALTER TABLE orders ADD COLUMN signed_shares    REAL",
             "ALTER TABLE orders ADD COLUMN cash_flow_usd    REAL",
             "ALTER TABLE markets ADD COLUMN discovery_status TEXT NOT NULL DEFAULT 'parsed'",
+            "ALTER TABLE markets ADD COLUMN market_id TEXT",
+            "ALTER TABLE redeem_tasks ADD COLUMN market_id TEXT",
         ]
         for stmt in _additive:
             try:
@@ -218,6 +222,7 @@ class DbClient:
                 CREATE TABLE markets_v2 (
                     token_id          TEXT PRIMARY KEY,
                     condition_id      TEXT REFERENCES events(condition_id),
+                    market_id         TEXT,
                     market_slug       TEXT,
                     bucket_lo_f       REAL,
                     bucket_hi_f       REAL,
@@ -226,7 +231,7 @@ class DbClient:
                                       CHECK (discovery_status IN ('parsed', 'unrecognized_slug', 'invalid_market'))
                 );
                 INSERT INTO markets_v2 SELECT
-                    token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome,
+                    token_id, condition_id, market_id, market_slug, bucket_lo_f, bucket_hi_f, outcome,
                     COALESCE(discovery_status, 'parsed')
                 FROM markets;
                 DROP TABLE markets;
@@ -427,22 +432,24 @@ class DbClient:
         bucket_hi_f: float | None,
         outcome: str,
         discovery_status: str = "parsed",
+        market_id: str | None = None,
     ) -> None:
         self._conn.execute(
             """
             INSERT INTO markets
-                (token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome,
+                (token_id, condition_id, market_id, market_slug, bucket_lo_f, bucket_hi_f, outcome,
                  discovery_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(token_id) DO UPDATE SET
                 condition_id=excluded.condition_id,
+                market_id=excluded.market_id,
                 market_slug=excluded.market_slug,
                 bucket_lo_f=excluded.bucket_lo_f,
                 bucket_hi_f=excluded.bucket_hi_f,
                 outcome=excluded.outcome,
                 discovery_status=excluded.discovery_status
             """,
-            (token_id, condition_id, market_slug, bucket_lo_f, bucket_hi_f, outcome,
+            (token_id, condition_id, market_id, market_slug, bucket_lo_f, bucket_hi_f, outcome,
              discovery_status),
         )
         self._conn.commit()
@@ -628,6 +635,7 @@ class DbClient:
         self,
         condition_id: str,
         status: str = "pending",
+        market_id: str | None = None,
     ) -> None:
         """Create a redeem_task row; on conflict only update status.
 
@@ -638,13 +646,14 @@ class DbClient:
         self._conn.execute(
             """
             INSERT INTO redeem_tasks
-                (condition_id, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?)
+                (condition_id, market_id, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(condition_id) DO UPDATE SET
+                market_id=COALESCE(excluded.market_id, redeem_tasks.market_id),
                 status=excluded.status,
                 updated_at=excluded.updated_at
             """,
-            (condition_id, status, now, now),
+            (condition_id, market_id, status, now, now),
         )
         self._conn.commit()
 

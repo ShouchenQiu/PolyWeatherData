@@ -197,7 +197,7 @@ def test_redeem_tasks_table_has_required_columns() -> None:
     cur = db._conn.execute("PRAGMA table_info(redeem_tasks)")
     cols = {row["name"] for row in cur.fetchall()}
     required = {
-        "condition_id", "status", "attempt_count",
+        "condition_id", "market_id", "status", "attempt_count",
         "last_error", "created_at", "updated_at", "redeemed_at",
     }
     assert required <= cols, f"Missing redeem_tasks columns: {required - cols}"
@@ -234,6 +234,7 @@ def test_markets_has_discovery_status_column() -> None:
     cur = db._conn.execute("PRAGMA table_info(markets)")
     cols = {row["name"] for row in cur.fetchall()}
     assert "discovery_status" in cols, "markets table missing discovery_status column"
+    assert "market_id" in cols, "markets table missing market_id column"
 
 
 def test_markets_discovery_status_defaults_to_parsed() -> None:
@@ -308,7 +309,7 @@ def test_migration_upgrades_v1_db_to_v2(tmp_dir) -> None:
     assert "tick_utc" in cols and "timestamp" not in cols
     cur = db._conn.execute("PRAGMA table_info(markets)")
     cols = {row["name"] for row in cur.fetchall()}
-    assert "discovery_status" in cols
+    assert {"discovery_status", "market_id"} <= cols
     # Verify migrated DB enforces CHECK constraints (not just column presence)
     db._conn.execute("PRAGMA foreign_keys=OFF")
     with pytest.raises(_sqlite3.IntegrityError):
@@ -668,10 +669,11 @@ def test_insert_signal_decision_rejected_with_reason() -> None:
 
 def test_enqueue_redeem_task_creates_row() -> None:
     db = DbClient(":memory:")
-    db.enqueue_redeem_task("cid-001")
+    db.enqueue_redeem_task("cid-001", market_id="mkt-001")
     row = db._conn.execute(
         "SELECT * FROM redeem_tasks WHERE condition_id='cid-001'"
     ).fetchone()
+    assert row["market_id"] == "mkt-001"
     assert row["status"] == "pending"
     assert row["attempt_count"] == 0
     assert row["last_error"] is None

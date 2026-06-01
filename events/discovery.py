@@ -111,8 +111,8 @@ class EventDiscovery:
 
     Workflow (V2V01)
     ----------------
-    1. Call ``PublicClient.list_events(live=True, tag_slug="weather")`` via the
-       SDK paginator (ADR-0009).  Falls back to raw ``requests.get`` when the
+    1. Call ``PublicClient.list_events(page_size=...)`` via the SDK paginator
+       (ADR-0009).  Falls back to raw ``requests.get`` when the
        SDK is not available (tests / offline mode).
     2. For each event whose slug matches the configured pattern, iterate its
        markets and parse each market slug into (lo_f, hi_f).
@@ -255,7 +255,7 @@ class EventDiscovery:
     def _fetch_events(self, extra_params: dict) -> list[dict]:
         """Fetch events from the Gamma API.
 
-        Uses ``PublicClient.list_events(live=True, tag_slug="weather")`` when
+        Uses ``PublicClient.list_events(page_size=...)`` when
         the unified SDK is available (ADR-0009).  The SDK returns a paginator;
         iterate through pages and convert typed models to dicts for downstream
         compatibility.
@@ -275,7 +275,8 @@ class EventDiscovery:
         if PublicClient is not None:
             try:
                 with PublicClient() as client:
-                    paginator = client.list_events(live=True, tag_slug="weather")
+                    page_size = int(extra_params.get("page_size") or 100)
+                    paginator = client.list_events(page_size=page_size)
                     events: list[dict] = []
                     for page in paginator:
                         for ev in page.items:
@@ -305,14 +306,38 @@ class EventDiscovery:
         access.  This adapter converts them to the dict shape the remaining
         discovery pipeline expects.
         """
+        def _stringify(value: object) -> str:
+            return str(value) if value is not None else ""
+
+        def _dt(value: object) -> str:
+            if value is None:
+                return ""
+            iso = getattr(value, "isoformat", None)
+            return str(iso()) if callable(iso) else str(value)
+
+        def _nested(obj: object, *names: str) -> object | None:
+            cur = obj
+            for name in names:
+                cur = getattr(cur, name, None)
+                if cur is None:
+                    return None
+            return cur
+
         markets_raw: list[dict] = []
         for mkt in getattr(ev, "markets", ()):
             mkt_dict: dict = {}
-            for field in ("id", "slug", "condition_id", "question",
+            for field in ("slug", "condition_id", "question",
                           "description", "category", "icon", "image"):
                 val = getattr(mkt, field, None)
                 if val is not None:
                     mkt_dict[field] = str(val) if not isinstance(val, (str, type(None))) else val
+            market_id = getattr(mkt, "id", None)
+            if market_id is not None:
+                mkt_dict["id"] = _stringify(market_id)
+                mkt_dict["market_id"] = _stringify(market_id)
+            condition_id = getattr(mkt, "condition_id", None)
+            if condition_id is not None:
+                mkt_dict["conditionId"] = _stringify(condition_id)
             # clobTokenIds: serialise token_id tuples to JSON
             outcomes = getattr(mkt, "outcomes", None)
             if outcomes is not None:
@@ -325,13 +350,21 @@ class EventDiscovery:
                 mkt_dict["outcomes"] = json.dumps(["Yes", "No"])
             markets_raw.append(mkt_dict)
 
+        event_id = getattr(ev, "id", "")
+        end_date = (
+            _nested(ev, "schedule", "end_date")
+            or _nested(ev, "state", "end_date")
+            or getattr(ev, "end_date", None)
+        )
         return {
-            "id":           str(getattr(ev, "id", "")),
+            "id":           _stringify(event_id),
             "slug":         getattr(ev, "slug", None) or "",
             "title":        getattr(ev, "title", None) or "",
+            "endDate":      _dt(end_date),
+            "end_date_iso": _dt(end_date),
             "markets":      markets_raw,
-            "created_at":   str(getattr(ev, "created_at", "")) if getattr(ev, "created_at", None) else "",
-            "updated_at":   str(getattr(ev, "updated_at", "")) if getattr(ev, "updated_at", None) else "",
+            "created_at":   _dt(getattr(ev, "created_at", None)),
+            "updated_at":   _dt(getattr(ev, "updated_at", None)),
             "closed":       getattr(ev, "closed", False),
         }
 
@@ -391,6 +424,7 @@ class EventDiscovery:
 
             rows.append({
                 "market_slug":      market_slug,
+                "market_id":        str(mkt.get("market_id") or mkt.get("id") or ""),
                 "lo_f":             lo_f,
                 "hi_f":             hi_f,
                 "token_ids":        token_ids,
@@ -427,6 +461,7 @@ class EventDiscovery:
                     bucket_hi_f      = row["hi_f"],
                     outcome          = str(outcome),
                     discovery_status = row["discovery_status"],
+                    market_id        = row["market_id"] or None,
                 )
                 added.append({"token_id": str(token_id), "outcome": str(outcome)})
 
@@ -457,6 +492,7 @@ class EventDiscovery:
                     bucket_hi_f      = row["hi_f"],
                     outcome          = str(outcome),
                     discovery_status = row["discovery_status"],
+                    market_id        = row["market_id"] or None,
                 )
 
         return rows, unrecog_count

@@ -1,4 +1,4 @@
-"""RedeemLoop: poll redeem_tasks and call CTF redeem on-chain via the SDK."""
+"""RedeemLoop: poll redeem_tasks and redeem resolved positions via the SDK."""
 from __future__ import annotations
 
 import asyncio
@@ -16,8 +16,8 @@ class RedeemLoop:
     """Process pending and failed redeem tasks.
 
     Polls ``redeem_tasks`` for rows with status ``pending`` or ``failed``.
-    Calls ``SecureClient.ctf_redeem_positions_call(condition_id)`` once per
-    condition.  On success writes ``redeemed``; on failure writes ``failed``,
+    Calls ``SecureClient.redeem_positions(market_id=...)`` once per task when
+    a market_id is available.  On success writes ``redeemed``; on failure writes ``failed``,
     increments ``attempt_count``, records ``last_error``, and retries on the
     next poll cycle.
 
@@ -26,8 +26,8 @@ class RedeemLoop:
     db:
         DbClient for querying/updating redeem_tasks.
     secure_client:
-        ``SecureClient`` instance from polymarket_client.  Must expose
-        ``ctf_redeem_positions_call(condition_id)``.
+        ``SecureClient`` instance from the unified Polymarket SDK.  Must expose
+        ``redeem_positions(market_id=...)``.
     settings:
         Settings instance providing ``redeem_loop_interval_s``.
     """
@@ -70,8 +70,9 @@ class RedeemLoop:
                 tasks = self._db.get_pending_redeem_tasks()
                 for task in tasks:
                     cid = task["condition_id"]
+                    market_id = task.get("market_id")
                     try:
-                        await asyncio.to_thread(self._process_one, cid)
+                        await asyncio.to_thread(self._process_one, cid, market_id)
                     except Exception:
                         logger.exception(
                             "RedeemLoop: process_one failed for {}", cid
@@ -84,18 +85,30 @@ class RedeemLoop:
     # Internal
     # ------------------------------------------------------------------
 
-    def _process_one(self, condition_id: str) -> None:
+    def _process_one(self, condition_id: str, market_id: str | None = None) -> None:
         """Call the SDK redeem and record success or failure.
 
         Runs in a thread via ``asyncio.to_thread`` to avoid blocking the
         bot's event loop on slow RPC calls.
 
-        The unified SDK uses ``redeem_positions(condition_id=...)`` which
-        returns a handle; call ``handle.wait()`` for confirmation.
+        The unified SDK uses ``redeem_positions(market_id=...)`` which returns
+        a handle; call ``handle.wait()`` for confirmation.
         """
-        logger.info("RedeemLoop: processing {}", condition_id)
+        logger.info(
+            "RedeemLoop: processing {} market_id={}",
+            condition_id,
+            market_id or "<legacy>",
+        )
         try:
-            handle = self._secure.redeem_positions(condition_id=condition_id)
+            if market_id:
+                handle = self._secure.redeem_positions(market_id=market_id)
+            else:
+                logger.warning(
+                    "RedeemLoop: task {} has no market_id; falling back to legacy "
+                    "condition_id parameter",
+                    condition_id,
+                )
+                handle = self._secure.redeem_positions(condition_id=condition_id)
             # Wait for the on-chain transaction to confirm.
             if hasattr(handle, "wait"):
                 handle.wait()

@@ -104,12 +104,14 @@ def _gamma_response(slug_pattern: str = "highest-temperature") -> list[dict]:
             "endDate":       "2025-03-20",
             "markets": [
                 {
+                    "id":            "mkt-60-70",
                     "slug":          "klga-highest-temperature-60-70f-2025-03-20",
                     "conditionId":   "cond-001",
                     "clobTokenIds":  json.dumps(["tok-yes-1", "tok-no-1"]),
                     "outcomes":      json.dumps(["Yes", "No"]),
                 },
                 {
+                    "id":            "mkt-70-plus",
                     "slug":          "klga-highest-temperature-70f-or-higher-2025-03-20",
                     "conditionId":   "cond-001",
                     "clobTokenIds":  json.dumps(["tok-yes-2", "tok-no-2"]),
@@ -159,6 +161,21 @@ def test_discover_upserts_markets(mem_db):
     cur  = mem_db._conn.execute("SELECT * FROM markets").fetchall()
     # 2 markets x 2 tokens each = 4 rows
     assert len(cur) == 4
+
+
+def test_discover_persists_market_id(mem_db):
+    """Market id is retained for SDK redeem_positions(market_id=...)."""
+    settings = _make_settings()
+    disc     = EventDiscovery(db=mem_db, settings=settings)
+
+    with patch.object(disc, "_fetch_events", return_value=_gamma_response()):
+        disc.discover()
+
+    row = mem_db._conn.execute(
+        "SELECT market_id FROM markets WHERE token_id='tok-yes-1'"
+    ).fetchone()
+    assert row is not None
+    assert row["market_id"] == "mkt-60-70"
 
 
 def test_discover_parses_buckets(mem_db):
@@ -379,6 +396,41 @@ def test_process_markets_upserts_matched_market(mem_db):
     assert len(result) == 1
     rows = mem_db._conn.execute("SELECT * FROM markets").fetchall()
     assert len(rows) == 2
+
+
+def test_event_to_dict_maps_sdk_models_to_gamma_shape():
+    """Typed SDK Event/Market models map to downstream Gamma-like dicts."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    ev = SimpleNamespace(
+        id="event-1",
+        slug="highest-temperature-klga-2026-06-01",
+        title="Highest Temperature at KLGA",
+        created_at=datetime(2026, 5, 31, tzinfo=timezone.utc),
+        updated_at=None,
+        schedule=SimpleNamespace(end_date=datetime(2026, 6, 1, tzinfo=timezone.utc)),
+        markets=(
+            SimpleNamespace(
+                id="market-1",
+                slug="klga-highest-temperature-60-70f-2026-06-01",
+                condition_id="condition-1",
+                question="Will KLGA be 60-70F?",
+                outcomes=SimpleNamespace(
+                    yes=SimpleNamespace(token_id="yes-token"),
+                    no=SimpleNamespace(token_id="no-token"),
+                ),
+            ),
+        ),
+    )
+
+    out = EventDiscovery._event_to_dict(ev)
+
+    assert out["id"] == "event-1"
+    assert out["endDate"].startswith("2026-06-01")
+    assert out["markets"][0]["market_id"] == "market-1"
+    assert out["markets"][0]["conditionId"] == "condition-1"
+    assert json.loads(out["markets"][0]["clobTokenIds"]) == ["yes-token", "no-token"]
 
 
 # ---------------------------------------------------------------------------

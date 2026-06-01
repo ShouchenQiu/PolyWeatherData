@@ -139,8 +139,8 @@ class SettlementLoop:
         day_end_utc   = local_day_end.tz_convert("UTC")
         obs_df        = self._obs_store.read(station, day_start_utc, day_end_utc)
 
-        # IEM source stores temperature as raw_tmpc_tenths (Celsius * 10).
-        # Convert to Fahrenheit: C / 10 * 9/5 + 32.
+        # Historical column name is misleading: current IEM/NOAA sources store
+        # this as degrees Celsius, preserving tenths precision as a float.
         if obs_df.empty or "raw_tmpc_tenths" not in obs_df.columns:
             logger.warning(
                 "SettlementLoop: no raw_tmpc_tenths obs for station={} date={}; event={}",
@@ -151,7 +151,7 @@ class SettlementLoop:
             self._try_relayer_fallback(condition_id)
             return
 
-        tmp_c = obs_df["raw_tmpc_tenths"].max() / 10.0
+        tmp_c = obs_df["raw_tmpc_tenths"].max()
         actual_max_temp: float = tmp_c * 9.0 / 5.0 + 32.0
         self._settle_from_obs(condition_id, actual_max_temp)
 
@@ -200,13 +200,39 @@ class SettlementLoop:
         has_net_long = any(v > 0.0 for v in net_by_token.values())
         if not has_net_long:
             return
+        market_id = self._market_id_for_redeem(winning_tokens)
         status = "pending" if self._is_live else "skipped_paper"
         suffix = "" if self._is_live else " (paper mode)"
-        self._db.enqueue_redeem_task(condition_id, status=status)
-        logger.info(
-            "SettlementLoop: redeem task enqueued for {} (status={}{})",
-            condition_id, status, suffix,
+        self._db.enqueue_redeem_task(
+            condition_id,
+            status=status,
+            market_id=market_id,
         )
+        logger.info(
+            "SettlementLoop: redeem task enqueued for {} market_id={} (status={}{})",
+            condition_id, market_id or "<legacy>", status, suffix,
+        )
+
+    def _market_id_for_redeem(self, winning_tokens: set[str]) -> str | None:
+        """Return the SDK market_id for one winning token, when available."""
+        placeholders = ",".join("?" for _ in winning_tokens)
+        if not placeholders:
+            return None
+        try:
+            rows = self._db.query(
+                f"""
+                SELECT DISTINCT market_id FROM markets
+                WHERE token_id IN ({placeholders})
+                  AND market_id IS NOT NULL
+                  AND market_id != ''
+                ORDER BY market_id
+                """,
+                tuple(winning_tokens),
+            )
+        except Exception:
+            logger.exception("SettlementLoop: failed to resolve redeem market_id")
+            return None
+        return str(rows[0]["market_id"]) if rows else None
 
     def _try_relayer_fallback(self, condition_id: str) -> None:
         """Attempt on-chain resolution via SettlementRelayer when IEM data is absent."""

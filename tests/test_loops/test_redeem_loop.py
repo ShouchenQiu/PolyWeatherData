@@ -34,7 +34,7 @@ def _settings(trading_mode: str = "live", interval_s: float = 1.0):
 
 def test_run_processes_pending_task_and_marks_redeemed(db):
     """RedeemLoop calls the SDK once per pending task and marks it redeemed."""
-    db.enqueue_redeem_task("cid-1", status="pending")
+    db.enqueue_redeem_task("cid-1", status="pending", market_id="mkt-1")
 
     secure = MagicMock()
     secure.redeem_positions.return_value = None  # no error
@@ -54,7 +54,7 @@ def test_run_processes_pending_task_and_marks_redeemed(db):
 
     asyncio.run(_run_one_cycle())
 
-    secure.redeem_positions.assert_called_once_with(condition_id="cid-1")
+    secure.redeem_positions.assert_called_once_with(market_id="mkt-1")
     # After success, no pending/failed tasks remain
     remaining = db.get_pending_redeem_tasks()
     assert len(remaining) == 0
@@ -63,6 +63,28 @@ def test_run_processes_pending_task_and_marks_redeemed(db):
     rows = db.query("SELECT status FROM redeem_tasks WHERE condition_id=?", ("cid-1",))
     assert rows
     assert rows[0]["status"] == "redeemed"
+
+
+def test_run_legacy_task_without_market_id_uses_condition_id(db):
+    """Legacy rows remain retryable when they predate the market_id column."""
+    db.enqueue_redeem_task("cid-legacy", status="pending")
+
+    secure = MagicMock()
+    secure.redeem_positions.return_value = None
+    loop = RedeemLoop(db, secure, _settings())
+
+    async def _run_one_cycle():
+        task = asyncio.create_task(loop.run())
+        await asyncio.sleep(0.1)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run_one_cycle())
+
+    secure.redeem_positions.assert_called_once_with(condition_id="cid-legacy")
 
 
 # ---------------------------------------------------------------------------

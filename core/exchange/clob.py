@@ -23,7 +23,7 @@ class ClobExchange(BaseExchange):
     Parameters
     ----------
     clob_client:
-        A ``polymarket_client.SecureClient`` instance (or any object
+        A unified ``polymarket.SecureClient`` instance (or any object
         exposing ``place_limit_order`` and ``cancel_orders``).
     """
 
@@ -66,9 +66,16 @@ class ClobExchange(BaseExchange):
             self._emit_alert("order_failure", token_id, str(exc))
             raise
 
+        ok = getattr(resp, "ok", True)
         order_id = getattr(resp, "order_id", None) or ""
-        if not order_id:
-            error_msg = getattr(resp, "error_msg", None) or "rejected"
+        if not ok or not order_id:
+            error_msg = (
+                getattr(resp, "message", None)
+                or getattr(resp, "error_msg", None)
+                or getattr(resp, "code", None)
+                or "rejected"
+            )
+            order_id = ""
             logger.error("[CLOB] Order rejected for {}: {}", token_id, error_msg)
             self._emit_alert("order_failure", token_id, error_msg)
         else:
