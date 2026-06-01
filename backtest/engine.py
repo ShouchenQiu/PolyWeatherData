@@ -107,6 +107,7 @@ class BacktestEngine:
         min_edge:          float = 0.0,
         cold_start_hours:  int   = 72,
         data_manager:      "DataManager | None" = None,
+        quote_size_usd:    float = 20.0,
     ) -> None:
         self.pipeline          = pipeline
         self.strategy          = strategy
@@ -114,6 +115,7 @@ class BacktestEngine:
         self.min_edge          = min_edge
         self._cold_start_hours = cold_start_hours
         self._data_manager     = data_manager
+        self._quote_size_usd   = quote_size_usd
         self._readiness_skips: list[dict] = []
         self._clob_index       = self._build_clob_index(clob_df)
 
@@ -214,15 +216,21 @@ class BacktestEngine:
 
     def _clob_window(
         self, event_str: str, init_utc: pd.Timestamp
-    ) -> tuple[pd.DataFrame | None, str | None]:
+    ) -> tuple[pd.DataFrame | None, str | None, bool]:
         """Return aggregated CLOB prices in the +-CLOB_WIN_MIN window.
 
+        When the source DataFrame includes ``bids`` / ``asks`` columns (L2
+        mode), each row's book is passed through ``compute_quote()`` and
+        the median VWAP is stored as ``clob_price``.  Otherwise
+        ``mid_price_yes`` is stored as ``legacy_mid_price``.
+
+        Returns ``(aggregated_df, quality, is_l2)`` or ``(None, None,
+        False)`` when no data is in range.
+
         Prefers ``is_filled=0`` rows; falls back to all rows.
-        Returns (aggregated_df, quality) where quality is 'real' or 'filled',
-        or (None, None) if no data.
         """
         if event_str not in self._clob_index:
-            return None, None
+            return None, None, False
         grp = self._clob_index[event_str]
         lo  = init_utc - pd.Timedelta(minutes=_CLOB_WIN_MIN)
         hi  = init_utc + pd.Timedelta(minutes=_CLOB_WIN_MIN)
@@ -230,17 +238,50 @@ class BacktestEngine:
             (grp["timestamp_utc"] >= lo) & (grp["timestamp_utc"] <= hi)
         ]
         if len(win) == 0:
-            return None, None
+            return None, None, False
         real = win[win["is_filled"] == 0]
         src  = real if len(real) > 0 else win
         qual = "real" if len(real) > 0 else "filled"
-        agg  = src.groupby(
+
+        # Detect L2: all rows must have non-null, non-empty bids + asks
+        has_l2 = (
+            "bids" in src.columns and "asks" in src.columns
+            and src["bids"].notna().any() and src["asks"].notna().any()
+        )
+
+        if has_l2:
+            from core.pricing.quote import compute_quote
+
+            def _row_vwap(r: pd.Series) -> float | None:
+                book = {"bids": r["bids"], "asks": r["asks"]}
+                try:
+                    q = compute_quote(book, "BUY", self._quote_size_usd)
+                    return q.vwap_price if q.complete_fill else None
+                except Exception:
+                    return None
+
+            vwaps = src.apply(_row_vwap, axis=1)
+            src = src.copy()
+            src["_vwap"] = vwaps
+            src = src[src["_vwap"].notna()]
+            if len(src) == 0:
+                return None, None, False
+            agg = src.groupby(
+                ["market_slug", "bucket_lo_f", "bucket_hi_f"], as_index=False
+            ).agg(
+                clob_price       =("_vwap",              "median"),
+                estimated_spread =("estimated_spread",    "median"),
+            )
+            return agg, qual, True
+
+        # Legacy path: mid_price_yes only
+        agg = src.groupby(
             ["market_slug", "bucket_lo_f", "bucket_hi_f"], as_index=False
         ).agg(
-            clob_price        =("mid_price_yes",     "median"),
-            estimated_spread  =("estimated_spread",   "median"),
+            legacy_mid_price =("mid_price_yes",      "median"),
+            estimated_spread =("estimated_spread",    "median"),
         )
-        return agg, qual
+        return agg, qual, False
 
     def _process_init(
         self,
@@ -291,7 +332,7 @@ class BacktestEngine:
             fxx_in_target = [i + 1 for i, m in enumerate(mask) if m]
 
             # Collect bucket list from CLOB window
-            agg, qual = self._clob_window(target_str, init_utc)
+            agg, qual, is_l2 = self._clob_window(target_str, init_utc)
             if agg is None:
                 continue
 
@@ -316,8 +357,17 @@ class BacktestEngine:
             for _, br in agg.iterrows():
                 lo = float(br["bucket_lo_f"])
                 hi = float(br["bucket_hi_f"])
-                cp = float(br["clob_price"])
                 sp = float(br["estimated_spread"])
+
+                # Determine price depending on L2 vs legacy
+                if is_l2:
+                    cp = float(br["clob_price"])
+                    price_source = "l2_vwap"
+                    legacy_mid  = float("nan")
+                else:
+                    cp = float(br["legacy_mid_price"])
+                    price_source = "legacy_mid"
+                    legacy_mid  = cp
 
                 mc_p = probs.get((lo, hi), float("nan"))
                 if np.isnan(mc_p):
@@ -328,6 +378,9 @@ class BacktestEngine:
                     continue
 
                 out = _bucket_outcome(actual_f, lo, hi)
+
+                # Price used for edge/PnL is always cp (set above)
+                pnl_price = cp
 
                 records.append({
                     "target_date":        target_str,
@@ -340,15 +393,20 @@ class BacktestEngine:
                     "bucket_hi_f":        hi,
                     "market_slug":        str(br["market_slug"]),
                     "mc_prob":            round(mc_p, 5),
-                    "clob_price":         round(cp, 5),
+                    "clob_price":         round(cp, 5) if is_l2
+                                          else float("nan"),
+                    "legacy_mid_price":   round(legacy_mid, 5)
+                                          if not np.isnan(legacy_mid)
+                                          else float("nan"),
+                    "price_source":       price_source,
                     "estimated_spread":   round(sp, 5),
                     "halfspread":         round(sp / 2.0, 5),
                     "clob_quality":       qual,
                     "edge":               round(edge, 5),
                     "actual_max_f":       actual_f,
                     "actual_outcome":     out,
-                    "pnl_if_yes":         round(float(out) - cp, 5)
+                    "pnl_if_yes":         round(float(out) - pnl_price, 5)
                                           if not np.isnan(out) else float("nan"),
-                    "pnl_if_no":          round(cp - float(out), 5)
+                    "pnl_if_no":          round(pnl_price - float(out), 5)
                                           if not np.isnan(out) else float("nan"),
                 })

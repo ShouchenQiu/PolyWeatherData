@@ -108,8 +108,13 @@ class BacktestAnalysis:
         ]
         brier_mkt = brier_tft = bss = float("nan")
         if len(valid) > 0:
+            # Use L2 VWAP when available, legacy mid otherwise
+            if "legacy_mid_price" in valid.columns:
+                mkt_price = valid["clob_price"].fillna(valid["legacy_mid_price"])
+            else:
+                mkt_price = valid["clob_price"]
             brier_mkt = float(
-                ((valid["clob_price"] - valid["actual_outcome"]) ** 2).mean()
+                ((mkt_price - valid["actual_outcome"]) ** 2).mean()
             )
             brier_tft = float(
                 ((valid["mc_prob"] - valid["actual_outcome"]) ** 2).mean()

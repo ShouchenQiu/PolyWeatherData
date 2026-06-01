@@ -182,7 +182,7 @@ class TestClobWindowSelection:
         df = engine.run("2024-01-01", "2024-01-01",
                         _make_station(), init_hours=[6])
         assert not df.empty
-        assert df.iloc[0]["clob_price"] == pytest.approx(0.55, abs=1e-5)
+        assert df.iloc[0]["legacy_mid_price"] == pytest.approx(0.55, abs=1e-5)
         assert df.iloc[0]["clob_quality"] == "real"
 
     def test_falls_back_to_filled_when_no_real(self):
@@ -498,7 +498,7 @@ def _sample_results_df(n: int = 20, seed: int = 42) -> pd.DataFrame:
     return pd.DataFrame({
         "target_date":        ["2024-01-02"] * n,
         "init_utc":           inits,
-        "init_local":           inits,
+        "init_local":         inits,
         "n_hours":            [24] * n,
         "coverage_type":      ["full"] * n,
         "lead_hours_to_4pm":  leads,
@@ -506,7 +506,9 @@ def _sample_results_df(n: int = 20, seed: int = 42) -> pd.DataFrame:
         "bucket_hi_f":        [70.0] * n,
         "market_slug":        ["slug60-70"] * n,
         "mc_prob":            mc,
-        "clob_price":         clob,
+        "clob_price":         float("nan"),
+        "legacy_mid_price":   clob,
+        "price_source":       ["legacy_mid"] * n,
         "estimated_spread":   hs * 2,
         "halfspread":         hs,
         "clob_quality":       ["real"] * n,
@@ -537,8 +539,9 @@ class TestBacktestAnalysisSummary:
         df  = _sample_results_df()
         ana = BacktestAnalysis(df)
         s   = ana.summary()
+        mkt_price = df["clob_price"].fillna(df["legacy_mid_price"])
         expected_mkt = float(
-            ((df["clob_price"] - df["actual_outcome"]) ** 2).mean()
+            ((mkt_price - df["actual_outcome"]) ** 2).mean()
         )
         assert s["brier_market"] == pytest.approx(expected_mkt, rel=1e-4)
 
@@ -643,6 +646,171 @@ class TestBacktestAnalysisByInitHour:
         ana = BacktestAnalysis(df)
         r   = ana.by_init_hour()
         assert isinstance(r, pd.DataFrame)
+
+
+# ---------------------------------------------------------------------------
+# V2V10 -- L2 quote path and legacy mid fallback
+# ---------------------------------------------------------------------------
+
+class TestV2V10L2QuotePath:
+    """When CLOB rows carry L2 bids/asks, compute_quote() drives pricing."""
+
+    def test_l2_clob_uses_compute_quote_and_sets_clob_price(self):
+        """L2 bids/asks in CLOB rows produce clob_price via compute_quote VWAP."""
+        pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
+        actual_highs = {"2024-01-02": 70.0}
+
+        # One book level at 0.55 with 1000 shares = plenty of depth
+        rows = [
+            {
+                "timestamp_utc":    pd.Timestamp("2024-01-01 06:00:00", tz="UTC"),
+                "event_end_date":   pd.Timestamp("2024-01-02", tz="UTC"),
+                "market_slug":      "slug-l2",
+                "bucket_lo_f":      65.0,
+                "bucket_hi_f":      75.0,
+                "mid_price_yes":    0.50,   # ignored for L2
+                "estimated_spread": 0.04,
+                "is_filled":        0,
+                "bids":             [{"price": 0.53, "size": 1000.0}],
+                "asks":             [{"price": 0.55, "size": 1000.0}],
+            },
+        ]
+        clob_df = _make_clob_df(rows)
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), clob_df, actual_highs,
+            cold_start_hours=0, quote_size_usd=20.0,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        _make_station(), init_hours=[6])
+
+        assert not df.empty
+        row = df.iloc[0]
+        # BUY at 0.55 with plenty of depth -> VWAP ~= 0.55
+        assert row["clob_price"] == pytest.approx(0.55, abs=1e-5)
+        assert row["price_source"] == "l2_vwap"
+        assert math.isnan(row["legacy_mid_price"])
+        # Edge uses L2 VWAP: 0.70 - 0.55 = 0.15
+        assert row["edge"] == pytest.approx(0.15, abs=1e-5)
+        # PnL uses L2 VWAP
+        assert row["pnl_if_yes"] == pytest.approx(1.0 - 0.55, abs=1e-5)
+
+    def test_l2_clob_incomplete_fill_drops_row(self):
+        """When L2 depth is insufficient, the row is dropped (no signal)."""
+        pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
+        actual_highs = {"2024-01-02": 70.0}
+
+        # Tiny depth: only 0.1 share ~= $0.05 far below $20 quote_size_usd
+        rows = [
+            {
+                "timestamp_utc":    pd.Timestamp("2024-01-01 06:00:00", tz="UTC"),
+                "event_end_date":   pd.Timestamp("2024-01-02", tz="UTC"),
+                "market_slug":      "slug-l2",
+                "bucket_lo_f":      65.0,
+                "bucket_hi_f":      75.0,
+                "mid_price_yes":    0.50,
+                "estimated_spread": 0.04,
+                "is_filled":        0,
+                "bids":             [{"price": 0.53, "size": 0.1}],
+                "asks":             [{"price": 0.55, "size": 0.1}],
+            },
+        ]
+        clob_df = _make_clob_df(rows)
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), clob_df, actual_highs,
+            cold_start_hours=0, quote_size_usd=20.0,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        _make_station(), init_hours=[6])
+        assert df.empty
+
+
+class TestV2V10LegacyMidFallback:
+    """When CLOB rows have only mid_price_yes, it is stored as legacy_mid_price."""
+
+    def test_legacy_mid_sets_legacy_column_not_clob_price(self):
+        """Legacy mid_price_yes -> legacy_mid_price column; clob_price is NaN."""
+        pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
+        actual_highs = {"2024-01-02": 70.0}
+        rows = [
+            _clob_row("2024-01-02", "2024-01-01 06:00:00", "slug-legacy",
+                      65.0, 75.0, 0.55),
+        ]
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), _make_clob_df(rows), actual_highs,
+            cold_start_hours=0,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        _make_station(), init_hours=[6])
+
+        assert not df.empty
+        row = df.iloc[0]
+        assert row["price_source"] == "legacy_mid"
+        assert row["legacy_mid_price"] == pytest.approx(0.55, abs=1e-5)
+        assert math.isnan(row["clob_price"])
+        # Edge uses legacy mid: 0.70 - 0.55 = 0.15
+        assert row["edge"] == pytest.approx(0.15, abs=1e-5)
+        # PnL uses legacy mid
+        assert row["pnl_if_yes"] == pytest.approx(1.0 - 0.55, abs=1e-5)
+
+    def test_legacy_mid_not_passed_through_compute_quote(self):
+        """Verify legacy_mid_price never goes through compute_quote path."""
+        pipeline     = _make_pipeline({(65.0, 75.0): 0.70})
+        actual_highs = {"2024-01-02": 70.0}
+
+        # mid_price_yes=0.99 but with L2 asks at 0.01 -- if compute_quote
+        # were incorrectly called it would give VWAP ~= 0.01 instead of 0.99.
+        # Since there are NO L2 columns, the engine must use legacy path.
+        rows = [
+            {
+                "timestamp_utc":    pd.Timestamp("2024-01-01 06:00:00", tz="UTC"),
+                "event_end_date":   pd.Timestamp("2024-01-02", tz="UTC"),
+                "market_slug":      "slug-mixed",
+                "bucket_lo_f":      65.0,
+                "bucket_hi_f":      75.0,
+                "mid_price_yes":    0.99,
+                "estimated_spread": 0.04,
+                "is_filled":        0,
+                # No bids/asks columns -- force legacy path
+            },
+        ]
+        # NOTE: deliberately omit bids/asks so the engine sees legacy
+        clob_df = _make_clob_df(rows)
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), clob_df, actual_highs,
+            cold_start_hours=0,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        _make_station(), init_hours=[6])
+
+        assert not df.empty
+        row = df.iloc[0]
+        assert row["price_source"] == "legacy_mid"
+        # Edge = 0.70 - 0.99 = -0.29 (mid is 0.99, NOT L2 VWAP of 0.01)
+        assert row["edge"] == pytest.approx(0.70 - 0.99, abs=1e-5)
+
+    def test_readiness_skip_regression(self):
+        """V2V04 readiness skip is not broken by price-source changes."""
+        from unittest.mock import MagicMock
+        from data.manager import ReadinessStatus
+
+        rows = [
+            _clob_row("2024-01-02", "2024-01-01 06:00:00", "slug", 65.0, 75.0, 0.55),
+        ]
+        pipeline = _make_pipeline({"probs": {(65.0, 75.0): 0.70}})
+        data_manager = MagicMock()
+        data_manager.inference_readiness.return_value = ReadinessStatus(
+            ready=False, reason="cold_start", first_eligible_init=None
+        )
+
+        engine = BacktestEngine(
+            pipeline, _make_strategy(), _make_clob_df(rows), {"2024-01-02": 70.0},
+            cold_start_hours=0,
+            data_manager=data_manager,
+        )
+        df = engine.run("2024-01-01", "2024-01-01",
+                        _make_station(), init_hours=[6])
+        assert df.empty
+        assert len(engine._readiness_skips) == 1
 
 
 # ---------------------------------------------------------------------------
