@@ -41,28 +41,28 @@ def test_yes_token_in_bucket_pays_full() -> None:
     db = _make_db_with_market("c1", "tok1", 90.0, 95.0, "YES", "ord1", 25.0)
     resolver = SettlementResolver(db)
     results = resolver.resolve_from_obs("c1", 92.0)
-    assert results == [OrderSettlement(order_id="ord1", payout=25.0)]
+    assert results == [OrderSettlement(order_id="ord1", token_id="tok1", payout=25.0, signed_shares=25.0)]
 
 
 def test_yes_token_outside_bucket_pays_zero() -> None:
     db = _make_db_with_market("c1", "tok1", 90.0, 95.0, "YES", "ord1", 25.0)
     resolver = SettlementResolver(db)
     results = resolver.resolve_from_obs("c1", 88.0)
-    assert results == [OrderSettlement(order_id="ord1", payout=0.0)]
+    assert results == [OrderSettlement(order_id="ord1", token_id="tok1", payout=0.0, signed_shares=25.0)]
 
 
 def test_no_token_outside_bucket_pays_full() -> None:
     db = _make_db_with_market("c1", "tok1", 90.0, 95.0, "NO", "ord1", 10.0)
     resolver = SettlementResolver(db)
     results = resolver.resolve_from_obs("c1", 80.0)
-    assert results == [OrderSettlement(order_id="ord1", payout=10.0)]
+    assert results == [OrderSettlement(order_id="ord1", token_id="tok1", payout=10.0, signed_shares=10.0)]
 
 
 def test_no_token_in_bucket_pays_zero() -> None:
     db = _make_db_with_market("c1", "tok1", 90.0, 95.0, "NO", "ord1", 10.0)
     resolver = SettlementResolver(db)
     results = resolver.resolve_from_obs("c1", 91.0)
-    assert results == [OrderSettlement(order_id="ord1", payout=0.0)]
+    assert results == [OrderSettlement(order_id="ord1", token_id="tok1", payout=0.0, signed_shares=10.0)]
 
 
 def test_bucket_boundary_hi_is_exclusive() -> None:
@@ -70,14 +70,14 @@ def test_bucket_boundary_hi_is_exclusive() -> None:
     resolver = SettlementResolver(db)
     # exactly at hi -> outside bucket
     results = resolver.resolve_from_obs("c1", 95.0)
-    assert results == [OrderSettlement(order_id="ord1", payout=0.0)]
+    assert results == [OrderSettlement(order_id="ord1", token_id="tok1", payout=0.0, signed_shares=5.0)]
 
 
 def test_bucket_boundary_lo_is_inclusive() -> None:
     db = _make_db_with_market("c1", "tok1", 90.0, 95.0, "YES", "ord1", 5.0)
     resolver = SettlementResolver(db)
     results = resolver.resolve_from_obs("c1", 90.0)
-    assert results == [OrderSettlement(order_id="ord1", payout=5.0)]
+    assert results == [OrderSettlement(order_id="ord1", token_id="tok1", payout=5.0, signed_shares=5.0)]
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +101,7 @@ def test_order_with_no_market_entry_pays_zero() -> None:
     db._conn.commit()
     resolver = SettlementResolver(db)
     results = resolver.resolve_from_obs("c1", 92.0)
-    assert results == [OrderSettlement(order_id="ord1", payout=0.0)]
+    assert results == [OrderSettlement(order_id="ord1", token_id="tok-orphan", payout=0.0, signed_shares=20.0)]
 
 
 # ---------------------------------------------------------------------------

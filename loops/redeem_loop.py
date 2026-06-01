@@ -59,7 +59,7 @@ class RedeemLoop:
             )
             # Sleep forever in paper mode: no real polling needed.
             while True:
-                await asyncio.sleep(3600)
+                await asyncio.sleep(self._interval_seconds)
 
         logger.info(
             "RedeemLoop started (interval={}s)",
@@ -71,7 +71,7 @@ class RedeemLoop:
                 for task in tasks:
                     cid = task["condition_id"]
                     try:
-                        self._process_one(cid)
+                        await asyncio.to_thread(self._process_one, cid)
                     except Exception:
                         logger.exception(
                             "RedeemLoop: process_one failed for {}", cid
@@ -87,8 +87,8 @@ class RedeemLoop:
     def _process_one(self, condition_id: str) -> None:
         """Call the SDK redeem and record success or failure.
 
-        Runs synchronously (wrapped in asyncio.to_thread by caller if needed,
-        but CTF redeem is typically a fast RPC call).
+        Runs in a thread via ``asyncio.to_thread`` to avoid blocking the
+        bot's event loop on slow RPC calls.
         """
         logger.info("RedeemLoop: processing {}", condition_id)
         try:
@@ -98,11 +98,7 @@ class RedeemLoop:
             logger.warning(
                 "RedeemLoop: redeem failed for {}: {}", condition_id, err_msg
             )
-            self._db.create_or_update_redeem_task(
-                condition_id,
-                status     = "failed",
-                last_error = err_msg[:500],
-            )
+            self._db.mark_redeem_failed(condition_id, err_msg)
             return
 
         self._db.mark_redeemed(condition_id)
@@ -113,9 +109,7 @@ class RedeemLoop:
         tasks = self._db.get_pending_redeem_tasks()
         for task in tasks:
             cid = task["condition_id"]
-            self._db.create_or_update_redeem_task(
-                cid, status="skipped_paper",
-            )
+            self._db.enqueue_redeem_task(cid, status="skipped_paper")
             logger.info(
                 "RedeemLoop: paper mode -- redeem skipped for condition_id={}",
                 cid,

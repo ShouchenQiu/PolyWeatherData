@@ -662,13 +662,13 @@ def test_insert_signal_decision_rejected_with_reason() -> None:
 
 
 # ---------------------------------------------------------------------------
-# create_or_update_redeem_task / mark_redeemed (V2 domain methods)
+# enqueue_redeem_task / mark_redeem_failed / mark_redeemed
 # ---------------------------------------------------------------------------
 
 
-def test_create_or_update_redeem_task_creates_row() -> None:
+def test_enqueue_redeem_task_creates_row() -> None:
     db = DbClient(":memory:")
-    db.create_or_update_redeem_task("cid-001")
+    db.enqueue_redeem_task("cid-001")
     row = db._conn.execute(
         "SELECT * FROM redeem_tasks WHERE condition_id='cid-001'"
     ).fetchone()
@@ -677,21 +677,33 @@ def test_create_or_update_redeem_task_creates_row() -> None:
     assert row["last_error"] is None
 
 
-def test_create_or_update_redeem_task_increments_attempt_count() -> None:
+def test_enqueue_redeem_task_reenqueue_does_not_increment_attempt() -> None:
+    """Re-enqueuing a task (e.g. pending -> pending) must not bump attempt_count."""
     db = DbClient(":memory:")
-    db.create_or_update_redeem_task("cid-001")
-    db.create_or_update_redeem_task("cid-001", status="failed", last_error="timeout")
+    db.enqueue_redeem_task("cid-001")
+    db.enqueue_redeem_task("cid-001", status="pending")
+    row = db._conn.execute(
+        "SELECT * FROM redeem_tasks WHERE condition_id='cid-001'"
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["attempt_count"] == 0  # still 0
+
+
+def test_mark_redeem_failed_increments_attempt_and_sets_error() -> None:
+    db = DbClient(":memory:")
+    db.enqueue_redeem_task("cid-001")
+    db.mark_redeem_failed("cid-001", "rpc timeout")
     row = db._conn.execute(
         "SELECT * FROM redeem_tasks WHERE condition_id='cid-001'"
     ).fetchone()
     assert row["status"] == "failed"
     assert row["attempt_count"] == 1
-    assert row["last_error"] == "timeout"
+    assert row["last_error"] == "rpc timeout"
 
 
-def test_create_or_update_redeem_task_skipped_paper() -> None:
+def test_enqueue_redeem_task_skipped_paper() -> None:
     db = DbClient(":memory:")
-    db.create_or_update_redeem_task("cid-paper", status="skipped_paper")
+    db.enqueue_redeem_task("cid-paper", status="skipped_paper")
     row = db._conn.execute(
         "SELECT status FROM redeem_tasks WHERE condition_id='cid-paper'"
     ).fetchone()
@@ -700,7 +712,7 @@ def test_create_or_update_redeem_task_skipped_paper() -> None:
 
 def test_mark_redeemed_sets_status_and_timestamp() -> None:
     db = DbClient(":memory:")
-    db.create_or_update_redeem_task("cid-001")
+    db.enqueue_redeem_task("cid-001")
     db.mark_redeemed("cid-001")
     row = db._conn.execute(
         "SELECT * FROM redeem_tasks WHERE condition_id='cid-001'"

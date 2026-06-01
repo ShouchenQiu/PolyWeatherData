@@ -34,7 +34,7 @@ def _settings(trading_mode: str = "live", interval_s: float = 1.0):
 
 def test_run_processes_pending_task_and_marks_redeemed(db):
     """RedeemLoop calls the SDK once per pending task and marks it redeemed."""
-    db.create_or_update_redeem_task("cid-1", status="pending")
+    db.enqueue_redeem_task("cid-1", status="pending")
 
     secure = MagicMock()
     secure.ctf_redeem_positions_call.return_value = None  # no error
@@ -71,7 +71,7 @@ def test_run_processes_pending_task_and_marks_redeemed(db):
 
 def test_run_failure_increments_attempt_and_records_error(db):
     """On SDK failure, status='failed' and attempt_count increments."""
-    db.create_or_update_redeem_task("cid-2", status="pending")
+    db.enqueue_redeem_task("cid-2", status="pending")
 
     secure = MagicMock()
     secure.ctf_redeem_positions_call.side_effect = RuntimeError("rpc timeout")
@@ -103,9 +103,13 @@ def test_run_failure_increments_attempt_and_records_error(db):
 
 def test_paper_mode_marks_pending_tasks_skipped_paper(db):
     """Paper-mode RedeemLoop marks pending/failed tasks as skipped_paper."""
-    db.create_or_update_redeem_task("cid-3", status="pending")
-    db.create_or_update_redeem_task("cid-4", status="failed",
-                                    last_error="test error")
+    db.enqueue_redeem_task("cid-3", status="pending")
+    # Create a failed row via raw SQL for full coverage
+    db._conn.execute(
+        "INSERT INTO redeem_tasks (condition_id, status, attempt_count,"
+        " created_at, updated_at) VALUES ('cid-4-fail', 'failed', 1, '', '')"
+    )
+    db._conn.commit()
 
     secure = MagicMock()
     loop = RedeemLoop(db, secure, _settings(trading_mode="paper"))
@@ -125,7 +129,7 @@ def test_paper_mode_marks_pending_tasks_skipped_paper(db):
     secure.ctf_redeem_positions_call.assert_not_called()
 
     # Both tasks should be skipped_paper
-    for cid in ("cid-3", "cid-4"):
+    for cid in ("cid-3", "cid-4-fail"):
         rows = db.query(
             "SELECT status FROM redeem_tasks WHERE condition_id=?",
             (cid,),

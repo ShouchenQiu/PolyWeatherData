@@ -155,19 +155,24 @@ class SettlementLoop:
     def _enqueue_redeem_if_winner(
         self, condition_id: str, settlements: list,
     ) -> None:
-        """Upsert a redeem task when any settled order has a winning payout.
+        """Upsert a redeem task when any token has a net-long winning position.
+
+        Net signed_shares per token must be > 0.  A SELL-only token or a
+        BUY+SELL net-zero pair does not trigger a redeem task.
 
         Live mode: status='pending'.  Paper mode: status='skipped_paper'.
-        Losing conditions (no winning payout in any order) are not enqueued.
         """
-        has_winner = any(
-            getattr(s, "payout", 0.0) > 0.0 for s in settlements
-        )
-        if not has_winner:
+        from collections import defaultdict
+        net_by_token: dict[str, float] = defaultdict(float)
+        for s in settlements:
+            net_by_token[s.token_id] += s.signed_shares
+
+        has_net_long = any(v > 0.0 for v in net_by_token.values())
+        if not has_net_long:
             return
         status = "pending" if self._is_live else "skipped_paper"
         suffix = "" if self._is_live else " (paper mode)"
-        self._db.create_or_update_redeem_task(condition_id, status=status)
+        self._db.enqueue_redeem_task(condition_id, status=status)
         logger.info(
             "SettlementLoop: redeem task enqueued for {} (status={}{})",
             condition_id, status, suffix,

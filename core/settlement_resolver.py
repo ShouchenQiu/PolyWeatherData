@@ -5,14 +5,16 @@ payout for every filled/closed order on that event.  All DB access and
 payout rules are encapsulated here so SettlementLoop only handles scheduling
 and observation loading.
 
-Payout semantics (post-V2F05):
-    Each winning share redeems for $1.00.  Payout = filled_shares for winning
-    rows.  Rows that were recorded before V2F05 (filled_shares IS NULL) fall
-    back to size_usd as a best-effort approximation, which is noted in the log.
+Payout semantics (V2F05 / signed_shares):
+    Each winning share redeems for $1.00.  Payout uses ``signed_shares``:
+    BUY orders have positive signed_shares, SELL orders have negative
+    signed_shares.  Payout = max(0, signed_shares) for winning rows;
+    losing rows get 0.0.  Rows recorded before V2F05 (signed_shares IS
+    NULL) fall back to ``filled_shares`` (always positive, same as V1).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -23,20 +25,27 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class OrderSettlement:
-    """Payout decision for one order."""
+    """Payout decision for one order.
 
-    order_id: str
-    payout: float
+    ``token_id`` and ``signed_shares`` are carried so that
+    ``SettlementLoop`` can compute net position per token for redeem-task
+    gating (only net-long tokens trigger a redeem task).
+    """
+
+    order_id:      str
+    token_id:      str
+    payout:        float
+    signed_shares: float = 0.0
 
 
 class SettlementResolver:
     """Compute bucket payouts for all filled/closed orders of one condition.
 
     Payout rules:
-      - YES token in winning bucket  -> payout = size_usd
+      - YES token in winning bucket  -> payout = max(0, signed_shares)
       - YES token in losing bucket   -> payout = 0.0
       - NO token in winning bucket   -> payout = 0.0
-      - NO token in losing bucket    -> payout = size_usd
+      - NO token in losing bucket    -> payout = max(0, signed_shares)
 
     An order whose token_id has no matching market entry gets payout = 0.0.
 
@@ -77,24 +86,35 @@ class SettlementResolver:
             order_id     = order["order_id"]
             token_id     = order["token_id"]
             size_usd     = float(order.get("size_usd") or 0.0)
-            filled_shares_raw = order.get("filled_shares")
-            if filled_shares_raw is not None:
-                win_amount = float(filled_shares_raw)
+
+            signed_raw = order.get("signed_shares")
+            filled_raw = order.get("filled_shares")
+            if signed_raw is not None:
+                signed = float(signed_raw)
+            elif filled_raw is not None:
+                # Pre-V2F05 row: signed_shares not recorded; use filled_shares
+                # (always positive, same as V1).  Logged at debug level since
+                # this is common for historical rows.
+                logger.debug(
+                    "SettlementResolver: order {} has no signed_shares; "
+                    "using filled_shares={:.4f} (always-positive fallback)",
+                    order_id, float(filled_raw),
+                )
+                signed = float(filled_raw)
             else:
-                # Pre-V2F05 row: filled_shares not recorded; fall back to size_usd.
                 logger.warning(
-                    "SettlementResolver: order {} has no filled_shares; "
-                    "using size_usd={:.4f} as payout approximation",
+                    "SettlementResolver: order {} has no signed_shares or "
+                    "filled_shares; using size_usd={:.4f} as fallback",
                     order_id, size_usd,
                 )
-                win_amount = size_usd
+                signed = size_usd
 
             entry = token_market.get(token_id)
             if entry is not None:
                 lo, hi, outcome = entry
                 in_bucket = lo <= actual_max_temp < hi
-                # TODO(V2V12): remove fallback path once all orders have filled_shares
-                payout = win_amount if (outcome == "YES") == in_bucket else 0.0
+                is_winner = (outcome == "YES") == in_bucket
+                payout = max(0.0, signed) if is_winner else 0.0
             else:
                 logger.warning(
                     "SettlementResolver: token_id {} has no market entry; payout=0",
@@ -102,6 +122,11 @@ class SettlementResolver:
                 )
                 payout = 0.0
 
-            results.append(OrderSettlement(order_id=order_id, payout=payout))
+            results.append(OrderSettlement(
+                order_id      = order_id,
+                token_id      = token_id,
+                payout        = payout,
+                signed_shares = signed,
+            ))
 
         return results

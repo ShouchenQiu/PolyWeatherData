@@ -624,31 +624,47 @@ class DbClient:
     # Redeem tasks
     # ------------------------------------------------------------------
 
-    def create_or_update_redeem_task(
+    def enqueue_redeem_task(
         self,
         condition_id: str,
         status: str = "pending",
-        last_error: str | None = None,
     ) -> None:
-        """Upsert a redeem_task row for *condition_id*.
+        """Create a redeem_task row; on conflict only update status.
 
-        On first call, creates the row with attempt_count=0.
-        On subsequent calls, increments attempt_count and updates status
-        and last_error.
+        attempt_count is NEVER incremented by this method -- it is only
+        bumped in ``mark_redeem_failed``.
         """
         now = _utcnow_iso()
         self._conn.execute(
             """
             INSERT INTO redeem_tasks
-                (condition_id, status, last_error, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+                (condition_id, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
             ON CONFLICT(condition_id) DO UPDATE SET
                 status=excluded.status,
-                attempt_count=attempt_count + 1,
-                last_error=excluded.last_error,
                 updated_at=excluded.updated_at
             """,
-            (condition_id, status, last_error, now, now),
+            (condition_id, status, now, now),
+        )
+        self._conn.commit()
+
+    def mark_redeem_failed(
+        self,
+        condition_id: str,
+        last_error: str,
+    ) -> None:
+        """Set redeem_task status to 'failed' and increment attempt_count."""
+        now = _utcnow_iso()
+        self._conn.execute(
+            """
+            UPDATE redeem_tasks
+            SET status='failed',
+                attempt_count=attempt_count + 1,
+                last_error=?,
+                updated_at=?
+            WHERE condition_id=?
+            """,
+            (last_error[:500], now, condition_id),
         )
         self._conn.commit()
 

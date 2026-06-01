@@ -421,3 +421,112 @@ def test_settlement_paper_mode_marks_redeem_skipped_paper(
     )
     assert rows
     assert rows[0]["status"] == "skipped_paper"
+
+
+# ---------------------------------------------------------------------------
+# V2V12 fix -- signed_shares payout + redeem gating
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def db_signed(db) -> DbClient:
+    """DB with signed_shares-enabled orders for SELL / net-zero tests."""
+    # Replace the fixture's order with a proper filled_shares/signed_shares one
+    db.execute("DELETE FROM orders")
+    db.execute(
+        "INSERT INTO orders "
+        "(order_id, token_id, condition_id, side, size_usd, price, status,"
+        " created_at, filled_shares, signed_shares)"
+        " VALUES ('ord-buy', 'tok-yes', 'cid1', 'BUY', 100.0, 0.5, 'filled',"
+        " '2025-01-01', 200.0, 200.0)"
+    )
+    return db
+
+
+def test_sell_winning_token_payout_zero_no_enqueue(
+    db_signed, obs_store, lifecycle,
+):
+    """SELL on winning token: signed_shares < 0 => payout = 0, no redeem."""
+    db_signed.execute("DELETE FROM orders")
+    db_signed.execute(
+        "INSERT INTO orders "
+        "(order_id, token_id, condition_id, side, size_usd, price, status,"
+        " created_at, filled_shares, signed_shares)"
+        " VALUES ('ord-sell', 'tok-yes', 'cid1', 'SELL', 100.0, 0.5, 'filled',"
+        " '2025-01-01', 200.0, -200.0)"
+    )
+    loop = SettlementLoop(
+        lifecycle=lifecycle,
+        positions=PositionTracker(db_signed),
+        obs_store=obs_store,
+        db=db_signed,
+        settings=Settings(trading_mode="live"),
+    )
+    loop.confirm_settlement(_event_row(db_signed, "cid1"), "KLGA")
+
+    # SELL payout is 0 (signed < 0)
+    order = _order_row(db_signed, "ord-sell")
+    assert order["settled_payout"] == pytest.approx(0.0)
+
+    # No redeem task (net signed_shares < 0)
+    tasks = db_signed.get_pending_redeem_tasks()
+    assert len(tasks) == 0
+
+
+def test_buy_then_sell_net_zero_no_redeem(
+    db_signed, obs_store, lifecycle,
+):
+    """BUY (+200) + SELL (-200) on same token: net=0, no redeem task."""
+    db_signed.execute("DELETE FROM orders")
+    db_signed.execute(
+        "INSERT INTO orders "
+        "(order_id, token_id, condition_id, side, size_usd, price, status,"
+        " created_at, filled_shares, signed_shares)"
+        " VALUES ('ord-buy', 'tok-yes', 'cid1', 'BUY', 100.0, 0.5, 'filled',"
+        " '2025-01-01', 200.0, 200.0)"
+    )
+    db_signed.execute(
+        "INSERT INTO orders "
+        "(order_id, token_id, condition_id, side, size_usd, price, status,"
+        " created_at, filled_shares, signed_shares)"
+        " VALUES ('ord-sell', 'tok-yes', 'cid1', 'SELL', 100.0, 0.5, 'filled',"
+        " '2025-01-01', 200.0, -200.0)"
+    )
+    loop = SettlementLoop(
+        lifecycle=lifecycle,
+        positions=PositionTracker(db_signed),
+        obs_store=obs_store,
+        db=db_signed,
+        settings=Settings(trading_mode="live"),
+    )
+    loop.confirm_settlement(_event_row(db_signed, "cid1"), "KLGA")
+
+    # BUY gets payout, SELL gets 0
+    assert _order_row(db_signed, "ord-buy")["settled_payout"] == pytest.approx(200.0)
+    assert _order_row(db_signed, "ord-sell")["settled_payout"] == pytest.approx(0.0)
+
+    # Net signed = 200 + (-200) = 0 => no redeem
+    tasks = db_signed.get_pending_redeem_tasks()
+    assert len(tasks) == 0
+
+
+def test_buy_only_net_long_enqueues_redeem(
+    db_signed, obs_store, lifecycle,
+):
+    """Pure BUY with positive signed_shares triggers redeem task."""
+    loop = SettlementLoop(
+        lifecycle=lifecycle,
+        positions=PositionTracker(db_signed),
+        obs_store=obs_store,
+        db=db_signed,
+        settings=Settings(trading_mode="live"),
+    )
+    loop.confirm_settlement(_event_row(db_signed, "cid1"), "KLGA")
+
+    # BUY gets full payout
+    assert _order_row(db_signed, "ord-buy")["settled_payout"] == pytest.approx(200.0)
+
+    # Net signed = 200 > 0 => redeem enqueued
+    tasks = db_signed.get_pending_redeem_tasks()
+    assert len(tasks) == 1
+    assert tasks[0]["condition_id"] == "cid1"
+    assert tasks[0]["status"] == "pending"
