@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from config.settings import Settings
 from core.exchange.settlement import SettlementRelayer
 from core.positions import PositionTracker
 from data.storage.parquet_store import ParquetStore
@@ -57,11 +58,13 @@ def lifecycle() -> EventLifecycle:
 
 @pytest.fixture
 def settlement_loop(db: DbClient, obs_store: ParquetStore, lifecycle: EventLifecycle) -> SettlementLoop:
+    settings = Settings(trading_mode="paper")
     return SettlementLoop(
         lifecycle  = lifecycle,
         positions  = PositionTracker(db),
         obs_store  = obs_store,
         db         = db,
+        settings   = settings,
     )
 
 
@@ -181,6 +184,7 @@ def test_confirm_settlement_losing_bucket_payout_zero(
         positions  = PositionTracker(db),
         obs_store  = obs_store,
         db         = db,
+        settings   = Settings(trading_mode="paper"),
     )
     event = _event_row(db, "cid1")
     loop.confirm_settlement(event, "KLGA")
@@ -212,6 +216,7 @@ def test_confirm_settlement_no_obs_data_skips_without_error(
         positions  = PositionTracker(db),
         obs_store  = empty_store,
         db         = db,
+        settings   = Settings(trading_mode="paper"),
     )
     event = _event_row(db, "cid1")
     loop.confirm_settlement(event, "KLGA")  # must not raise
@@ -275,6 +280,7 @@ def test_confirm_settlement_no_token_not_in_bucket_wins(
         positions=PositionTracker(db),
         obs_store=obs_store,
         db=db,
+        settings=Settings(trading_mode="paper"),
     )
     loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
     assert _order_row(db, "ord-no-outer")["settled_payout"] == pytest.approx(75.0)
@@ -298,6 +304,7 @@ def test_confirm_settlement_no_token_in_winning_bucket_zero(
         positions=PositionTracker(db),
         obs_store=obs_store,
         db=db,
+        settings=Settings(trading_mode="paper"),
     )
     loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
     assert _order_row(db, "ord-no-inner")["settled_payout"] == pytest.approx(0.0)
@@ -327,6 +334,7 @@ def test_no_obs_data_calls_relayer_when_wired(
         positions=PositionTracker(db),
         obs_store=empty_store,
         db=db,
+        settings=Settings(trading_mode="paper"),
         relayer=relayer,
     )
     loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
@@ -346,7 +354,70 @@ def test_no_obs_data_relayer_none_stays_pending(
         positions=PositionTracker(db),
         obs_store=empty_store,
         db=db,
+        settings=Settings(trading_mode="paper"),
         relayer=None,
     )
     loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
     assert _event_row(db, "cid1")["status"] == "pending_settle"
+
+
+# ---------------------------------------------------------------------------
+# V2V12 -- redeem task enqueue
+# ---------------------------------------------------------------------------
+
+def test_settlement_enqueues_pending_redeem_for_winning_live_condition(
+    db: DbClient, obs_store: ParquetStore, lifecycle: EventLifecycle,
+):
+    """Winning settlement in live mode upserts redeem task with status='pending'."""
+    loop = SettlementLoop(
+        lifecycle=lifecycle,
+        positions=PositionTracker(db),
+        obs_store=obs_store,
+        db=db,
+        settings=Settings(trading_mode="live"),
+    )
+    loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
+    tasks = db.get_pending_redeem_tasks()
+    assert len(tasks) == 1
+    assert tasks[0]["condition_id"] == "cid1"
+    assert tasks[0]["status"] == "pending"
+
+
+def test_settlement_skips_redeem_for_losing_condition(
+    db: DbClient, obs_store: ParquetStore, lifecycle: EventLifecycle,
+):
+    """Losing settlement (no winning payout) does not enqueue any redeem task."""
+    # Remove the winning order so no order has payout > 0
+    db.execute("DELETE FROM orders WHERE order_id='ord-yes'")
+    loop = SettlementLoop(
+        lifecycle=lifecycle,
+        positions=PositionTracker(db),
+        obs_store=obs_store,
+        db=db,
+        settings=Settings(trading_mode="live"),
+    )
+    loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
+    tasks = db.get_pending_redeem_tasks()
+    assert len(tasks) == 0
+
+
+def test_settlement_paper_mode_marks_redeem_skipped_paper(
+    db: DbClient, obs_store: ParquetStore, lifecycle: EventLifecycle,
+):
+    """Paper mode upserts redeem task with status='skipped_paper'."""
+    loop = SettlementLoop(
+        lifecycle=lifecycle,
+        positions=PositionTracker(db),
+        obs_store=obs_store,
+        db=db,
+        settings=Settings(trading_mode="paper"),
+    )
+    loop.confirm_settlement(_event_row(db, "cid1"), "KLGA")
+
+    # Query directly not via get_pending_redeem_tasks (which filters to pending/failed)
+    rows = db.query(
+        "SELECT status FROM redeem_tasks WHERE condition_id=?",
+        ("cid1",),
+    )
+    assert rows
+    assert rows[0]["status"] == "skipped_paper"

@@ -665,6 +665,17 @@ class DbClient:
         )
         self._conn.commit()
 
+    def get_pending_redeem_tasks(self) -> list[dict]:
+        """Return all redeem_tasks with status 'pending' or 'failed'."""
+        cur = self._conn.execute(
+            """
+            SELECT * FROM redeem_tasks
+            WHERE status IN ('pending', 'failed')
+            ORDER BY created_at ASC
+            """,
+        )
+        return [dict(r) for r in cur.fetchall()]
+
     # ------------------------------------------------------------------
     # Model versions
     # ------------------------------------------------------------------

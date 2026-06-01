@@ -74,6 +74,7 @@ class Settings:
     # Scheduling / TradingLoop
     trading_loop_interval_s:    int = 300
     discovery_loop_interval_s:  int = 300
+    redeem_loop_interval_s:     int = 3600
     staleness_threshold_min: int = 65
     staleness_edge_bump: float = 0.02
 

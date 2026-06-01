@@ -68,6 +68,7 @@ class BotManager:
         from loops.settlement_loop import SettlementLoop
         from loops.sniper_loop import SniperLoop
         from loops.trading_loop import TradingLoop
+        from loops.redeem_loop import RedeemLoop
         from model.mc import McSampler
         from model.pipeline import ModelPipeline
         from model.store.registry import ModelRegistry
@@ -197,6 +198,7 @@ class BotManager:
             positions  = self.positions,
             obs_store  = self.obs_store,
             db         = self.db,
+            settings   = self.settings,
         )
         self.sniper_loop = SniperLoop(
             sniper_mgr = self.snipers,
@@ -207,6 +209,18 @@ class BotManager:
             db         = self.db,
             settings   = self.settings,
         )
+
+        # RedeemLoop: only constructed in live mode when SecureClient exists.
+        # Paper mode does not create a RedeemLoop; redeem tasks are marked
+        # skipped_paper by SettlementLoop directly.
+        if settings.trading_mode == "live":
+            self.redeem_loop = RedeemLoop(
+                db            = self.db,
+                secure_client = secure,
+                settings      = self.settings,
+            )
+        else:
+            self.redeem_loop = None
 
     # ------------------------------------------------------------------
     # Run
@@ -222,4 +236,6 @@ class BotManager:
         ]
         if self.settings.enable_sniper:
             tasks.append(self.sniper_loop.run())
+        if self.redeem_loop is not None:
+            tasks.append(self.redeem_loop.run())
         await asyncio.gather(*tasks)

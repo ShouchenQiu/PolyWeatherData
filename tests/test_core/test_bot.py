@@ -79,6 +79,7 @@ def _make_run_only_bot(enable_sniper: bool, calls: list[str]) -> BotManager:
     bot.discovery_loop = _RunStub("discovery", calls)
     bot.settlement_loop = _RunStub("settlement", calls)
     bot.sniper_loop = _RunStub("sniper", calls)
+    bot.redeem_loop = None
     bot.snipers = SimpleNamespace(start_all=AsyncMock())
     return bot
 
@@ -294,3 +295,48 @@ def test_bot_calls_set_cov_when_covariance_present(tmp_path, monkeypatch):
     bot = BotManager(settings, db_path=str(tmp_path / "bot.db"))
 
     np.testing.assert_array_equal(bot.mc._cov, cov)
+
+
+# ---------------------------------------------------------------------------
+# V2V12 -- RedeemLoop wiring
+# ---------------------------------------------------------------------------
+
+def test_bot_live_mode_wires_redeem_loop(tmp_path, monkeypatch):
+    """Live mode constructs RedeemLoop with SecureClient."""
+    import core.bot as bot_mod
+    from types import SimpleNamespace
+
+    class FakeSecure:
+        @classmethod
+        def create(cls, *, private_key, wallet):
+            return cls()
+        def place_limit_order(self, **kwargs):
+            return SimpleNamespace(order_id="", error_msg=None)
+        def cancel_orders(self, **kwargs):
+            return True
+        def get_positions(self):
+            return []
+
+    class FakePublic:
+        def get_order_book(self, *, token_id):
+            return SimpleNamespace(bids=[], asks=[])
+
+    monkeypatch.setattr(bot_mod, "SecureClient", FakeSecure)
+    monkeypatch.setattr(bot_mod, "PublicClient", FakePublic)
+    monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", "0xdead")
+    monkeypatch.setenv("POLYMARKET_WALLET_ADDRESS", "0xbeef")
+
+    settings = Settings(data_store_dir=tmp_path / "data")
+    settings.trading_mode = "live"
+
+    bot = BotManager(settings, db_path=str(tmp_path / "bot.db"))
+    assert bot.redeem_loop is not None
+
+
+def test_bot_paper_mode_redeem_loop_is_none(tmp_path):
+    """Paper mode does not construct RedeemLoop."""
+    settings = Settings(data_store_dir=tmp_path / "data")
+    settings.trading_mode = "paper"
+
+    bot = BotManager(settings, db_path=str(tmp_path / "bot.db"))
+    assert bot.redeem_loop is None

@@ -10,6 +10,7 @@ from loguru import logger
 from core.settlement_resolver import SettlementResolver
 
 if TYPE_CHECKING:
+    from config.settings import Settings
     from core.exchange.settlement import SettlementRelayer
     from core.positions import PositionTracker
     from data.storage.parquet_store import ParquetStore
@@ -24,7 +25,8 @@ class SettlementLoop:
     1. Reads IEM observed max temperature from the ParquetStore.
     2. Identifies the winning bucket (bucket_lo_f <= max_temp < bucket_hi_f).
     3. Marks each filled/closed order settled with YES/NO-correct payout.
-    4. Calls EventLifecycle.set_settled() to finalise the event.
+    4. Enqueues a redeem task for live-mode winning conditions.
+    5. Calls EventLifecycle.set_settled() to finalise the event.
 
     When IEM data is unavailable, falls back to ``relayer.resolve_on_chain``
     if a relayer is wired.  If neither source is available, the event stays
@@ -40,6 +42,8 @@ class SettlementLoop:
         ParquetStore holding IEM observed temperature data.
     db:
         DbClient for querying events, markets, and orders.
+    settings:
+        Settings instance providing ``trading_mode``.
     relayer:
         Optional SettlementRelayer for on-chain resolution when IEM data is
         unavailable.  Defaults to None (deferred -- ADR-0007).
@@ -53,6 +57,7 @@ class SettlementLoop:
         positions:        "PositionTracker",
         obs_store:        "ParquetStore",
         db:               "DbClient",
+        settings:         "Settings",
         relayer:          "SettlementRelayer | None" = None,
         interval_seconds: float = 3_600.0,
     ) -> None:
@@ -60,9 +65,11 @@ class SettlementLoop:
         self._positions        = positions
         self._obs_store        = obs_store
         self._db               = db
+        self._settings         = settings
         self._relayer          = relayer
         self._interval_seconds = interval_seconds
         self._resolver         = SettlementResolver(db)
+        self._is_live          = (settings.trading_mode == "live")
 
     # ------------------------------------------------------------------
     # Settlement logic
@@ -132,16 +139,38 @@ class SettlementLoop:
         self._settle_from_obs(condition_id, actual_max_temp)
 
     def _settle_from_obs(self, condition_id: str, actual_max_temp: float) -> None:
-        """Apply YES/NO payout logic and mark the event settled."""
+        """Apply YES/NO payout logic, enqueue redeem if winner, and mark settled."""
         settlements = self._resolver.resolve_from_obs(condition_id, actual_max_temp)
         for s in settlements:
             self._positions.mark_settled(s.order_id, s.payout)
+        self._enqueue_redeem_if_winner(condition_id, settlements)
         self._lifecycle.set_settled(condition_id, self._db)
         logger.info(
             "SettlementLoop: event {} settled via IEM (max_temp={:.1f}F, orders={})",
             condition_id,
             actual_max_temp,
             len(settlements),
+        )
+
+    def _enqueue_redeem_if_winner(
+        self, condition_id: str, settlements: list,
+    ) -> None:
+        """Upsert a redeem task when any settled order has a winning payout.
+
+        Live mode: status='pending'.  Paper mode: status='skipped_paper'.
+        Losing conditions (no winning payout in any order) are not enqueued.
+        """
+        has_winner = any(
+            getattr(s, "payout", 0.0) > 0.0 for s in settlements
+        )
+        if not has_winner:
+            return
+        status = "pending" if self._is_live else "skipped_paper"
+        suffix = "" if self._is_live else " (paper mode)"
+        self._db.create_or_update_redeem_task(condition_id, status=status)
+        logger.info(
+            "SettlementLoop: redeem task enqueued for {} (status={}{})",
+            condition_id, status, suffix,
         )
 
     def _try_relayer_fallback(self, condition_id: str) -> None:
