@@ -43,6 +43,10 @@ _CLOB_WIN_MIN      = 30  # CLOB look-up half-window in minutes
 def _bucket_outcome(actual_f: float, lo: float, hi: float) -> float:
     """Return 1.0 if actual temperature falls in the bucket, 0.0 otherwise.
 
+    Bucket semantics: [lo, hi) -- lower bound inclusive, upper bound
+    exclusive.  This matches SettlementResolver and the Polymarket
+    convention for temperature range buckets.
+
     NaN actual -> NaN outcome.
     """
     if np.isnan(actual_f):
@@ -50,9 +54,9 @@ def _bucket_outcome(actual_f: float, lo: float, hi: float) -> float:
     if hi == float("inf"):
         return 1.0 if actual_f >= lo else 0.0
     elif lo == float("-inf"):
-        return 1.0 if actual_f <= hi else 0.0
+        return 1.0 if actual_f < hi else 0.0
     else:
-        return 1.0 if (actual_f >= lo and actual_f <= hi) else 0.0
+        return 1.0 if (actual_f >= lo and actual_f < hi) else 0.0
 
 
 class BacktestEngine:

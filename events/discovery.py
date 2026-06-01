@@ -127,27 +127,31 @@ class EventDiscovery:
         DbClient instance used for persistence.
     settings:
         Global Settings (provides gamma_api_url and station configs).
-    slug_pattern:
-        Substring that event slugs must contain to be considered weather
-        temperature events.  Defaults to ``"temperature"`` when None is
-        passed.
+    slug_patterns:
+        Substrings that event slugs must contain (OR match) to be considered
+        weather temperature events.  Defaults to ``["temperature", "daily-high",
+        "high-temp"]`` when None is passed.
     alert_bus:
         Optional AlertBus for emitting ``discovery_warn`` events.
     """
 
-    DEFAULT_SLUG_PATTERN = "temperature"
+    DEFAULT_SLUG_PATTERNS = ["temperature", "daily-high", "high-temp"]
     _EVENTS_ENDPOINT     = "/events"
 
     def __init__(
         self,
         db: "DbClient",
         settings: "Settings",
-        slug_pattern: str | None = None,
+        slug_patterns: list[str] | None = None,
         alert_bus: "AlertBus | None" = None,
     ) -> None:
         self._db             = db
         self._settings       = settings
-        self._slug_pattern   = (slug_pattern or self.DEFAULT_SLUG_PATTERN).lower()
+        self._slug_patterns  = (
+            slug_patterns
+            if slug_patterns is not None
+            else list(self.DEFAULT_SLUG_PATTERNS)
+        )
         self._gamma_api_url  = settings.gamma_api_url.rstrip("/")
         self._alert_bus      = alert_bus
 
@@ -177,7 +181,7 @@ class EventDiscovery:
 
         for ev in events:
             slug = (ev.get("slug") or "").lower()
-            if self._slug_pattern not in slug:
+            if not any(p in slug for p in self._slug_patterns):
                 continue
 
             condition_id = ev.get("conditionId") or ev.get("id") or slug

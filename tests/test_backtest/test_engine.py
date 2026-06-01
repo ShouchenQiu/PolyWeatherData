@@ -77,7 +77,8 @@ class TestBucketOutcome:
         assert _bucket_outcome(60.0, 60.0, 70.0) == 1.0
 
     def test_range_on_hi(self):
-        assert _bucket_outcome(70.0, 60.0, 70.0) == 1.0
+        # Exclusive upper bound: exactly at hi is OUTSIDE the bucket
+        assert _bucket_outcome(70.0, 60.0, 70.0) == 0.0
 
     def test_range_outside(self):
         assert _bucket_outcome(59.9, 60.0, 70.0) == 0.0
@@ -85,7 +86,8 @@ class TestBucketOutcome:
 
     def test_below_inside(self):
         assert _bucket_outcome(65.0, float("-inf"), 70.0) == 1.0
-        assert _bucket_outcome(70.0, float("-inf"), 70.0) == 1.0
+        # Exclusive upper bound: exactly at hi is OUTSIDE
+        assert _bucket_outcome(70.0, float("-inf"), 70.0) == 0.0
 
     def test_below_outside(self):
         assert _bucket_outcome(70.1, float("-inf"), 70.0) == 0.0
