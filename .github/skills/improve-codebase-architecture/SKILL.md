@@ -1,17 +1,17 @@
 ---
 name: improve-codebase-architecture
-description: Review completed PolyWeatherBot slices for architectural friction, module depth, seams, and testability, informed by CONTEXT.md and docs/adr/. Use after every 2-3 slices, or when the user asks for architecture review/refactoring opportunities.
+description: Review PolyWeatherBot completed slices, related change clusters, or V3 adaptive work for architectural friction, module depth, seams, and testability, informed by CONTEXT.md and docs/adr/. Use after completed slices, clusters of related changes, when friction appears, or when the user asks for architecture review/refactoring opportunities.
 ---
 
 # Improve Codebase Architecture
 
 Surface architectural friction and propose **deepening opportunities** — refactors that turn shallow modules into deep ones. The aim is testability and AI-navigability.
 
-For this repository, the active implementation workflow owns when this review
-runs:
+For this repository, formal workflow and slice documents are optional context:
 
-- V1 overhaul: `docs/issues/implementation-workflow.md`
-- V2 overhaul: `docs/issues/implementation-workflow-v2.md`
+- If reviewing formal slice work, read the matching slice and source refs.
+- If reviewing V3 adaptive work, inspect recent diff, touched code/tests,
+  `CONTEXT.md`, ADRs, and the modules where friction appeared.
 
 This skill owns only the architecture review method. Routine reviews must not
 modify code, create issues, update `CONTEXT.md`, or write ADRs unless the user
@@ -42,15 +42,12 @@ This skill is _informed_ by the project's domain model. The domain language give
 
 ### 1. Explore
 
-Read:
+Read the context that matches the review:
 
-- The completed slices being reviewed in the matching slice file:
-  `docs/issues/proposed-slices.md` for V1 or
-  `docs/issues/proposed-slices-v2.md` for V2
-- Their source refs in the matching grill task file:
-  `docs/grill-tasks.md` for V1 or `docs/grill-tasks-v2.md` for V2
+- Completed formal slices, when present, from the matching slice file
+- Their source refs in the matching plan or grill task file, when present
+- Recent diff and touched code/tests for adaptive V3 work
 - Relevant ADRs
-- Touched code and tests
 - `CONTEXT.md` when domain language matters
 
 Do not reopen ADR decisions during routine reviews.
@@ -73,14 +70,14 @@ Present architecture review notes. For each candidate:
 - **Problem** — why the current architecture is causing friction
 - **Solution** — plain English description of what would change
 - **Benefits** — explained in terms of locality and leverage, and also in how tests would improve
-- **Slice impact** — whether this affects completed slices, upcoming slices, or Deferred work
+- **Work impact** — whether this affects completed work, upcoming V3 work, or Deferred work
 
 **Use CONTEXT.md vocabulary for the domain, and [LANGUAGE.md](LANGUAGE.md) vocabulary for the architecture.** If `CONTEXT.md` defines "Order," talk about "the Order intake module" — not "the FooBarHandler," and not "the Order service."
 
 **ADR conflicts**: if a candidate contradicts an existing ADR, only surface it when the friction is real enough to warrant revisiting the ADR. Mark it clearly (e.g. _"contradicts ADR-0007 — but worth reopening because…"_). Don't list every theoretical refactor an ADR forbids.
 
 Do not propose large rewrites by default. Prefer small follow-up adjustments
-that keep current slices stable and make upcoming slices easier.
+that keep current work stable and make upcoming V3 work easier.
 
 ### 3. Optional design follow-up
 

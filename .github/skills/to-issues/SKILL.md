@@ -1,12 +1,14 @@
 ---
 name: to-issues
-description: Break a plan, spec, or PolyWeatherBot overhaul task document into independently-grabbable issue drafts using tracer-bullet vertical slices and a coverage matrix. Use when the user wants to convert docs/grill-tasks.md, docs/grill-tasks-v2.md, or another plan into implementation tickets without losing source tasks.
+description: Break a plan, spec, PolyWeatherBot overhaul task document, observed problem list, logs, architecture review, or loose V3 plan into independently-grabbable issue drafts using tracer-bullet vertical slices. Use when the user wants implementation tickets without losing source tasks or wants adaptive work turned into small issue drafts.
 ---
 
 # To Issues
 
-Break a plan into independently-grabbable issue drafts using vertical slices
-(tracer bullets), while preserving full coverage of the source document.
+Break a plan or observed problem set into independently-grabbable issue drafts
+using vertical slices (tracer bullets). Preserve full source coverage when the
+input is an overhaul or task document; keep lightweight V3 inputs small and
+actionable.
 
 This project does not require `/setup-matt-pocock-skills`. If no issue tracker
 or label vocabulary is configured, do not publish issues and do not depend on
@@ -17,9 +19,9 @@ standard labels. Generate Markdown issue drafts instead.
 ### 1. Gather context
 
 Work from whatever is already in the conversation context. If the user passes a
-path such as `docs/grill-tasks.md` or `docs/grill-tasks-v2.md`, read that exact
-file as the source of truth. Respect linked ADRs and project docs when they
-clarify intent.
+path such as `docs/grill-tasks.md`, `docs/grill-tasks-v2.md`, an architecture
+review, logs, or a bug list, read that exact input as the source of truth.
+Respect linked ADRs and project docs when they clarify intent.
 
 ### 2. Explore the codebase (optional)
 
@@ -31,9 +33,10 @@ ADR identifiers where relevant.
 
 ### 3. Build a source inventory
 
-Before drafting slices, inventory every actionable source item from the plan.
-For `docs/grill-tasks*.md`, each `ADD`, `REMOVE`, `CHANGE`, `FIX`, `MOVE`, and
-`WIRE` bullet is a source item. Assign each source item a stable reference:
+Before drafting slices from an overhaul or task document, inventory every
+actionable source item from the plan. For `docs/grill-tasks*.md`, each `ADD`,
+`REMOVE`, `CHANGE`, `FIX`, `MOVE`, and `WIRE` bullet is a source item. Assign
+each source item a stable reference:
 
 - Prefer `<source-path>:<line>` when line numbers are available.
 - Otherwise use `<heading> / <short item text>`.
@@ -46,6 +49,11 @@ Every source item must end in exactly one of these states:
   another non-AFK prerequisite.
 
 No source item may be left unclassified.
+
+For lightweight V3 inputs, do not force a full coverage matrix. Instead,
+inventory the concrete actionable observations you can trace to a source
+(report, log line, failing test, review note, or module) and mark anything fuzzy
+as `Needs clarification` or `Deferred`.
 
 ### 4. Draft vertical slices
 
@@ -63,7 +71,8 @@ Slices may be 'HITL' or 'AFK'. HITL slices require human interaction, such as an
 
 ### 5. Produce a coverage matrix
 
-After drafting slices, produce a coverage matrix:
+After drafting slices from an overhaul or task document, produce a coverage
+matrix:
 
 ```
 | Source item | Covered by slice | Status |
@@ -78,9 +87,14 @@ Run a reverse audit before presenting the result:
 - Slices -> source: every slice has source refs and does not add unrequested scope.
 - If nothing is missing, explicitly write `Uncovered items: none`.
 
+For lightweight V3 issue drafts, include a short `Uncovered or deferred`
+section only when the input inventory contains items you did not turn into
+drafts.
+
 ### 6. Quiz the user
 
-Present the proposed breakdown as a numbered list. For each slice, show:
+For large breakdowns, present the proposed breakdown as a numbered list. For
+each slice, show:
 
 - **Title**: short descriptive name
 - **Type**: HITL / AFK
@@ -96,7 +110,9 @@ Ask the user:
 - Are the correct slices marked as HITL and AFK?
 - Are any source refs missing from the coverage matrix?
 
-Iterate until the user approves the breakdown.
+Iterate until the user approves the breakdown. For small V3 issue drafts, keep
+the check lighter: call out the proposed issue boundaries and any ambiguous
+source items.
 
 ### 7. Publish or output issue drafts
 

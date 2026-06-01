@@ -1,28 +1,20 @@
 ---
 name: diagnose
-description: Disciplined diagnosis loop for hard bugs, failing slice tests, and performance regressions. Reproduce -> minimise -> hypothesise -> instrument -> fix -> regression-test. Use when a PolyWeatherBot slice implementation is stuck, a pytest failure is unclear, the user says diagnose/debug, or a bug/performance regression is reported.
+description: Disciplined diagnosis loop for hard bugs, failing tests, unclear slice or V3 task failures, and performance regressions. Reproduce -> minimise -> hypothesise -> instrument -> fix -> regression-test. Use when PolyWeatherBot work is stuck, a pytest failure is unclear, the user says diagnose/debug, or a bug/performance regression is reported.
 ---
 
 # Diagnose
 
 A discipline for hard bugs. Skip phases only when explicitly justified.
 
-For this repository, the active implementation workflow decides when to switch
-from TDD to diagnosis:
+For this repository, formal slice documents are optional context:
 
-- V1 overhaul: `docs/issues/implementation-workflow.md`
-- V2 overhaul: `docs/issues/implementation-workflow-v2.md`
+- If the bug is tied to a formal slice, read the target slice, its source refs,
+  relevant ADRs, and any matching grill task file. Do not expand the slice scope.
+- For V3 adaptive work, default to the user report, logs, failing tests, recent
+  diff, ADRs, `CONTEXT.md`, and relevant modules as the source of truth.
 
 This skill owns the diagnosis loop only.
-
-When diagnosing a slice failure, read the target slice in
-the matching slice file, its `Source refs`, and relevant ADRs:
-
-- V1 slices: `docs/issues/proposed-slices.md`
-- V2 slices: `docs/issues/proposed-slices-v2.md`
-
-For V2 slices, also read the matching Source refs in `docs/grill-tasks-v2.md`.
-Do not expand the slice scope.
 
 ## Phase 1 — Build a feedback loop
 
@@ -45,7 +37,8 @@ Spend disproportionate effort here.
 
 Build the right feedback loop, and the bug is 90% fixed.
 
-For slice work, prefer a single `pytest` node as the first feedback loop.
+For formal slice or V3 issue work, prefer a single `pytest` node as the first
+feedback loop when one can reproduce the symptom.
 
 ### Iterate on the loop itself
 
@@ -89,9 +82,10 @@ Each hypothesis must be **falsifiable**: state the prediction it makes.
 
 If you cannot state the prediction, the hypothesis is a vibe — discard or sharpen it.
 
-For routine AFK slice work, proceed with your ranked hypotheses without waiting
-for user approval. Ask the user only when the diagnosis implies a spec conflict,
-credential/live-environment requirement, or change outside the current slice.
+For routine AFK slice or V3 issue work, proceed with your ranked hypotheses
+without waiting for user approval. Ask the user only when the diagnosis implies
+a spec conflict, credential/live-environment requirement, or change outside the
+current target behavior.
 
 ## Phase 4 — Instrument
 
@@ -137,4 +131,4 @@ Required before declaring done:
 architectural change (no good test seam, tangled callers, hidden coupling), note
 it for the next architecture review using
 `.github/skills/improve-codebase-architecture/SKILL.md`. Do not broaden the
-current fix unless the target slice requires it.
+current fix unless the target behavior or formal slice requires it.

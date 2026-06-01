@@ -19,6 +19,9 @@ If a question can be answered by exploring the codebase, explore the codebase in
 
 During codebase exploration, also look for existing documentation:
 
+For V3 adaptive work, decisions may be captured incrementally as terms sharpen
+or ADR-worthy trade-offs emerge during small issue/bug/feature changes.
+
 ### File structure
 
 Most repos have a single context:

@@ -1,25 +1,23 @@
 ---
 name: tdd
-description: Test-driven development with red-green-refactor loop. Use when implementing one PolyWeatherBot slice from docs/issues/proposed-slices.md or docs/issues/proposed-slices-v2.md, when user asks for TDD/test-first development, or when a feature/bug fix should be driven by observable behavior tests.
+description: Test-driven development with red-green-refactor loop. Use when implementing a PolyWeatherBot formal slice, V3 issue/bug/feature task, user-requested TDD/test-first work, or any change that should be driven by observable behavior tests.
 ---
 
 # Test-Driven Development
 
 ## PolyWeatherBot Scope
 
-For this repository, the active implementation workflow owns the overall
-execution order and skill handoffs:
+For this repository, formal slice documents are optional planning inputs, not a
+requirement for using this skill:
 
-- V1 overhaul: `docs/issues/implementation-workflow.md`
-- V2 overhaul: `docs/issues/implementation-workflow-v2.md`
+- If a formal slice exists, use its acceptance criteria, source refs, and
+  out-of-scope notes as the approved scope.
+- If no formal slice exists, derive one narrow target behavior from the user
+  request, failing test, bug report, logs, and current code.
 
-This skill owns only the test-first loop for one target slice.
-
-Before coding a slice, follow the pre-read checklist in
-the matching implementation workflow §1.
-
-Treat the target slice as the approved scope. Do not re-plan the overhaul, do
-not implement `Out of scope` items, and do not implement Deferred Register work.
+This skill owns only the test-first loop for one target behavior or slice. Do
+not re-plan an overhaul, do not implement explicit out-of-scope items, and do
+not absorb adjacent deferred work.
 
 ## Philosophy
 
@@ -62,15 +60,16 @@ RIGHT (vertical):
 
 When exploring the codebase, use the project's domain glossary so that test names and interface vocabulary match the project's language, and respect ADRs in the area you're touching.
 
-If the target slice is already defined in either `docs/issues/proposed-slices.md`
-or `docs/issues/proposed-slices-v2.md`, do not ask the user to reconfirm its
-interface or behavior list. Ask only if:
+If the target behavior is already defined in a formal slice document such as
+`docs/issues/proposed-slices*.md`, do not ask the user to reconfirm its
+interface or behavior list. If there is no formal slice, infer the smallest
+testable behavior from the request and code. Ask only if:
 
-- The slice conflicts with current code or tests
+- The target behavior conflicts with current code or tests
 - The acceptance criteria are not testable as written
-- The slice would require live credentials, live network, or human input
-- The implementation would touch `Out of scope` or Deferred Register work
-- A public interface must change in a way the slice does not specify
+- The work would require live credentials, live network, or human input
+- The implementation would touch explicit out-of-scope or deferred work
+- A public interface must change in a way the request or slice does not specify
 
 Before writing code:
 
@@ -120,11 +119,12 @@ After all tests pass, look for [refactor candidates](refactoring.md):
 
 **Never refactor while RED.** Get to GREEN first.
 
-Keep refactors inside the current slice's touched area. If a broader
+Keep refactors inside the current target's touched area. If a broader
 architecture concern appears, record it for the next architecture review instead
-of expanding the slice.
+of expanding the work.
 
-If stuck, see the active implementation workflow §3 for handoff conditions.
+If stuck, switch to diagnosis when you have an unclear failure, missing seam,
+performance regression, or repeated failed hypothesis.
 
 ## Checklist Per Cycle
 
@@ -136,12 +136,12 @@ If stuck, see the active implementation workflow §3 for handoff conditions.
 [ ] No speculative features added
 ```
 
-## Slice Completion Checklist
+## Completion Checklist
 
 ```
-[ ] Target slice acceptance criteria are satisfied
-[ ] Slice-specific tests pass
+[ ] Target behavior or slice acceptance criteria are satisfied
+[ ] Target-specific tests pass
 [ ] Adjacent tests pass when public interfaces changed
-[ ] No Out of scope or Deferred Register work was implemented
+[ ] No explicit out-of-scope or deferred work was implemented
 [ ] Residual risk or deferred behavior is noted
 ```
