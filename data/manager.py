@@ -440,6 +440,73 @@ class DataManager:
 
         return merged.tail(n_hours).reset_index(drop=True)
 
+    def build_training_decoder_window(
+        self,
+        station: "StationConfig",
+        decoder_df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Merge decoder HRRR rows with future obs to produce training targets.
+
+        Production inference must not call this method because future obs are
+        unavailable live.  Offline training uses it to add ``temp_error`` to
+        the fxx 1..48 decoder window with the same 20-minute obs tolerance as
+        the encoder builder.
+        """
+        if decoder_df.empty:
+            raise InsufficientEncoderData("training decoder window is empty")
+        missing = [c for c in ("valid_time", "fxx", "TMP_2m") if c not in decoder_df.columns]
+        if missing:
+            raise RuntimeError(
+                f"build_training_decoder_window: decoder missing columns {missing}"
+            )
+
+        decoder = decoder_df.copy()
+        decoder["valid_time"] = pd.to_datetime(decoder["valid_time"], utc=True)
+        decoder = decoder[decoder["fxx"].astype(int).between(1, 48)].copy()
+        decoder = decoder.sort_values("valid_time").reset_index(drop=True)
+        actual_fxx = set(decoder["fxx"].astype(int).tolist())
+        if actual_fxx != set(range(1, 49)):
+            raise InsufficientEncoderData(
+                f"build_training_decoder_window: decoder fxx must be 1..48, "
+                f"got {sorted(actual_fxx)}"
+            )
+
+        start = decoder["valid_time"].min()
+        end = decoder["valid_time"].max()
+        obs_raw = self._obs_store.read(station.station_id, start, end).copy()
+        if len(obs_raw) < 48:
+            raise InsufficientEncoderData(
+                f"build_training_decoder_window: insufficient obs rows for "
+                f"station={station.station_id} (have {len(obs_raw)}, need 48)"
+            )
+        missing_obs = [c for c in ("valid_time", "raw_tmpc_tenths") if c not in obs_raw.columns]
+        if missing_obs:
+            raise RuntimeError(
+                f"build_training_decoder_window: obs missing columns {missing_obs}"
+            )
+        obs_raw["valid_time"] = pd.to_datetime(obs_raw["valid_time"], utc=True)
+        obs_sorted = obs_raw.sort_values("valid_time").reset_index(drop=True)
+        merged = pd.merge_asof(
+            decoder,
+            obs_sorted,
+            on="valid_time",
+            tolerance=pd.Timedelta(minutes=20),
+            direction="nearest",
+            suffixes=("_hrrr", "_obs"),
+        )
+        merged = Cleaner.compute_temp_error(merged)
+        if "temp_error" not in merged.columns:
+            raise RuntimeError(
+                "build_training_decoder_window: temp_error not produced"
+            )
+        merged = merged.dropna(subset=["temp_error"]).reset_index(drop=True)
+        if len(merged) != 48:
+            raise InsufficientEncoderData(
+                f"build_training_decoder_window: temp_error rows must be 48, "
+                f"got {len(merged)}"
+            )
+        return merged.sort_values("fxx").reset_index(drop=True)
+
     # ------------------------------------------------------------------
     # Inference readiness gate
     # ------------------------------------------------------------------

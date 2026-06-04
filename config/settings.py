@@ -22,6 +22,8 @@ class Settings:
     data_store_dir: Path = field(
         default_factory=lambda: _PROJECT_ROOT / "data_store"
     )
+    forecast_store_dir: Path | None = None
+    obs_store_dir: Path | None = None
     model_store_dir: Path = field(
         default_factory=lambda: _PROJECT_ROOT / "model" / "store"
     )
@@ -91,6 +93,24 @@ class Settings:
     val_end: str = "2026-02-28"
     test_start: str = "2026-03-01"
     test_end: str = "2026-04-30"
+    training_decoder_cache_dir: Path | None = None
+
+    # TFT training hyperparameters (reference Run-21 defaults)
+    tft_hidden_size: int = 32
+    tft_attention_head_size: int = 4
+    tft_dropout: float = 0.20
+    tft_hidden_continuous_size: int = 16
+    tft_learning_rate: float = 5e-4
+    tft_reduce_lr_patience: int = 3
+    tft_weight_decay: float = 1e-3
+    tft_quantiles: list[float] = field(default_factory=lambda: [0.1, 0.5, 0.9])
+    tft_batch_size: int = 32
+    tft_max_epochs: int = 20
+    tft_min_epochs: int = 5
+    tft_early_stop_patience: int = 2
+    tft_target_winsor: float = 8.0
+    tft_max_encoder_length: int = 72
+    tft_max_prediction_length: int = 48
 
     # Risk
     # max_open_per_token is retained for compatibility but is no longer read
@@ -107,3 +127,11 @@ class Settings:
     @property
     def polymarket_wallet_address(self) -> str:
         return os.environ.get("POLYMARKET_WALLET_ADDRESS", "")
+
+    def __post_init__(self) -> None:
+        if self.forecast_store_dir is None:
+            self.forecast_store_dir = self.data_store_dir / "hrrr"
+        if self.obs_store_dir is None:
+            self.obs_store_dir = self.data_store_dir / "obs"
+        if self.training_decoder_cache_dir is None:
+            self.training_decoder_cache_dir = self.data_store_dir / "_decoder_cache"

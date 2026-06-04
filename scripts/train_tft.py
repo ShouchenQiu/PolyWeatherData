@@ -21,14 +21,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import pickle
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
 import pandas as pd
 
 from config.settings import Settings
+from config.stations import STATIONS
 from model.features import TFT_KNOWN_REALS, TFT_UNKNOWN_REALS
 
 if TYPE_CHECKING:
@@ -60,81 +61,9 @@ _TARGET      = "temp_error"
 _GROUP_IDS   = ["init_time_str"]
 _STATIC_CATS = ["Node_ID"]
 
-_TEMP_K_COLS = ["TMP_2m", "DPT_2m", "TMP_sfc", "TMP_850mb", "TMP_500mb"]
-
 _KNOWN_REALS: list[str] = TFT_KNOWN_REALS
 
 _UNKNOWN_REALS: list[str] = TFT_UNKNOWN_REALS
-
-
-# ---------------------------------------------------------------------------
-# Feature engineering helpers
-# ---------------------------------------------------------------------------
-
-def _wind_components(
-    u: np.ndarray, v: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return (speed, sin_dir, cos_dir) from U/V component arrays."""
-    ws   = np.sqrt(u ** 2 + v ** 2)
-    wd   = np.arctan2(-u, -v)
-    calm = ws == 0.0
-    sin_wd = np.where(calm, 0.0, np.sin(wd)).astype("float32")
-    cos_wd = np.where(calm, 0.0, np.cos(wd)).astype("float32")
-    return ws.astype("float32"), sin_wd, cos_wd
-
-
-def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply feature engineering to a raw 72-step dataset DataFrame."""
-    df = df.copy()
-    df = df.loc[:, ~df.columns.duplicated()]
-
-    df["init_time_str"] = df["init_time"].astype(str)
-    df["Node_ID"]       = df["Node_ID"].astype(str)
-    df["local_idx"]     = (df["fxx"] + 71).astype(int)
-
-    # Kelvin -> Celsius for HRRR temperature columns (values > 200 K are real)
-    for col in _TEMP_K_COLS:
-        if col in df.columns:
-            mask = df[col] > 200.0
-            df.loc[mask, col] = (df.loc[mask, col] - 273.15).astype("float32")
-
-    # Wind components
-    for u_col, v_col, prefix in [
-        ("UGRD_10m",  "VGRD_10m",  "10m"),
-        ("UGRD_80m",  "VGRD_80m",  "80m"),
-        ("UGRD_500mb","VGRD_500mb","500mb"),
-    ]:
-        u = df[u_col].fillna(0).values
-        v = df[v_col].fillna(0).values
-        ws, wds, wdc = _wind_components(u, v)
-        df[f"WS_{prefix}"]      = ws
-        df[f"WD_sin_{prefix}"]  = wds
-        df[f"WD_cos_{prefix}"]  = wdc
-
-    if "obs_U" in df.columns and "obs_V" in df.columns:
-        ou = df["obs_U"].fillna(0).values
-        ov = df["obs_V"].fillna(0).values
-        ws, wds, wdc = _wind_components(ou, ov)
-        df["obs_WS"]     = ws
-        df["obs_WD_sin"] = wds
-        df["obs_WD_cos"] = wdc
-
-    # Log-smoothed heavy-tail variables
-    df["log1p_GUST_sfc"] = np.log1p(df["GUST_sfc"].clip(lower=0)).astype("float32") \
-        if "GUST_sfc" in df.columns else 0.0
-    df["log1p_PRATE"]    = np.log1p(df["PRATE"].clip(lower=0)).astype("float32") \
-        if "PRATE" in df.columns else 0.0
-
-    # Residual target: TFT predicts (observed_temp - HRRR_forecast_temp)
-    if "raw_tmpc_tenths" in df.columns and "TMP_2m" in df.columns:
-        df["temp_error"] = (df["raw_tmpc_tenths"] - df["TMP_2m"]).astype("float32")
-
-    # Ensure all continuous columns are float32
-    for col in _KNOWN_REALS + _UNKNOWN_REALS + [_TARGET]:
-        if col in df.columns and col != "local_idx":
-            df[col] = df[col].astype("float32")
-
-    return df
 
 
 # ---------------------------------------------------------------------------
@@ -159,9 +88,19 @@ class TftTrainer:
         store:      "ParquetStore",
         registry:   "ModelRegistry",
         output_dir: Path | None = None,
+        settings: Settings | None = None,
+        data_manager: object | None = None,
+        decoder_cache: object | None = None,
+        dataset_builder: object | None = None,
+        station_config: object | None = None,
     ) -> None:
         self._store     = store
         self._registry  = registry
+        self._settings  = settings if settings is not None else Settings()
+        self._data_mgr  = data_manager
+        self._decoder_cache = decoder_cache
+        self._dataset_builder = dataset_builder
+        self._station_config = station_config
         self._out_dir   = Path(output_dir) if output_dir else Path("checkpoints")
         self._out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -220,17 +159,13 @@ class TftTrainer:
         pl.seed_everything(42, workers=True)
 
         # -- Load and prepare data -------------------------------------------
-        df_full = self._load_dataset(
-            station_id, start=start, end=end
-        )
-        df_train = _prepare_df(df_full[df_full["split"] == "train"])
-        df_val   = _prepare_df(df_full[df_full["split"] == "val"])
-        df_test  = _prepare_df(df_full[df_full["split"] == "test"])
+        df_train, df_val, df_test = self._build_split_frames(station_id)
 
         # Winsorise training target
-        before_count = int((df_train[_TARGET].abs() > _TARGET_WINSOR).sum())
-        df_train[_TARGET] = df_train[_TARGET].clip(-_TARGET_WINSOR, _TARGET_WINSOR)
-        logger.info("Winsorised %d train rows with |%s|>%s", before_count, _TARGET, _TARGET_WINSOR)
+        target_winsor = self._settings.tft_target_winsor
+        before_count = int((df_train[_TARGET].abs() > target_winsor).sum())
+        df_train[_TARGET] = df_train[_TARGET].clip(-target_winsor, target_winsor)
+        logger.info("Winsorised %d train rows with |%s|>%s", before_count, _TARGET, target_winsor)
 
         # -- Build TimeSeriesDataSet -----------------------------------------
         known  = [c for c in _KNOWN_REALS  if c in df_train.columns]
@@ -240,8 +175,8 @@ class TftTrainer:
             time_idx                          = "local_idx",
             target                            = _TARGET,
             group_ids                         = _GROUP_IDS,
-            max_encoder_length                = _MAX_ENCODER_LENGTH,
-            max_prediction_length             = _MAX_PREDICTION_LENGTH,
+            max_encoder_length                = self._settings.tft_max_encoder_length,
+            max_prediction_length             = self._settings.tft_max_prediction_length,
             static_categoricals               = _STATIC_CATS,
             static_reals                      = [],
             time_varying_known_reals          = known,
@@ -266,28 +201,28 @@ class TftTrainer:
         )
 
         train_loader = training.to_dataloader(
-            train=True,  batch_size=_BATCH_SIZE, num_workers=0, shuffle=True
+            train=True,  batch_size=self._settings.tft_batch_size, num_workers=0, shuffle=True
         )
         val_loader = validation.to_dataloader(
-            train=False, batch_size=_BATCH_SIZE, num_workers=0
+            train=False, batch_size=self._settings.tft_batch_size, num_workers=0
         )
         test_loader = testing.to_dataloader(
-            train=False, batch_size=_BATCH_SIZE, num_workers=0
+            train=False, batch_size=self._settings.tft_batch_size, num_workers=0
         )
 
         # -- Instantiate model -----------------------------------------------
         tft = TemporalFusionTransformer.from_dataset(
             training,
-            hidden_size                = _HIDDEN_SIZE,
-            attention_head_size        = _ATTENTION_HEAD_SIZE,
-            dropout                    = _DROPOUT,
-            hidden_continuous_size     = _HIDDEN_CONTINUOUS_SIZE,
-            loss                       = QuantileLoss(quantiles=_QUANTILES),
-            learning_rate              = _LEARNING_RATE,
+            hidden_size                = self._settings.tft_hidden_size,
+            attention_head_size        = self._settings.tft_attention_head_size,
+            dropout                    = self._settings.tft_dropout,
+            hidden_continuous_size     = self._settings.tft_hidden_continuous_size,
+            loss                       = QuantileLoss(quantiles=self._settings.tft_quantiles),
+            learning_rate              = self._settings.tft_learning_rate,
             log_interval               = 10,
             log_val_interval           = 1,
-            reduce_on_plateau_patience = _REDUCE_LR_PATIENCE,
-            weight_decay               = _WEIGHT_DECAY,
+            reduce_on_plateau_patience = self._settings.tft_reduce_lr_patience,
+            weight_decay               = self._settings.tft_weight_decay,
         )
 
         # -- Callbacks -------------------------------------------------------
@@ -295,7 +230,7 @@ class TftTrainer:
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         early_stop = EarlyStopping(
             monitor   = "val_loss",
-            patience  = _EARLY_STOP_PATIENCE,
+            patience  = self._settings.tft_early_stop_patience,
             min_delta = 5e-4,
             mode      = "min",
             verbose   = True,
@@ -313,8 +248,8 @@ class TftTrainer:
         trainer = pl.Trainer(
             accelerator         = "auto",
             precision           = 32,
-            min_epochs          = _MIN_EPOCHS,
-            max_epochs          = _MAX_EPOCHS,
+            min_epochs          = self._settings.tft_min_epochs,
+            max_epochs          = self._settings.tft_max_epochs,
             callbacks           = [early_stop, checkpoint],
             enable_progress_bar = True,
             log_every_n_steps   = 10,
@@ -325,10 +260,13 @@ class TftTrainer:
         best_ckpt  = Path(checkpoint.best_model_path)
         best_loss  = float(checkpoint.best_model_score)
         epochs_run = trainer.current_epoch
+        training_dataset_pkl = ckpt_dir / "training_dataset.pkl"
+        with open(training_dataset_pkl, "wb") as fh:
+            pickle.dump(training, fh)
 
         # -- Evaluate on test set (MAE on median quantile) -------------------
         test_mae = self._eval_mae(trainer, tft, test_loader)
-        train_mae = best_loss  # proxy (quantile loss, not exact MAE)
+        train_mae = float("nan")
 
         # -- Publish to registry ---------------------------------------------
         metrics = {
@@ -341,6 +279,7 @@ class TftTrainer:
             version      = version,
             ckpt_path    = best_ckpt,
             metrics      = metrics,
+            training_dataset_pkl = training_dataset_pkl,
         )
 
         result = {
@@ -373,6 +312,50 @@ class TftTrainer:
                 "Run batch_download_zarr.py and batch_download_iem.py first."
             )
         return df
+
+    def _build_split_frames(self, station_id: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        if self._dataset_builder is None:
+            if self._data_mgr is None or self._decoder_cache is None:
+                raise ValueError(
+                    "TftTrainer requires a TrainingDatasetBuilder or both "
+                    "data_manager and decoder_cache. Legacy split-column "
+                    "training data is no longer supported."
+                )
+            from model.training_data import TrainingDatasetBuilder
+            self._dataset_builder = TrainingDatasetBuilder(
+                self._data_mgr,
+                self._decoder_cache,
+                encoder_hours=self._settings.tft_max_encoder_length,
+            )
+
+        station = self._station_config or STATIONS[station_id]
+        train = self._dataset_builder.build_frame(
+            station,
+            self._init_times(self._settings.train_start, self._settings.train_end),
+            split="train",
+        )
+        val = self._dataset_builder.build_frame(
+            station,
+            self._init_times(self._settings.val_start, self._settings.val_end),
+            split="val",
+        )
+        test = self._dataset_builder.build_frame(
+            station,
+            self._init_times(self._settings.test_start, self._settings.test_end),
+            split="test",
+        )
+        if train.empty or val.empty or test.empty:
+            raise ValueError(
+                "TrainingDatasetBuilder produced an empty split: "
+                f"train={len(train)} val={len(val)} test={len(test)}"
+            )
+        return train, val, test
+
+    @staticmethod
+    def _init_times(start_date: str, end_date: str) -> list[pd.Timestamp]:
+        start_ts = pd.Timestamp(start_date + " 00:00:00", tz="UTC")
+        end_ts = pd.Timestamp(end_date + " 23:00:00", tz="UTC")
+        return list(pd.date_range(start_ts, end_ts, freq="h"))
 
     def _eval_mae(self, trainer: Any, model: Any, loader: Any) -> float:
         """Compute MAE on the median quantile over the test loader."""
@@ -407,16 +390,29 @@ def _cli() -> None:
     args = parser.parse_args()
 
     from data.storage.parquet_store import ParquetStore
+    from data.manager import DataManager
+    from model.training_data import TrainingDecoderCache
     from model.store.registry import ModelRegistry
     from db.schema import DbClient
 
     settings  = Settings()
-    store     = ParquetStore(settings.data_store_dir)
+    forecast_store = ParquetStore(settings.forecast_store_dir)
+    obs_store = ParquetStore(settings.obs_store_dir)
+    data_mgr = DataManager([], [], forecast_store, obs_store, settings=settings)
+    decoder_cache = TrainingDecoderCache(settings.training_decoder_cache_dir)
     db_path   = settings.project_root / "polyweather.db"
     db        = DbClient(str(db_path))
     registry  = ModelRegistry(settings.model_store_dir, db)
 
-    trainer = TftTrainer(store, registry, output_dir=Path(args.output_dir))
+    trainer = TftTrainer(
+        forecast_store,
+        registry,
+        output_dir=Path(args.output_dir),
+        settings=settings,
+        data_manager=data_mgr,
+        decoder_cache=decoder_cache,
+        station_config=STATIONS[args.station],
+    )
     result  = trainer.run(
         station_id = args.station,
         version    = args.version,

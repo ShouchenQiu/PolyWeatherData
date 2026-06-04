@@ -134,6 +134,34 @@ def test_test_end():
     assert Settings().test_end == "2026-04-30"
 
 
+def test_training_decoder_cache_dir_default():
+    s = Settings()
+    assert s.training_decoder_cache_dir == s.data_store_dir / "_decoder_cache"
+
+
+def test_forecast_and_obs_store_dir_defaults():
+    s = Settings()
+    assert s.forecast_store_dir == s.data_store_dir / "hrrr"
+    assert s.obs_store_dir == s.data_store_dir / "obs"
+
+
+def test_tft_training_hyperparameter_defaults():
+    s = Settings()
+    assert s.tft_hidden_size == 32
+    assert s.tft_attention_head_size == 4
+    assert s.tft_dropout == 0.20
+    assert s.tft_learning_rate == 5e-4
+    assert s.tft_weight_decay == 1e-3
+    assert s.tft_quantiles == [0.1, 0.5, 0.9]
+    assert s.tft_batch_size == 32
+    assert s.tft_max_epochs == 20
+    assert s.tft_min_epochs == 5
+    assert s.tft_early_stop_patience == 2
+    assert s.tft_target_winsor == 8.0
+    assert s.tft_max_encoder_length == 72
+    assert s.tft_max_prediction_length == 48
+
+
 # ---------------------------------------------------------------------------
 # V2V01 -- discovery_loop_interval_s
 # ---------------------------------------------------------------------------

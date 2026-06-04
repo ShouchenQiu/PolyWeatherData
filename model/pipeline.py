@@ -13,7 +13,11 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from model.features import REQUIRED_DECODER_SOURCE_COLUMNS, REQUIRED_ENCODER_SOURCE_COLUMNS
+from model.features import (
+    REQUIRED_DECODER_SOURCE_COLUMNS,
+    REQUIRED_ENCODER_SOURCE_COLUMNS,
+    add_model_features,
+)
 
 if TYPE_CHECKING:
     from config.stations import StationConfig
@@ -314,31 +318,13 @@ class ModelPipeline:
         init_time_str : string representation of init_utc
         Node_ID     : station_id (TFT group identifier)
         """
-        df = df.copy()
-        n = len(df)
-        idx = list(range(start_idx, start_idx + n))
-        df["time_idx"]  = idx
-        df["local_idx"] = idx
-
-        if "valid_time" not in df.columns:
+        try:
+            return add_model_features(df, start_idx, init_utc, station_id)
+        except ValueError as exc:
             raise ValueError(
                 f"DataFrame passed to _add_model_features must have a 'valid_time' "
                 f"column (columns present: {list(df.columns)})"
-            )
-        vt  = pd.to_datetime(df["valid_time"], utc=True)
-        hour = vt.dt.hour.values
-        doy  = vt.dt.day_of_year.values
-        df["month"]       = vt.dt.month.values
-        df["day_of_year"] = doy
-        df["hour_of_day"] = hour
-        df["sin_hour"] = np.sin(2 * np.pi * hour / 24).astype("float32")
-        df["cos_hour"] = np.cos(2 * np.pi * hour / 24).astype("float32")
-        df["sin_doy"]  = np.sin(2 * np.pi * doy  / 365).astype("float32")
-        df["cos_doy"]  = np.cos(2 * np.pi * doy  / 365).astype("float32")
-
-        df["init_time_str"] = str(init_utc)
-        df["Node_ID"]       = station_id
-        return df
+            ) from exc
 
     def _target_day_fxx(
         self,

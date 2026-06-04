@@ -32,7 +32,10 @@ import numpy as np
 import pandas as pd
 
 from data.storage.parquet_store import ParquetStore
+from data.storage.cleaner import Cleaner
+from data.forecast.hrrr_zarr import HrrrZarrSource
 from config.settings import Settings
+from config.stations import STATIONS
 
 # ---------------------------------------------------------------------------
 # HRRR Zarr variable map
@@ -197,19 +200,28 @@ class BatchZarrDownloader:
         col:        int = 1556,
         max_workers: int = 12,
         save_every:  int = _SAVE_EVERY,
+        station_config: Any | None = None,
+        forecast_source: Any | None = None,
     ) -> None:
         self._store       = store
-        self._station_id  = station_id
+        self._station     = station_config or STATIONS[station_id]
+        self._station_id  = self._station.station_id
         self._row         = row
         self._col         = col
         self._max_workers = max_workers
         self._save_every  = save_every
+        self._source      = forecast_source or HrrrZarrSource()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self, start_date: str, end_date: str) -> int:
+    def run(
+        self,
+        start_date: str,
+        end_date: str,
+        init_hours: list[int] | None = None,
+    ) -> int:
         """Download all init cycles between start_date and end_date (inclusive).
 
         Parameters
@@ -221,7 +233,7 @@ class BatchZarrDownloader:
         -------
         Total number of rows appended to the store.
         """
-        all_inits = self._build_inits(start_date, end_date)
+        all_inits = self._build_inits(start_date, end_date, init_hours=init_hours)
         done_keys = self._already_done_keys()
         pending   = [
             (d, h) for d, h in all_inits
@@ -234,17 +246,21 @@ class BatchZarrDownloader:
         if not pending:
             return 0
 
-        return self._execute(pending)
+        return self._execute_via_source(pending)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _build_inits(
-        self, start_date: str, end_date: str
+        self,
+        start_date: str,
+        end_date: str,
+        init_hours: list[int] | None = None,
     ) -> list[tuple[Any, int]]:
         dates = pd.date_range(start_date, end_date, freq="D")
-        return [(d.date(), h) for d in dates for h in range(24)]
+        hours = init_hours if init_hours is not None else list(range(24))
+        return [(d.date(), h) for d in dates for h in hours]
 
     def _already_done_keys(self) -> set[str]:
         """Return set of already-downloaded init key strings."""
@@ -320,6 +336,36 @@ class BatchZarrDownloader:
         )
         return total_rows
 
+    def _execute_via_source(self, pending: list[tuple[Any, int]]) -> int:
+        """Fetch historical HRRR through the production source/clean/store path."""
+        total_rows = 0
+        errors = 0
+        for completed, (d, h) in enumerate(pending, start=1):
+            init_utc = pd.Timestamp(
+                datetime(d.year, d.month, d.day, h, tzinfo=timezone.utc)
+            )
+            try:
+                result = self._source.fetch(init_utc, range(0, 49), self._station)
+                df = result.get(self._station_id, pd.DataFrame())
+                if df is None or df.empty:
+                    print(f"  EMPTY {d} {h:02d}z")
+                    continue
+                df = Cleaner.process_hrrr(df)
+                n = self._store.append(self._station_id, df)
+                total_rows += n
+            except Exception as exc:
+                errors += 1
+                print(f"  ERROR {d} {h:02d}z: {exc}")
+                if errors <= 3:
+                    traceback.print_exc()
+            if completed % 10 == 0 or completed <= 5:
+                print(
+                    f"[{completed}/{len(pending)}] "
+                    f"errors={errors} written={total_rows}"
+                )
+        print(f"\nBatchZarrDownloader done: {total_rows} rows, errors={errors}")
+        return total_rows
+
     def _flush(self, rows: list[dict]) -> int:
         if not rows:
             return 0
@@ -343,7 +389,7 @@ def _cli() -> None:
     args = parser.parse_args()
 
     settings = Settings()
-    store    = ParquetStore(settings.data_store_dir)
+    store    = ParquetStore(settings.forecast_store_dir)
     dl = BatchZarrDownloader(
         store,
         station_id  = args.station,

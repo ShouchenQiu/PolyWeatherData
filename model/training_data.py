@@ -1,0 +1,164 @@
+"""Training data helpers shared by offline scripts and TFT training.
+
+The canonical HRRR ParquetStore remains f01-only.  This module owns
+training-only artifacts that are useful offline but must not be read by
+production inference, such as cached full decoder windows.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+from data.forecast.hrrr_zarr import HrrrZarrSource
+from data.manager import InsufficientEncoderData
+from data.storage.cleaner import Cleaner
+from model.features import add_model_features
+from model.tft import MAX_ENCODER_LENGTH
+
+
+@dataclass
+class TrainingDecoderCache:
+    """File-backed cache for full HRRR decoder windows used in training only."""
+
+    root_dir: Path
+    source: Any | None = None
+
+    def __post_init__(self) -> None:
+        self.root_dir = Path(self.root_dir)
+        self.root_dir.mkdir(parents=True, exist_ok=True)
+        if self.source is None:
+            self.source = HrrrZarrSource()
+
+    def path_for(self, station_id: str, init_time: pd.Timestamp) -> Path:
+        init_utc = _to_utc(init_time)
+        station_dir = self.root_dir / station_id
+        station_dir.mkdir(parents=True, exist_ok=True)
+        return station_dir / f"{init_utc.strftime('%Y%m%d_%Hz')}.parquet"
+
+    def get(self, station: Any, init_time: pd.Timestamp) -> pd.DataFrame:
+        """Return cleaned fxx 1..48 decoder rows, fetching and caching on miss."""
+        init_utc = _to_utc(init_time)
+        path = self.path_for(station.station_id, init_utc)
+        if path.exists():
+            df = pd.read_parquet(path)
+            return self._validate(df, station.station_id, init_utc)
+
+        result = self.source.fetch(init_utc, range(0, 49), station)
+        df = result.get(station.station_id, pd.DataFrame())
+        if df is None or df.empty:
+            raise RuntimeError(
+                f"TrainingDecoderCache: no decoder rows for "
+                f"station={station.station_id} init={init_utc}"
+            )
+        df = Cleaner.process_hrrr(df)
+        df = self._validate(df, station.station_id, init_utc)
+        df.to_parquet(path, index=False)
+        return df
+
+    @staticmethod
+    def _validate(
+        df: pd.DataFrame,
+        station_id: str,
+        init_utc: pd.Timestamp,
+    ) -> pd.DataFrame:
+        if "fxx" not in df.columns:
+            raise ValueError(
+                f"decoder cache rows missing fxx for station={station_id} "
+                f"init={init_utc}"
+            )
+        decoder = df[df["fxx"].astype(int).between(1, 48)].copy()
+        decoder = decoder.sort_values("fxx").reset_index(drop=True)
+        actual = set(decoder["fxx"].astype(int).tolist())
+        if actual != set(range(1, 49)):
+            raise ValueError(
+                f"decoder fxx must be exactly {{1..48}} for "
+                f"station={station_id} init={init_utc}; got {sorted(actual)}"
+            )
+        if "TMP_2m" not in decoder.columns or decoder["TMP_2m"].isna().any():
+            raise ValueError(
+                f"decoder TMP_2m must be present and non-null for "
+                f"station={station_id} init={init_utc}"
+            )
+        return decoder
+
+
+class TrainingDatasetBuilder:
+    """Build TFT training frames from bootstrap stores plus decoder cache."""
+
+    def __init__(
+        self,
+        data_manager: Any,
+        decoder_cache: TrainingDecoderCache,
+        encoder_hours: int = MAX_ENCODER_LENGTH,
+    ) -> None:
+        self._data_manager = data_manager
+        self._decoder_cache = decoder_cache
+        self._encoder_hours = encoder_hours
+        self.skipped: list[dict[str, Any]] = []
+
+    def build_frame(
+        self,
+        station: Any,
+        init_times: list[pd.Timestamp],
+        split: str,
+    ) -> pd.DataFrame:
+        frames: list[pd.DataFrame] = []
+        self.skipped = []
+        for init_time in init_times:
+            init_utc = _to_utc(init_time)
+            status = self._data_manager.inference_readiness(
+                station, init_utc, self._encoder_hours
+            )
+            if not status.ready:
+                self.skipped.append(
+                    {
+                        "init_time": init_utc,
+                        "split": split,
+                        "reason": status.reason,
+                        "first_eligible_init": status.first_eligible_init,
+                    }
+                )
+                continue
+            try:
+                encoder = self._data_manager.build_encoder_obs_window(
+                    station, init_utc, n_hours=self._encoder_hours
+                )
+                decoder = self._decoder_cache.get(station, init_utc)
+                decoder = self._data_manager.build_training_decoder_window(
+                    station, decoder
+                )
+            except InsufficientEncoderData as exc:
+                self.skipped.append(
+                    {
+                        "init_time": init_utc,
+                        "split": split,
+                        "reason": type(exc).__name__,
+                        "first_eligible_init": None,
+                    }
+                )
+                continue
+
+            encoder = add_model_features(
+                encoder, start_idx=0, init_utc=init_utc,
+                station_id=station.station_id,
+            )
+            decoder = add_model_features(
+                decoder, start_idx=self._encoder_hours, init_utc=init_utc,
+                station_id=station.station_id,
+            )
+            combined = pd.concat([encoder, decoder], ignore_index=True)
+            combined["split"] = split
+            frames.append(combined)
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+
+def _to_utc(ts: pd.Timestamp) -> pd.Timestamp:
+    stamp = pd.Timestamp(ts)
+    if stamp.tzinfo is None:
+        return stamp.tz_localize("UTC")
+    return stamp.tz_convert("UTC")

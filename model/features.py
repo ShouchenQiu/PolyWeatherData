@@ -6,6 +6,9 @@ usable from scripts/ and model/ alike.
 """
 from __future__ import annotations
 
+import numpy as np
+import pandas as pd
+
 # ---------------------------------------------------------------------------
 # HRRR-derived known-real features
 # These appear in both the encoder and decoder windows (known at forecast time).
@@ -92,3 +95,37 @@ MODEL_GENERATED_COLUMNS: list[str] = [
     "init_time_str",
     "Node_ID",
 ]
+
+
+def add_model_features(
+    df: pd.DataFrame,
+    start_idx: int,
+    init_utc: pd.Timestamp,
+    station_id: str,
+) -> pd.DataFrame:
+    """Add canonical TFT time/index features used by training and inference."""
+    df = df.copy()
+    n = len(df)
+    idx = list(range(start_idx, start_idx + n))
+    df["time_idx"] = idx
+    df["local_idx"] = idx
+
+    if "valid_time" not in df.columns:
+        raise ValueError(
+            "DataFrame passed to add_model_features must have a 'valid_time' column"
+        )
+    vt = pd.to_datetime(df["valid_time"], utc=True)
+    hour = vt.dt.hour.values
+    doy = vt.dt.day_of_year.values
+    df["month"] = vt.dt.month.values
+    df["day_of_year"] = doy
+    df["hour_of_day"] = hour
+    df["sin_hour"] = np.sin(2 * np.pi * hour / 24).astype("float32")
+    df["cos_hour"] = np.cos(2 * np.pi * hour / 24).astype("float32")
+    df["sin_doy"] = np.sin(2 * np.pi * doy / 365).astype("float32")
+    df["cos_doy"] = np.cos(2 * np.pi * doy / 365).astype("float32")
+    df["init_time_str"] = str(
+        init_utc.tz_localize("UTC") if init_utc.tzinfo is None else init_utc.tz_convert("UTC")
+    )
+    df["Node_ID"] = station_id
+    return df

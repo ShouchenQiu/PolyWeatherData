@@ -84,8 +84,8 @@ class BotManager:
         self.db = DbClient(path)
 
         # Data layer
-        forecast_store  = ParquetStore(settings.data_store_dir / "hrrr")
-        self.obs_store  = ParquetStore(settings.data_store_dir / "obs")
+        forecast_store  = ParquetStore(settings.forecast_store_dir)
+        self.obs_store  = ParquetStore(settings.obs_store_dir)
         s3_base     = f"https://{settings.hrrr_s3_bucket}.s3.amazonaws.com"
         nomads_base = settings.hrrr_nomads_base
         self.data_mgr   = DataManager(

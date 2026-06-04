@@ -28,7 +28,10 @@ import pandas as pd
 import requests
 
 from data.storage.parquet_store import ParquetStore
+from data.storage.cleaner import Cleaner
+from data.obs.iem import IemSource
 from config.settings import Settings
+from config.stations import STATIONS
 
 _IEM_JSON_URL = (
     "https://mesonet.agron.iastate.edu/api/1/obhistory.json"
@@ -59,11 +62,15 @@ class BatchIemDownloader:
         station_id: str = "KLGA",
         delay:      float = _DEFAULT_DELAY,
         retries:    int   = _DEFAULT_RETRIES,
+        station_config = None,
+        obs_source = None,
     ) -> None:
         self._store      = store
-        self._station_id = station_id
+        self._station    = station_config or STATIONS[station_id]
+        self._station_id = self._station.station_id
         self._delay      = delay
         self._retries    = retries
+        self._source     = obs_source or IemSource()
         self._session    = requests.Session()
         self._session.headers.update({"User-Agent": "PolyWeatherBot-IEM-downloader/1.0"})
 
@@ -111,7 +118,14 @@ class BatchIemDownloader:
                 d += timedelta(days=1)
                 continue
 
-            rows = self._fetch_day(d, station, network)
+            start = pd.Timestamp(d.isoformat() + " 00:00:00", tz="UTC")
+            end = pd.Timestamp(d.isoformat() + " 23:59:59", tz="UTC")
+            df_day = self._source.fetch(self._station, start, end)
+            if df_day is None or df_day.empty:
+                rows = []
+            else:
+                df_day = Cleaner.process_iem(df_day)
+                rows = df_day.to_dict("records")
             all_rows.extend(rows)
             total_rows += len(rows)
             print(f"[{d}] {len(rows):4d} obs  (cumulative: {total_rows})")
@@ -121,9 +135,8 @@ class BatchIemDownloader:
 
         if all_rows:
             df = pd.DataFrame(all_rows)
-            df = self._normalise(df)
-            self._store.append(self._station_id, df)
-            print(f"\nFlushed {len(df)} rows to store.")
+            written = self._store.append(self._station_id, df)
+            print(f"\nFlushed {written} rows to store.")
 
         print(f"BatchIemDownloader done: {total_rows} new rows.")
         return total_rows
@@ -158,7 +171,7 @@ class BatchIemDownloader:
             )
             if existing.empty:
                 return set()
-            col = "utc_valid" if "utc_valid" in existing.columns else None
+            col = "valid_time" if "valid_time" in existing.columns else None
             if col is None:
                 return set()
             return set(
@@ -190,7 +203,7 @@ def _cli() -> None:
     args = parser.parse_args()
 
     settings = Settings()
-    store    = ParquetStore(settings.data_store_dir)
+    store    = ParquetStore(settings.obs_store_dir)
     dl = BatchIemDownloader(store, station_id=args.store_id)
     dl.run(args.start, args.end, station=args.station, network=args.network)
 
