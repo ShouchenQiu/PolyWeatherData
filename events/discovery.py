@@ -275,8 +275,9 @@ class EventDiscovery:
         if PublicClient is not None:
             try:
                 with PublicClient() as client:
-                    page_size = int(extra_params.get("page_size") or 100)
-                    paginator = client.list_events(page_size=page_size)
+                    paginator = client.list_events(
+                        **self._sdk_list_events_params(extra_params)
+                    )
                     events: list[dict] = []
                     for page in paginator:
                         for ev in page.items:
@@ -297,6 +298,20 @@ class EventDiscovery:
             raise RuntimeError(
                 f"Gamma API request failed: {exc}"
             ) from exc
+
+    @staticmethod
+    def _sdk_list_events_params(extra_params: dict) -> dict:
+        """Map Gamma query params to polymarket-client list_events kwargs."""
+        kwargs: dict = {"page_size": int(extra_params.get("page_size") or 100)}
+        if extra_params.get("slug"):
+            kwargs["slug"] = extra_params["slug"]
+        if "closed" in extra_params:
+            closed = extra_params["closed"]
+            kwargs["closed"] = str(closed).lower() == "true"
+        elif "active" in extra_params:
+            active = str(extra_params["active"]).lower() == "true"
+            kwargs["closed"] = not active
+        return kwargs
 
     @staticmethod
     def _event_to_dict(ev: object) -> dict:

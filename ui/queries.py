@@ -72,6 +72,14 @@ MARKET_LADDER_COLUMNS = (
     "depth_ask",
 )
 
+MODEL_VERSION_COLUMNS = (
+    "version",
+    "checkpoint_path",
+    "train_mae",
+    "test_mae",
+    "created_at",
+)
+
 
 def _df(rows) -> pd.DataFrame:
     return pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
@@ -125,6 +133,28 @@ def overview_metrics(db: "DbClient", is_paper: bool | None = None) -> dict:
         "total_pnl": float(total_pnl),
         "gross_exposure": float(gross_exposure),
     }
+
+
+def model_versions(db: "DbClient") -> pd.DataFrame:
+    """Return registered model versions newest-first."""
+    return _ensure_columns(
+        _df(db.query(
+            "SELECT version, checkpoint_path, train_mae, test_mae, created_at"
+            " FROM model_versions ORDER BY created_at DESC"
+        )),
+        MODEL_VERSION_COLUMNS,
+    )
+
+
+def table_counts(db: "DbClient", tables: tuple[str, ...]) -> pd.DataFrame:
+    """Return simple row counts for a curated list of known tables."""
+    rows = []
+    for table in tables:
+        rows.append({
+            "table": table,
+            "rows": int(db.query(f"SELECT COUNT(*) FROM {table}")[0][0]),
+        })
+    return pd.DataFrame(rows)
 
 
 def loop_ticks(db: "DbClient", loop_name: str | None = None, limit: int = 100) -> pd.DataFrame:

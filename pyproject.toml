@@ -15,6 +15,7 @@ dependencies = [
     "eccodes",
     "zarr",
     "fsspec",
+    "s3fs",
     "requests",
     "torch",
     "pytorch-forecasting",

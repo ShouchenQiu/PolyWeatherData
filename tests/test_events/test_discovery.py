@@ -30,6 +30,10 @@ from events.discovery import EventDiscovery, parse_slug
     # range
     ("klga-high-temperature-60-70f-nyc", (60.0, 70.0)),
     ("klga-daily-high-46-47f", (46.0, 47.0)),
+    # Current NYC weather event format resolves against KLGA.
+    ("highest-temperature-in-nyc-on-june-5-2026-81forbelow", (float("-inf"), 81.0)),
+    ("highest-temperature-in-nyc-on-june-5-2026-82-83f", (82.0, 83.0)),
+    ("highest-temperature-in-nyc-on-june-5-2026-100forhigher", (100.0, float("inf"))),
 ])
 def test_parse_slug(slug, expected):
     result = parse_slug(slug)
@@ -199,6 +203,52 @@ def test_discover_parses_buckets(mem_db):
     assert slugs_to_buckets[key70] == (70.0, float("inf"))
 
 
+def test_discover_parses_current_nyc_temperature_event(mem_db):
+    """Polymarket NYC temperature events resolve against KLGA."""
+    settings = _make_settings()
+    disc     = EventDiscovery(db=mem_db, settings=settings)
+    response = [
+        {
+            "id":          "553899",
+            "conditionId": "553899",
+            "slug":        "highest-temperature-in-nyc-on-june-5-2026",
+            "title":       "Highest temperature in NYC on June 5?",
+            "endDate":     "2026-06-05T12:00:00Z",
+            "markets": [
+                {
+                    "id":           "mkt-81",
+                    "slug":         "highest-temperature-in-nyc-on-june-5-2026-81forbelow",
+                    "conditionId":  "cond-81",
+                    "clobTokenIds": json.dumps(["tok-81-yes", "tok-81-no"]),
+                    "outcomes":     json.dumps(["Yes", "No"]),
+                },
+                {
+                    "id":           "mkt-100",
+                    "slug":         "highest-temperature-in-nyc-on-june-5-2026-100forhigher",
+                    "conditionId":  "cond-100",
+                    "clobTokenIds": json.dumps(["tok-100-yes", "tok-100-no"]),
+                    "outcomes":     json.dumps(["Yes", "No"]),
+                },
+            ],
+        }
+    ]
+
+    with patch.object(disc, "_fetch_events", return_value=response):
+        result = disc.discover({"active": "true"})
+
+    assert result[0]["station_id"] == "KLGA"
+    slugs_to_buckets = {
+        m["market_slug"]: (m["lo_f"], m["hi_f"])
+        for m in result[0]["markets"]
+    }
+    assert slugs_to_buckets[
+        "highest-temperature-in-nyc-on-june-5-2026-81forbelow"
+    ] == (float("-inf"), 81.0)
+    assert slugs_to_buckets[
+        "highest-temperature-in-nyc-on-june-5-2026-100forhigher"
+    ] == (100.0, float("inf"))
+
+
 def test_discover_skips_non_matching_event(mem_db):
     settings = _make_settings()
     disc     = EventDiscovery(db=mem_db, settings=settings)
@@ -247,6 +297,25 @@ def test_discover_fetch_events_raises_on_http_error(mem_db):
         )
         with pytest.raises(RuntimeError, match="Gamma API"):
             disc.discover()
+
+
+def test_sdk_list_events_params_passes_slug_and_page_size():
+    params = EventDiscovery._sdk_list_events_params({
+        "slug": "highest-temperature-in-nyc-on-june-5-2026",
+        "page_size": "20",
+    })
+
+    assert params == {
+        "slug": "highest-temperature-in-nyc-on-june-5-2026",
+        "page_size": 20,
+    }
+
+
+def test_sdk_list_events_params_maps_active_to_closed_false():
+    params = EventDiscovery._sdk_list_events_params({"active": "true"})
+
+    assert params["closed"] is False
+    assert params["page_size"] == 100
 
 
 def test_discover_idempotent(mem_db):
@@ -348,6 +417,13 @@ def test_infer_station_matches_laguardia_alias(mem_db):
     """'laguardia' alias maps to KLGA."""
     disc = EventDiscovery(db=mem_db, settings=_make_settings())
     station = disc._infer_station("highest-temp-at-laguardia-2026-06-01")
+    assert station == "KLGA"
+
+
+def test_infer_station_matches_nyc_alias(mem_db):
+    """Polymarket uses NYC in event slugs for KLGA weather markets."""
+    disc = EventDiscovery(db=mem_db, settings=_make_settings())
+    station = disc._infer_station("highest-temperature-in-nyc-on-june-5-2026")
     assert station == "KLGA"
 
 

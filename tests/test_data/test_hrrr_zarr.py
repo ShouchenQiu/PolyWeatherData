@@ -163,6 +163,42 @@ def test_zarr_base_url_override():
     assert src._base_url == "https://custom-zarr.example.com/sfc"
 
 
+def test_default_hrrrzarr_url_uses_s3_anon_mapper():
+    """The public hrrrzarr bucket should use s3fs anon, not slow HTTPS mapping."""
+    import data.forecast.hrrr_zarr as _mod
+
+    fs = MagicMock()
+    fsspec_mod = MagicMock()
+    fsspec_mod.filesystem.return_value = fs
+
+    with patch.object(_mod, "_fsspec", fsspec_mod):
+        mapper = _mod._mapper_for_url(
+            "https://hrrrzarr.s3.amazonaws.com/sfc/20260603/20260603_00z_fcst.zarr"
+        )
+
+    fsspec_mod.filesystem.assert_called_once_with("s3", anon=True)
+    fs.get_mapper.assert_called_once_with(
+        "s3://hrrrzarr/sfc/20260603/20260603_00z_fcst.zarr"
+    )
+    assert mapper == fs.get_mapper.return_value
+
+
+def test_custom_zarr_url_uses_plain_fsspec_mapper():
+    """Custom base_url overrides keep their original fsspec mapping behavior."""
+    import data.forecast.hrrr_zarr as _mod
+
+    fsspec_mod = MagicMock()
+
+    with patch.object(_mod, "_fsspec", fsspec_mod):
+        mapper = _mod._mapper_for_url("https://custom-zarr.example.com/sfc/test.zarr")
+
+    fsspec_mod.get_mapper.assert_called_once_with(
+        "https://custom-zarr.example.com/sfc/test.zarr"
+    )
+    fsspec_mod.filesystem.assert_not_called()
+    assert mapper == fsspec_mod.get_mapper.return_value
+
+
 # ---------------------------------------------------------------------------
 # Non-MAJOR nearest-fail: is_extrapolated must still be present
 # ---------------------------------------------------------------------------

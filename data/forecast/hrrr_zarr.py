@@ -41,6 +41,7 @@ except ImportError:
     _zarr = None  # type: ignore[assignment]
 
 _ZARR_DEFAULT_BASE = "https://hrrrzarr.s3.amazonaws.com/sfc"
+_ZARR_S3_BASE = "s3://hrrrzarr/sfc"
 
 # DATA_COLS / ZARR_VARS consistency guard: fail at module load if they diverge.
 assert set(DATA_COLS) == set(ZARR_VARS.keys()), (
@@ -56,6 +57,24 @@ def _navigate(root: object, zarr_path: str) -> object:
     for part in zarr_path.split("/"):
         node = node[part]  # type: ignore[index]
     return node
+
+
+def _mapper_for_url(url: str) -> object:
+    """Return an fsspec mapper for HRRR Zarr stores.
+
+    The public hrrrzarr bucket is much faster through s3fs anonymous access
+    than through the HTTPS mapper, which can spend tens of seconds opening
+    metadata before any variable read begins.
+    """
+    if _fsspec is None:
+        raise ImportError(
+            "fsspec is required for HrrrZarrSource. "
+            "Install with: pip install fsspec s3fs"
+        )
+    if url.startswith(_ZARR_DEFAULT_BASE):
+        s3_url = _ZARR_S3_BASE + url[len(_ZARR_DEFAULT_BASE):]
+        return _fsspec.filesystem("s3", anon=True).get_mapper(s3_url)
+    return _fsspec.get_mapper(url)
 
 
 class HrrrZarrSource(BaseForecastSource):
@@ -139,8 +158,8 @@ class HrrrZarrSource(BaseForecastSource):
         url_anl  = f"{self._base_url}/{date_str}/{date_str}_{hh:02d}z_anl.zarr"
         url_fcst = f"{self._base_url}/{date_str}/{date_str}_{hh:02d}z_fcst.zarr"
 
-        z_anl  = _zarr.open_group(_fsspec.get_mapper(url_anl),  mode="r")
-        z_fcst = _zarr.open_group(_fsspec.get_mapper(url_fcst), mode="r")
+        z_anl  = _zarr.open_group(_mapper_for_url(url_anl),  mode="r")
+        z_fcst = _zarr.open_group(_mapper_for_url(url_fcst), mode="r")
 
         # How many forecast steps are actually in the fcst store?
         # Fail fast if TMP_2m shape cannot be read -- no hardcoded fallback.
@@ -279,4 +298,3 @@ class HrrrZarrSource(BaseForecastSource):
         df = pd.DataFrame(rows)
         df["is_extrapolated"] = False
         return {station.station_id: df}
-

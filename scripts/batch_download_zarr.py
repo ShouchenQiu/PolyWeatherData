@@ -84,6 +84,7 @@ _MAJOR_HOURS = frozenset({0, 6, 12, 18})
 _FXX_MAJOR   = 48
 _FXX_OFFHOUR = 18
 _BASE_URL     = "https://hrrrzarr.s3.amazonaws.com/sfc"
+_S3_BASE      = "s3://hrrrzarr/sfc"
 _SAVE_EVERY   = 24    # checkpoint after this many completed inits
 
 
@@ -93,6 +94,14 @@ def _navigate(z: Any, zarr_path: str) -> Any:
     for part in zarr_path.split("/"):
         node = node[part]
     return node
+
+
+def _mapper_for_url(fsspec_mod: Any, url: str) -> Any:
+    """Use anonymous S3 for the public hrrrzarr bucket."""
+    if url.startswith(_BASE_URL):
+        s3_url = _S3_BASE + url[len(_BASE_URL):]
+        return fsspec_mod.filesystem("s3", anon=True).get_mapper(s3_url)
+    return fsspec_mod.get_mapper(url)
 
 
 def _fetch_init(
@@ -113,8 +122,8 @@ def _fetch_init(
 
     url_anl  = f"{_BASE_URL}/{date_str}/{date_str}_{hh:02d}z_anl.zarr"
     url_fcst = f"{_BASE_URL}/{date_str}/{date_str}_{hh:02d}z_fcst.zarr"
-    z_anl  = _zarr.open_group(fsspec.get_mapper(url_anl),  mode="r")
-    z_fcst = _zarr.open_group(fsspec.get_mapper(url_fcst), mode="r")
+    z_anl  = _zarr.open_group(_mapper_for_url(fsspec, url_anl),  mode="r")
+    z_fcst = _zarr.open_group(_mapper_for_url(fsspec, url_fcst), mode="r")
 
     # Detect actual available forecast steps
     try:
