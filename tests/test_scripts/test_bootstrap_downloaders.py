@@ -10,13 +10,14 @@ from scripts.batch_download_zarr import BatchZarrDownloader
 
 class FakeForecastSource:
     def __init__(self) -> None:
-        self.calls: list[pd.Timestamp] = []
+        self.calls: list[tuple[pd.Timestamp, list[int]]] = []
 
     def fetch(self, init_time, fxx_range, station):
         init = pd.Timestamp(init_time).tz_convert("UTC")
-        self.calls.append(init)
+        fxx_values = list(fxx_range)
+        self.calls.append((init, fxx_values))
         rows = []
-        for fxx in range(0, 49):
+        for fxx in fxx_values:
             rows.append(
                 {
                     "init_time": init,
@@ -79,7 +80,9 @@ def test_batch_zarr_bootstrap_writes_canonical_f01_store(tmp_path):
         pd.Timestamp("2026-01-02", tz="UTC"),
     )
     assert written == 1
-    assert source.calls == [pd.Timestamp("2026-01-01 00:00:00", tz="UTC")]
+    assert source.calls == [
+        (pd.Timestamp("2026-01-01 00:00:00", tz="UTC"), [1])
+    ]
     assert list(df["fxx"]) == [1]
     assert df["TMP_2m"].iloc[0] == 1.0
     assert "WS_10m" in df.columns

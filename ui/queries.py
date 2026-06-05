@@ -72,6 +72,25 @@ MARKET_LADDER_COLUMNS = (
     "depth_ask",
 )
 
+EVENT_TRACE_COLUMNS = (
+    "condition_id",
+    "station_id",
+    "event_end_date",
+    "market_id",
+    "market_slug",
+    "bucket_lo_f",
+    "bucket_hi_f",
+    "outcome",
+    "discovery_status",
+    "price_tick_utc",
+    "best_bid",
+    "best_ask",
+    "mid_price",
+    "spread",
+    "depth_bid",
+    "depth_ask",
+)
+
 MODEL_VERSION_COLUMNS = (
     "version",
     "checkpoint_path",
@@ -220,6 +239,15 @@ def market_ladder(db: "DbClient", condition_id: str | None = None) -> pd.DataFra
         params.append(condition_id)
     sql += " ORDER BY e.event_end_date DESC, m.bucket_lo_f, m.outcome"
     return _ensure_columns(_df(db.query(sql, tuple(params))), MARKET_LADDER_COLUMNS)
+
+
+def event_trace_ladder(db: "DbClient", condition_id: str) -> pd.DataFrame:
+    """Return event market/CLOB rows safe for UI display."""
+    ladder = market_ladder(db, condition_id=condition_id)
+    return _ensure_columns(
+        ladder.drop(columns=["token_id"], errors="ignore"),
+        EVENT_TRACE_COLUMNS,
+    )
 
 
 def forecast_bucket_history(

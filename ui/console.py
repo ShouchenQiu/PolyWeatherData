@@ -28,7 +28,8 @@ def _get_db() -> DbClient:
 
 PAGES = [
     "Home",
-    "Data Health",
+    "Event Trace",
+    "Data Ingestion",
     "Training",
     "Forecast & Model",
     "MC / Backtest",
@@ -53,7 +54,11 @@ if page == "Home":
     from ui.pages import console_home
     console_home.render(db)
 
-elif page == "Data Health":
+elif page == "Event Trace":
+    from ui.pages import console_event_trace
+    console_event_trace.render(db)
+
+elif page == "Data Ingestion":
     from ui.pages import data_health
     data_health.render(db)
 

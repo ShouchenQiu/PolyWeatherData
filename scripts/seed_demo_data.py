@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ import pandas as pd
 
 from config.settings import Settings
 from config.stations import STATIONS
+from data.clob.orderbook import OrderbookFetcher
 from data.storage.parquet_store import ParquetStore
 from db.schema import DbClient
 from events.discovery import EventDiscovery
@@ -46,7 +48,7 @@ def seed_demo(
     demo_dir: Path | str = Path(".demo"),
     station_id: str = "KLGA",
     seed_date: str | None = None,
-    init_hour: int = 0,
+    init_hour: int | None = 0,
     polymarket_slug: str | None = None,
     dry_run: bool = False,
     skip_polymarket: bool = False,
@@ -55,6 +57,7 @@ def seed_demo(
     discovery_cls: Any = EventDiscovery,
     zarr_downloader_cls: Any = BatchZarrDownloader,
     iem_downloader_cls: Any = BatchIemDownloader,
+    public_client_cls: Any | None = None,
 ) -> dict:
     """Create a demo DB plus tiny HRRR/IEM stores and return a row-count summary."""
     demo_root = Path(demo_dir)
@@ -86,35 +89,59 @@ def seed_demo(
         hrrr_store = ParquetStore(settings.forecast_store_dir)
         obs_store = ParquetStore(settings.obs_store_dir)
         skipped = []
+        timings: dict[str, dict[str, Any]] = {}
 
         if skip_polymarket:
             discovered = []
             skipped.append("polymarket")
+            timings["polymarket"] = _timing(0.0, 0, 0)
         else:
-            discovery = discovery_cls(db, settings)
-            discovery_params = (
-                {"slug": polymarket_slug}
-                if polymarket_slug
-                else {"active": "true"}
-            )
-            discovered = discovery.discover(discovery_params)
+            t0 = time.perf_counter()
+            try:
+                discovery = discovery_cls(db, settings)
+                discovery_params = (
+                    {"slug": polymarket_slug}
+                    if polymarket_slug
+                    else {"active": "true"}
+                )
+                discovered = discovery.discover(discovery_params)
+                timings["polymarket"] = _timing(time.perf_counter() - t0, len(discovered), 0)
+            except Exception:
+                timings["polymarket"] = _timing(time.perf_counter() - t0, 0, 1)
+                raise
             _activate_demo_events(db)
+
+        if skip_polymarket:
+            clob_written = 0
+            timings["clob"] = _timing(0.0, 0, 0)
+        else:
+            clob_written, clob_errors, clob_elapsed = _seed_clob_snapshots(
+                db,
+                public_client_cls=public_client_cls,
+            )
+            timings["clob"] = _timing(clob_elapsed, clob_written, clob_errors)
 
         if skip_hrrr:
             hrrr_written = 0
             skipped.append("hrrr")
+            timings["hrrr"] = _timing(0.0, 0, 0)
         else:
+            t0 = time.perf_counter()
             zarr = zarr_downloader_cls(
                 hrrr_store,
                 station_config=station,
                 max_workers=1,
             )
-            hrrr_written = zarr.run(day, day, init_hours=[init_hour])
+            hrrr_init_hours = None if init_hour is None else [init_hour]
+            hrrr_written = zarr.run(day, day, init_hours=hrrr_init_hours)
+            timings["hrrr"] = _timing(time.perf_counter() - t0, hrrr_written, 0)
 
         if skip_iem:
             obs_written = 0
             skipped.append("iem")
+            timings["iem"] = _timing(0.0, 0, 0)
         else:
+            t0 = time.perf_counter()
             iem = iem_downloader_cls(
                 obs_store,
                 station_config=station,
@@ -122,19 +149,26 @@ def seed_demo(
             )
             iem_station = station.station_id[1:] if station.station_id.startswith("K") else station.station_id
             obs_written = iem.run(day, day, station=iem_station, network=station.iem_network)
+            timings["iem"] = _timing(time.perf_counter() - t0, obs_written, 0)
 
         summary = {
             **plan,
             "discovered": len(discovered),
+            "clob_written": clob_written,
             "hrrr_written": hrrr_written,
             "obs_written": obs_written,
             "skipped": skipped,
+            "timings": timings,
             "tables": _table_counts(db),
             "stores": {
                 "hrrr": _store_summary(hrrr_store, station.station_id),
                 "obs": _store_summary(obs_store, station.station_id),
             },
         }
+        (demo_root / "seed_summary.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True),
+            encoding="ascii",
+        )
         print(json.dumps(summary, indent=2, sort_keys=True))
         return summary
     finally:
@@ -159,6 +193,66 @@ def _activate_demo_events(db: DbClient) -> None:
             db.update_event_status(str(ev["condition_id"]), "active")
 
 
+def _timing(elapsed_seconds: float, rows_written: int, errors: int) -> dict[str, Any]:
+    return {
+        "elapsed_seconds": float(elapsed_seconds),
+        "rows_written": int(rows_written),
+        "errors": int(errors),
+        "rows_per_second": (
+            float(rows_written) / elapsed_seconds
+            if elapsed_seconds > 0
+            else 0.0
+        ),
+    }
+
+
+def _seed_clob_snapshots(
+    db: DbClient,
+    public_client_cls: Any | None = None,
+) -> tuple[int, int, float]:
+    t0 = time.perf_counter()
+    try:
+        client_cls = public_client_cls
+        if client_cls is None:
+            try:
+                from polymarket import PublicClient as client_cls  # type: ignore[assignment,import-untyped]
+            except ImportError:
+                from polymarket_client import PublicClient as client_cls  # type: ignore[assignment,import-untyped]
+        fetcher = OrderbookFetcher(client_cls())
+    except Exception:
+        return 0, 1, time.perf_counter() - t0
+
+    rows = db.query(
+        "SELECT token_id, condition_id FROM markets WHERE discovery_status='parsed'"
+    )
+    tick_utc = datetime.now(timezone.utc).isoformat()
+    written = 0
+    errors = 0
+    for row in rows:
+        try:
+            book = fetcher.get_book(str(row["token_id"]))
+            spread = (
+                book["best_ask"] - book["best_bid"]
+                if book.get("best_bid") is not None and book.get("best_ask") is not None
+                else None
+            )
+            db.record_market_price_snapshot(
+                str(row["token_id"]),
+                str(row["condition_id"]),
+                tick_utc,
+                best_bid=book.get("best_bid"),
+                best_ask=book.get("best_ask"),
+                mid_price=book.get("mid_price"),
+                spread=spread,
+                depth_bid=sum(float(level.get("size", 0.0)) for level in book.get("bids", [])),
+                depth_ask=sum(float(level.get("size", 0.0)) for level in book.get("asks", [])),
+            )
+            written += 1
+        except Exception:
+            errors += 1
+    return written, errors, time.perf_counter() - t0
+
+
 def _store_summary(store: ParquetStore, station_id: str) -> dict[str, Any]:
     df = store.read(
         station_id,
@@ -179,6 +273,11 @@ def _cli() -> None:
     parser.add_argument("--date", default=None, help="UTC date YYYY-MM-DD; default yesterday")
     parser.add_argument("--init-hour", type=int, default=0)
     parser.add_argument(
+        "--all-init-hours",
+        action="store_true",
+        help="Download all 24 HRRR init hours for the selected date",
+    )
+    parser.add_argument(
         "--polymarket-slug",
         default=None,
         help="Optional exact Gamma event slug for deterministic Polymarket seeding",
@@ -193,7 +292,7 @@ def _cli() -> None:
         demo_dir=Path(args.demo_dir),
         station_id=args.station,
         seed_date=args.date,
-        init_hour=args.init_hour,
+        init_hour=None if args.all_init_hours else args.init_hour,
         polymarket_slug=args.polymarket_slug,
         dry_run=args.dry_run,
         skip_polymarket=args.skip_polymarket,

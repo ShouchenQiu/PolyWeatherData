@@ -19,6 +19,7 @@ Architecture notes
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -42,6 +43,7 @@ except ImportError:
 
 _ZARR_DEFAULT_BASE = "https://hrrrzarr.s3.amazonaws.com/sfc"
 _ZARR_S3_BASE = "s3://hrrrzarr/sfc"
+_VAR_READ_THREADS = 12
 
 # DATA_COLS / ZARR_VARS consistency guard: fail at module load if they diverge.
 assert set(DATA_COLS) == set(ZARR_VARS.keys()), (
@@ -158,76 +160,137 @@ class HrrrZarrSource(BaseForecastSource):
         url_anl  = f"{self._base_url}/{date_str}/{date_str}_{hh:02d}z_anl.zarr"
         url_fcst = f"{self._base_url}/{date_str}/{date_str}_{hh:02d}z_fcst.zarr"
 
-        z_anl  = _zarr.open_group(_mapper_for_url(url_anl),  mode="r")
-        z_fcst = _zarr.open_group(_mapper_for_url(url_fcst), mode="r")
+        requested_fxx = sorted({int(fxx) for fxx in fxx_range})
+        if not requested_fxx:
+            return {station.station_id: pd.DataFrame()}
+
+        wants_anl = 0 in requested_fxx
+        wants_fcst = any(fxx > 0 for fxx in requested_fxx)
+
+        z_anl = None
+        z_fcst = None
+        tmp_fcst = None
+        n_fcst_steps = 0
+
+        if wants_anl:
+            z_anl = _zarr.open_group(_mapper_for_url(url_anl), mode="r")
 
         # How many forecast steps are actually in the fcst store?
         # Fail fast if TMP_2m shape cannot be read -- no hardcoded fallback.
-        try:
-            tmp_fcst = _navigate(z_fcst, ZARR_VARS["TMP_2m"])
-            n_fcst_steps = int(tmp_fcst.shape[0])  # type: ignore[union-attr]
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(
-                f"HrrrZarrSource: failed to probe TMP_2m shape for "
-                f"init={init_utc}: {exc}"
-            ) from exc
+        if wants_fcst:
+            z_fcst = _zarr.open_group(_mapper_for_url(url_fcst), mode="r")
+            try:
+                tmp_fcst = _navigate(z_fcst, ZARR_VARS["TMP_2m"])
+                raw_fcst_steps = int(tmp_fcst.shape[0])  # type: ignore[union-attr]
+                max_native = 48 if is_major else 18
+                n_fcst_steps = min(raw_fcst_steps, max_native)
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"HrrrZarrSource: failed to probe TMP_2m shape for "
+                    f"init={init_utc}: {exc}"
+                ) from exc
 
-        # Grid bounds check
-        fcst_shape = tmp_fcst.shape  # type: ignore[union-attr]
-        if row_idx >= fcst_shape[1] or col_idx >= fcst_shape[2]:
-            raise ValueError(
-                f"HrrrZarrSource: station {station.station_id!r} grid indices "
-                f"({row_idx}, {col_idx}) out of bounds for zarr shape "
-                f"{fcst_shape[1]}x{fcst_shape[2]}"
-            )
+            # Grid bounds check
+            fcst_shape = tmp_fcst.shape  # type: ignore[union-attr]
+            if row_idx >= fcst_shape[1] or col_idx >= fcst_shape[2]:
+                raise ValueError(
+                    f"HrrrZarrSource: station {station.station_id!r} grid indices "
+                    f"({row_idx}, {col_idx}) out of bounds for zarr shape "
+                    f"{fcst_shape[1]}x{fcst_shape[2]}"
+                )
+
+        needs_fill = (
+            not is_major
+            and wants_fcst
+            and max((fxx for fxx in requested_fxx if fxx > 0), default=0) > n_fcst_steps
+        )
+        if needs_fill:
+            wants_anl = True
+
+        if wants_anl and z_anl is None:
+            z_anl = _zarr.open_group(_mapper_for_url(url_anl), mode="r")
 
         # Read fxx=0 from _anl.zarr (2D arrays, no time dimension)
         anl_vals: dict[str, float] = {}
-        for col, zarr_path in ZARR_VARS.items():
-            try:
-                arr = _navigate(z_anl, zarr_path)
-                anl_vals[col] = float(arr[row_idx, col_idx])  # type: ignore[index]
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "HrrrZarrSource: failed to read anl col={} station={} "
-                    "zarr_path={} url={}: {}",
-                    col, station.station_id, zarr_path, url_anl, exc,
-                )
-                if col == "TMP_2m":
-                    raise RuntimeError(
-                        f"HrrrZarrSource: critical variable TMP_2m failed for "
-                        f"station={station.station_id} init={init_utc}: {exc}"
-                    ) from exc
-                anl_vals[col] = (
-                    0.0 if ("APCP" in col or "PRATE" in col) else float("nan")
-                )
+        if z_anl is not None:
+            def read_anl_col(col: str, zarr_path: str) -> tuple[str, float]:
+                try:
+                    arr = _navigate(z_anl, zarr_path)
+                    return col, float(arr[row_idx, col_idx])  # type: ignore[index]
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "HrrrZarrSource: failed to read anl col={} station={} "
+                        "zarr_path={} url={}: {}",
+                        col, station.station_id, zarr_path, url_anl, exc,
+                    )
+                    if col == "TMP_2m":
+                        raise RuntimeError(
+                            f"HrrrZarrSource: critical variable TMP_2m failed for "
+                            f"station={station.station_id} init={init_utc}: {exc}"
+                        ) from exc
+                    return (
+                        col,
+                        0.0 if ("APCP" in col or "PRATE" in col) else float("nan"),
+                    )
+
+            with ThreadPoolExecutor(max_workers=_VAR_READ_THREADS) as pool:
+                futures = [
+                    pool.submit(read_anl_col, col, zarr_path)
+                    for col, zarr_path in ZARR_VARS.items()
+                ]
+                for fut in as_completed(futures):
+                    col, val = fut.result()
+                    anl_vals[col] = val
 
         # Read fxx=1..n_fcst_steps from _fcst.zarr (3D arrays)
-        fcst_vals: dict[str, np.ndarray] = {}
-        for col, zarr_path in ZARR_VARS.items():
-            try:
-                arr = _navigate(z_fcst, zarr_path)
-                fcst_vals[col] = np.asarray(
-                    arr[:n_fcst_steps, row_idx, col_idx],  # type: ignore[index]
-                    dtype=np.float32,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "HrrrZarrSource: failed to read fcst col={} station={} "
-                    "zarr_path={} url={}: {}",
-                    col, station.station_id, zarr_path, url_fcst, exc,
-                )
-                if col == "TMP_2m":
-                    raise RuntimeError(
-                        f"HrrrZarrSource: critical variable TMP_2m failed for "
-                        f"station={station.station_id} init={init_utc}: {exc}"
-                    ) from exc
-                fcst_vals[col] = np.full(n_fcst_steps, np.nan, dtype=np.float32)
+        fcst_fxx = [
+            fxx
+            for fxx in (range(1, n_fcst_steps + 1) if needs_fill else requested_fxx)
+            if 1 <= fxx <= n_fcst_steps
+        ]
+        fcst_vals: dict[str, dict[int, float]] = {}
+        if z_fcst is not None and fcst_fxx:
+            start_idx = min(fcst_fxx) - 1
+            stop_idx = max(fcst_fxx)
 
-        if not is_major:
+            def read_fcst_col(col: str, zarr_path: str) -> tuple[str, dict[int, float]]:
+                try:
+                    arr = _navigate(z_fcst, zarr_path)
+                    vals = np.atleast_1d(
+                        np.asarray(
+                            arr[start_idx:stop_idx, row_idx, col_idx],  # type: ignore[index]
+                            dtype=np.float32,
+                        )
+                    )
+                    return col, {
+                        fxx: float(vals[fxx - 1 - start_idx]) for fxx in fcst_fxx
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "HrrrZarrSource: failed to read fcst col={} station={} "
+                        "zarr_path={} url={}: {}",
+                        col, station.station_id, zarr_path, url_fcst, exc,
+                    )
+                    if col == "TMP_2m":
+                        raise RuntimeError(
+                            f"HrrrZarrSource: critical variable TMP_2m failed for "
+                            f"station={station.station_id} init={init_utc}: {exc}"
+                        ) from exc
+                    return col, {fxx: float("nan") for fxx in fcst_fxx}
+
+            with ThreadPoolExecutor(max_workers=_VAR_READ_THREADS) as pool:
+                futures = [
+                    pool.submit(read_fcst_col, col, zarr_path)
+                    for col, zarr_path in ZARR_VARS.items()
+                ]
+                for fut in as_completed(futures):
+                    col, vals = fut.result()
+                    fcst_vals[col] = vals
+
+        if needs_fill:
             # Build an 18h DataFrame and splice to 48h via HrrrFill
             rows = []
-            for fxx in range(0, 19):
+            for fxx in range(0, n_fcst_steps + 1):
                 row: dict = {
                     "init_time": str(init_utc),
                     "fxx": fxx,
@@ -238,8 +301,8 @@ class HrrrZarrSource(BaseForecastSource):
                         row[col] = anl_vals.get(col, float("nan"))
                 elif 1 <= fxx <= n_fcst_steps:
                     for col in DATA_COLS:
-                        vals = fcst_vals.get(col)
-                        row[col] = float(vals[fxx - 1]) if vals is not None else float("nan")
+                        vals = fcst_vals.get(col, {})
+                        row[col] = vals.get(fxx, float("nan"))
                 else:
                     for col in DATA_COLS:
                         row[col] = float("nan")
@@ -273,11 +336,14 @@ class HrrrZarrSource(BaseForecastSource):
                 prior_df = None
 
             filled = self._hrrr_fill.fill(non_major_df, nearest_df, prior_df)
+            filled = filled[filled["fxx"].isin(requested_fxx)].reset_index(drop=True)
             return {station.station_id: filled}
 
-        # MAJOR init: build rows for the requested fxx values
+        # Build rows for the requested native fxx values.  Values beyond the
+        # native store range stay NaN for MAJOR runs; non-MAJOR tail requests
+        # are handled by the fill branch above.
         rows = []
-        for fxx in fxx_range:
+        for fxx in requested_fxx:
             row = {
                 "init_time": str(init_utc),
                 "fxx": fxx,
@@ -288,8 +354,8 @@ class HrrrZarrSource(BaseForecastSource):
                     row[col] = anl_vals.get(col, float("nan"))
             elif 1 <= fxx <= n_fcst_steps:
                 for col in DATA_COLS:
-                    vals = fcst_vals.get(col)
-                    row[col] = float(vals[fxx - 1]) if vals is not None else float("nan")
+                    vals = fcst_vals.get(col, {})
+                    row[col] = vals.get(fxx, float("nan"))
             else:
                 for col in DATA_COLS:
                     row[col] = float("nan")

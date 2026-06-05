@@ -36,6 +36,12 @@ _DUPLICATE_IDX = """\
 2:12345:d=2026010100:TMP:2 m above ground:1 hour fcst:
 """
 
+_APCP_MULTI_ACCUM_IDX = """\
+1:0:d=2026060303:APCP:surface:0-2 hour acc fcst:
+2:12345:d=2026060303:APCP:surface:1-2 hour acc fcst:
+3:24690:d=2026060303:TMP:2 m above ground:2 hour fcst:
+"""
+
 _STATION = MagicMock()
 _STATION.station_id = "KLGA"
 _STATION.lat = 40.7769
@@ -135,6 +141,14 @@ def test_parse_idx_raises_on_duplicate_colname():
     src = HrrrS3Source()
     with pytest.raises(ValueError, match="duplicate"):
         src._parse_idx(_DUPLICATE_IDX)
+
+
+def test_parse_idx_apcp_prefers_one_hour_accumulation():
+    """APCP has total and 1-hour accumulations; use the 1-hour window."""
+    src = HrrrS3Source()
+    targets = src._parse_idx(_APCP_MULTI_ACCUM_IDX)
+    by_col = {t[2]: (t[0], t[1]) for t in targets}
+    assert by_col["APCP"] == (12345, 24689)
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +386,25 @@ def test_fetch_fxx_values_correct():
             _STATION,
         )
     assert list(result["KLGA"]["fxx"]) == [0, 1, 2, 3, 4]
+
+
+def test_non_major_native_fxx_range_does_not_trigger_splice():
+    """Non-MAJOR fxx that exists natively should respect caller fxx_range."""
+    src = HrrrS3Source()
+    native = {"KLGA": pd.DataFrame([{"fxx": 1, "is_extrapolated": False}])}
+
+    with patch.object(src, "_fetch_all_stations", return_value=native) as fetch_all:
+        result = src.fetch(
+            pd.Timestamp("2026-01-01 03:00", tz="UTC"),
+            range(1, 2),
+            _STATION,
+        )
+
+    assert result is native
+    assert fetch_all.call_count == 1
+    args = fetch_all.call_args.args
+    assert args[0] == pd.Timestamp("2026-01-01 03:00", tz="UTC")
+    assert list(args[1]) == [1]
 
 
 # ---------------------------------------------------------------------------

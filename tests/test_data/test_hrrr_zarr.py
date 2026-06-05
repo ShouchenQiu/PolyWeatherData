@@ -42,7 +42,14 @@ def _make_zarr_mocks(
 
     fcst_arr = MagicMock()
     fcst_arr.shape = (n_fcst, row_shape, col_shape)
-    fcst_arr.__getitem__ = lambda self, idx: np.full(n_fcst, 280.0)
+
+    def _fcst_getitem(self, idx):
+        vals = np.full(n_fcst, 280.0)
+        if isinstance(idx, tuple):
+            return vals[idx[0]]
+        return vals[idx]
+
+    fcst_arr.__getitem__ = _fcst_getitem
 
     def make_navigate(fail_tmp2m: bool):
         def _navigate(root, path):
@@ -199,6 +206,57 @@ def test_custom_zarr_url_uses_plain_fsspec_mapper():
     assert mapper == fsspec_mod.get_mapper.return_value
 
 
+def test_zarr_f01_only_skips_analysis_store():
+    """Canonical f01 bootstrap should not pay to open/read fxx=0 analysis data."""
+    import data.forecast.hrrr_zarr as _mod
+
+    _z_anl, z_fcst, navigate_fn = _make_zarr_mocks()
+
+    with (
+        patch.object(_mod, "_zarr", MagicMock()),
+        patch.object(_mod, "_fsspec", MagicMock()),
+        patch.object(_mod, "_navigate", navigate_fn),
+    ):
+        _mod._zarr.open_group.return_value = z_fcst
+        src = _mod.HrrrZarrSource()
+        result = src.fetch(
+            pd.Timestamp("2026-01-01 06:00", tz="UTC"),
+            range(1, 2),
+            _STATION,
+        )
+        open_group_call_count = _mod._zarr.open_group.call_count
+
+    df = result["KLGA"]
+    assert list(df["fxx"]) == [1]
+    assert open_group_call_count == 1
+
+
+def test_zarr_non_major_f01_only_does_not_fetch_major_fill():
+    """Off-hour f01 exists natively and should not trigger expensive MAJOR recursion."""
+    import data.forecast.hrrr_zarr as _mod
+
+    _z_anl, z_fcst, navigate_fn = _make_zarr_mocks(n_fcst=18)
+
+    with (
+        patch.object(_mod, "_zarr", MagicMock()),
+        patch.object(_mod, "_fsspec", MagicMock()),
+        patch.object(_mod, "_navigate", navigate_fn),
+    ):
+        _mod._zarr.open_group.return_value = z_fcst
+        src = _mod.HrrrZarrSource()
+        result = src.fetch(
+            pd.Timestamp("2026-01-01 03:00", tz="UTC"),
+            range(1, 2),
+            _STATION,
+        )
+        open_group_call_count = _mod._zarr.open_group.call_count
+
+    df = result["KLGA"]
+    assert list(df["fxx"]) == [1]
+    assert (df["is_extrapolated"] == False).all()  # noqa: E712
+    assert open_group_call_count == 1
+
+
 # ---------------------------------------------------------------------------
 # Non-MAJOR nearest-fail: is_extrapolated must still be present
 # ---------------------------------------------------------------------------
@@ -215,7 +273,7 @@ def test_zarr_non_major_nearest_fail_has_is_extrapolated():
     """
     import data.forecast.hrrr_zarr as _mod
 
-    z_anl, z_fcst, navigate_fn = _make_zarr_mocks()
+    z_anl, z_fcst, navigate_fn = _make_zarr_mocks(n_fcst=18)
 
     with (
         patch.object(_mod, "_zarr", MagicMock()),
@@ -237,7 +295,7 @@ def test_zarr_non_major_nearest_fail_has_is_extrapolated():
         src = _mod.HrrrZarrSource()
         result = src.fetch(
             pd.Timestamp("2026-01-01 03:00", tz="UTC"),
-            range(0, 5),
+            range(0, 49),
             _STATION,
         )
 

@@ -52,6 +52,20 @@ _RETRY_BACKOFF = 1.5
 _NON_MAJOR_FXX = range(0, 19)   # non-MAJOR runs have fxx 0-18 only
 
 
+def _is_one_hour_accum(desc: str) -> bool:
+    """Return True for descriptors like '1-2 hour acc fcst'."""
+    if "hour acc fcst" not in desc:
+        return False
+    window = desc.split(" ", 1)[0]
+    if "-" not in window:
+        return False
+    start_str, end_str = window.split("-", 1)
+    try:
+        return int(end_str) - int(start_str) == 1
+    except ValueError:
+        return False
+
+
 def _make_session() -> requests.Session:
     sess = requests.Session()
     adapter = HTTPAdapter(
@@ -149,8 +163,7 @@ class BaseGribSource(BaseForecastSource):
                 except ValueError:
                     pass
 
-        targets: list[tuple[int, int | None, str]] = []
-        seen_colnames: set[str] = set()
+        matched: list[tuple[int, int | None, str, str, str, str, int]] = []
 
         for i, (off, var_field, level_field, desc_field) in enumerate(
             zip(offsets, var_fields, level_fields, desc_fields)
@@ -162,16 +175,34 @@ class BaseGribSource(BaseForecastSource):
                     continue
                 if s_desc is not None and desc_field != s_desc:
                     continue
-                if colname in seen_colnames:
-                    raise ValueError(
-                        f"_grib_source: duplicate .idx rows for column "
-                        f"'{colname}' -- matched "
-                        f"'{var_field}:{level_field}:{desc_field}'"
-                    )
-                seen_colnames.add(colname)
-                targets.append((off, end, colname))
+                matched.append(
+                    (off, end, colname, var_field, level_field, desc_field, i)
+                )
                 break
-        return targets
+
+        by_col: dict[str, list[tuple[int, int | None, str, str, str, str, int]]] = {}
+        for item in matched:
+            by_col.setdefault(item[2], []).append(item)
+
+        resolved: list[tuple[int, int | None, str, int]] = []
+        for colname, items in by_col.items():
+            if len(items) == 1:
+                off, end, col, *_rest, idx = items[0]
+                resolved.append((off, end, col, idx))
+                continue
+            if colname == "APCP":
+                one_hour = [item for item in items if _is_one_hour_accum(item[5])]
+                if len(one_hour) == 1:
+                    off, end, col, *_rest, idx = one_hour[0]
+                    resolved.append((off, end, col, idx))
+                    continue
+            _off, _end, _col, var_field, level_field, desc_field, _idx = items[-1]
+            raise ValueError(
+                f"_grib_source: duplicate .idx rows for column "
+                f"'{colname}' -- matched "
+                f"'{var_field}:{level_field}:{desc_field}'"
+            )
+        return [(off, end, col) for off, end, col, _idx in sorted(resolved, key=lambda x: x[3])]
 
     # ------------------------------------------------------------------
     # HTTP helpers
@@ -415,6 +446,10 @@ class BaseGribSource(BaseForecastSource):
         if _is_major(init_utc):
             return self._fetch_all_stations(init_utc, fxx_range, station_list)
 
+        requested_fxx = sorted({int(fxx) for fxx in fxx_range})
+        if requested_fxx and max(requested_fxx) <= 18 and min(requested_fxx) >= 0:
+            return self._fetch_all_stations(init_utc, fxx_range, station_list)
+
         # Non-MAJOR path: fetch fxx 0-18, then splice with prior MAJOR run
         logger.debug(
             "_grib_source: non-MAJOR init={}, fetching fxx 0-18 + prior MAJOR splice",
@@ -586,4 +621,3 @@ class BaseGribSource(BaseForecastSource):
                     station_data[sid][col] = float("nan")
 
         return station_data, True
-

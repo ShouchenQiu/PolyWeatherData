@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from config.settings import Settings
 from db.schema import DbClient
-from ui.pages import console_backtest, console_home, console_training
+from ui.pages import console_backtest, console_event_trace, console_home, console_training
 
 
 def _patch_streamlit():
@@ -73,4 +73,60 @@ def test_console_training_renders_model_artifact_summary(tmp_path):
         and bool(table.loc[table["version"] == "v1", "training_dataset_pkl"].iloc[0])
         for table in rendered_tables
     )
+    db.close()
+
+
+def test_console_event_trace_hides_token_ids_and_shows_clob_snapshot():
+    db = DbClient(":memory:")
+    db.upsert_station("KLGA", 40.7769, -73.874, "America/New_York")
+    db.upsert_event("cid-ui", "Highest temp?", "highest-temperature-in-nyc", "2026-06-05", "KLGA", "active")
+    db.upsert_market("tok-yes", "cid-ui", "bucket-80-81f", 80.0, 81.0, "Yes", market_id="mkt-1")
+    db.record_market_price_snapshot(
+        "tok-yes",
+        "cid-ui",
+        "2026-06-05T00:00:00+00:00",
+        best_bid=0.42,
+        best_ask=0.44,
+        mid_price=0.43,
+        spread=0.02,
+        depth_bid=100.0,
+        depth_ask=120.0,
+    )
+
+    with ExitStack() as stack:
+        for patcher in _patch_streamlit():
+            stack.enter_context(patcher)
+        stack.enter_context(patch("streamlit.selectbox", side_effect=lambda _label, options, **_kw: options[0]))
+        dataframe = stack.enter_context(patch("streamlit.dataframe"))
+
+        console_event_trace.render(db)
+
+    rendered_tables = [call.args[0] for call in dataframe.call_args_list]
+    ladder = next(table for table in rendered_tables if "market_slug" in table.columns)
+    assert "token_id" not in ladder.columns
+    assert ladder.loc[0, "best_bid"] == 0.42
+    assert ladder.loc[0, "depth_ask"] == 120.0
+    db.close()
+
+
+def test_console_event_trace_renders_markets_without_clob_snapshot():
+    db = DbClient(":memory:")
+    db.upsert_station("KLGA", 40.7769, -73.874, "America/New_York")
+    db.upsert_event("cid-ui", "Highest temp?", "highest-temperature-in-nyc", "2026-06-05", "KLGA", "active")
+    db.upsert_market("tok-yes", "cid-ui", "bucket-80-81f", 80.0, 81.0, "Yes", market_id="mkt-1")
+
+    with ExitStack() as stack:
+        for patcher in _patch_streamlit():
+            stack.enter_context(patcher)
+        stack.enter_context(patch("streamlit.selectbox", side_effect=lambda _label, options, **_kw: options[0]))
+        info = stack.enter_context(patch("streamlit.info"))
+        dataframe = stack.enter_context(patch("streamlit.dataframe"))
+
+        console_event_trace.render(db)
+
+    rendered_tables = [call.args[0] for call in dataframe.call_args_list]
+    ladder = next(table for table in rendered_tables if "market_slug" in table.columns)
+    assert "token_id" not in ladder.columns
+    assert ladder.loc[0, "market_id"] == "mkt-1"
+    assert any("No CLOB snapshots" in call.args[0] for call in info.call_args_list)
     db.close()

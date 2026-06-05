@@ -38,11 +38,14 @@ class FakeDiscovery:
 
 
 class FakeZarrDownloader:
+    last_init_hours = None
+
     def __init__(self, store, station_config, **_kwargs):
         self._store = store
         self._station = station_config
 
     def run(self, start_date, end_date, init_hours=None):
+        FakeZarrDownloader.last_init_hours = init_hours
         init = pd.Timestamp(f"{start_date} 00:00:00", tz="UTC")
         rows = [
             {
@@ -68,6 +71,14 @@ class FakeIemDownloader:
             for i in range(24)
         ]
         return self._store.append(self._station.station_id, pd.DataFrame(rows))
+
+
+class FakePublicClient:
+    def get_order_book(self, *, token_id):
+        return {
+            "bids": [{"price": "0.40", "size": "10"}],
+            "asks": [{"price": "0.44", "size": "20"}],
+        }
 
 
 def test_seed_demo_dry_run_does_not_create_files(tmp_path):
@@ -97,6 +108,7 @@ def test_seed_demo_writes_demo_db_and_bootstrap_stores(tmp_path):
         discovery_cls=FakeDiscovery,
         zarr_downloader_cls=FakeZarrDownloader,
         iem_downloader_cls=FakeIemDownloader,
+        public_client_cls=FakePublicClient,
     )
 
     assert main_db.read_text(encoding="ascii") == "do-not-touch"
@@ -110,6 +122,7 @@ def test_seed_demo_writes_demo_db_and_bootstrap_stores(tmp_path):
         assert db.query("SELECT COUNT(*) FROM stations")[0][0] == 1
         assert db.query("SELECT COUNT(*) FROM events")[0][0] == 1
         assert db.query("SELECT COUNT(*) FROM markets")[0][0] == 1
+        assert db.query("SELECT COUNT(*) FROM market_price_snapshots")[0][0] == 1
         assert db.query("SELECT status FROM events WHERE condition_id='cid-demo'")[0][0] == "active"
     finally:
         db.close()
@@ -120,6 +133,10 @@ def test_seed_demo_writes_demo_db_and_bootstrap_stores(tmp_path):
         pd.Timestamp("2026-06-05", tz="UTC"),
     )
     assert list(hrrr["fxx"]) == [1]
+    assert (demo_dir / "seed_summary.json").exists()
+    summary_json = pd.read_json(demo_dir / "seed_summary.json", typ="series")
+    assert "clob" in summary_json["timings"]
+    assert summary_json["timings"]["clob"]["rows_written"] == 1
 
 
 def test_seed_demo_passes_exact_polymarket_slug(tmp_path):
@@ -138,6 +155,21 @@ def test_seed_demo_passes_exact_polymarket_slug(tmp_path):
     assert FakeDiscovery.last_params == {"slug": slug}
     assert summary["polymarket_slug"] == slug
     assert summary["tables"]["events"] == 1
+
+
+def test_seed_demo_can_request_full_day_hrrr(tmp_path):
+    FakeZarrDownloader.last_init_hours = "unset"
+
+    seed_demo_data.seed_demo(
+        demo_dir=tmp_path / "demo",
+        seed_date="2026-06-04",
+        init_hour=None,
+        skip_polymarket=True,
+        skip_iem=True,
+        zarr_downloader_cls=FakeZarrDownloader,
+    )
+
+    assert FakeZarrDownloader.last_init_hours is None
 
 
 def test_seed_demo_can_skip_network_sections(tmp_path):

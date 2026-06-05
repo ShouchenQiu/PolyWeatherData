@@ -354,7 +354,7 @@ class BatchZarrDownloader:
                 datetime(d.year, d.month, d.day, h, tzinfo=timezone.utc)
             )
             try:
-                result = self._source.fetch(init_utc, range(0, 49), self._station)
+                result = self._source.fetch(init_utc, range(1, 2), self._station)
                 df = result.get(self._station_id, pd.DataFrame())
                 if df is None or df.empty:
                     print(f"  EMPTY {d} {h:02d}z")
