@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from data.forecast.hrrr_fill import MAJOR_HOURS, nearest_prior_major
+from data.forecast.hrrr_s3 import HrrrS3Source
 from data.forecast.hrrr_zarr import HrrrZarrSource
 from data.manager import InsufficientEncoderData
 from data.storage.cleaner import Cleaner
@@ -28,12 +29,15 @@ class TrainingDecoderCache:
 
     root_dir: Path
     source: Any | None = None
+    fallback_source: Any | None = None
 
     def __post_init__(self) -> None:
         self.root_dir = Path(self.root_dir)
         self.root_dir.mkdir(parents=True, exist_ok=True)
         if self.source is None:
             self.source = HrrrZarrSource()
+        if self.fallback_source is None:
+            self.fallback_source = HrrrS3Source()
 
     def path_for(self, station_id: str, init_time: pd.Timestamp) -> Path:
         init_utc = _to_utc(init_time)
@@ -236,7 +240,31 @@ class TrainingDecoderCache:
         return self._validate(subset, station_id, init_utc)
 
     def _fetch_clean_validate(self, station: Any, init_utc: pd.Timestamp) -> pd.DataFrame:
-        result = self.source.fetch(init_utc, range(0, 49), station)
+        try:
+            return self._fetch_clean_validate_from_source(
+                self.source, station, init_utc
+            )
+        except Exception as primary_exc:
+            if self.fallback_source is None:
+                raise
+            try:
+                return self._fetch_clean_validate_from_source(
+                    self.fallback_source, station, init_utc
+                )
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    f"TrainingDecoderCache: primary source failed for "
+                    f"station={station.station_id} init={init_utc}: "
+                    f"{primary_exc}; fallback source failed: {fallback_exc}"
+                ) from fallback_exc
+
+    def _fetch_clean_validate_from_source(
+        self,
+        source: Any,
+        station: Any,
+        init_utc: pd.Timestamp,
+    ) -> pd.DataFrame:
+        result = source.fetch(init_utc, range(0, 49), station)
         df = result.get(station.station_id, pd.DataFrame())
         if df is None or df.empty:
             raise RuntimeError(

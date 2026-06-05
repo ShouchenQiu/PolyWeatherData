@@ -42,6 +42,16 @@ class FakeCachedDecoderSource(FakeDecoderSource):
         self._full_window_cache = {}
 
 
+class FailingDecoderSource:
+    def __init__(self) -> None:
+        self.called_inits: list[pd.Timestamp] = []
+
+    def fetch(self, init_time, fxx_range, station):
+        init = pd.Timestamp(init_time).tz_convert("UTC")
+        self.called_inits.append(init)
+        raise RuntimeError("primary zarr missing")
+
+
 def test_decoder_cache_miss_fetches_cleans_and_persists(tmp_path):
     source = FakeDecoderSource()
     cache = TrainingDecoderCache(tmp_path, source=source)
@@ -55,6 +65,21 @@ def test_decoder_cache_miss_fetches_cleans_and_persists(tmp_path):
     assert "WS_10m" in df.columns
     assert cache.path_for("KLGA", init).exists()
     assert cache.path_for("KLGA", init).name == "2026-01.parquet"
+
+
+def test_decoder_cache_miss_uses_fallback_source_when_primary_fails(tmp_path):
+    primary = FailingDecoderSource()
+    fallback = FakeDecoderSource()
+    cache = TrainingDecoderCache(tmp_path, source=primary, fallback_source=fallback)
+    init = pd.Timestamp("2026-01-01 23:00:00", tz="UTC")
+
+    df = cache.get(STATIONS["KLGA"], init)
+
+    assert primary.called_inits == [init]
+    assert fallback.called_inits == [init]
+    assert list(df["fxx"]) == list(range(1, 49))
+    stored = pd.read_parquet(cache.path_for("KLGA", init))
+    assert set(stored["fxx"].astype(int)) == set(range(1, 49))
 
 
 def test_decoder_cache_hit_does_not_fetch(tmp_path):
