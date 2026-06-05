@@ -88,11 +88,11 @@ class Settings:
     # Model training windows (ISO dates, inclusive)
     cold_start_hours: int = 72
     train_start: str = "2024-10-01"
-    train_end: str = "2025-12-31"
-    val_start: str = "2026-01-01"
-    val_end: str = "2026-02-28"
-    test_start: str = "2026-03-01"
-    test_end: str = "2026-04-30"
+    train_end: str = "2026-03-31"
+    val_start: str = "2026-04-01"
+    val_end: str = "2026-04-30"
+    test_start: str = "2026-05-01"
+    test_end: str = "2026-06-04"
     training_decoder_cache_dir: Path | None = None
 
     # TFT training hyperparameters (reference Run-21 defaults)

@@ -257,6 +257,35 @@ def test_zarr_non_major_f01_only_does_not_fetch_major_fill():
     assert open_group_call_count == 1
 
 
+def test_zarr_full_window_repeat_uses_memory_cache():
+    """Repeated full-window fetches reuse the source-level decoder cache."""
+    import data.forecast.hrrr_zarr as _mod
+
+    z_anl, z_fcst, navigate_fn = _make_zarr_mocks()
+
+    with (
+        patch.object(_mod, "_zarr", MagicMock()),
+        patch.object(_mod, "_fsspec", MagicMock()),
+        patch.object(_mod, "_navigate", navigate_fn),
+    ):
+        _mod._zarr.open_group.side_effect = [z_anl, z_fcst]
+        src = _mod.HrrrZarrSource()
+        first = src.fetch(
+            pd.Timestamp("2026-01-01 06:00", tz="UTC"),
+            range(0, 49),
+            _STATION,
+        )["KLGA"]
+        second = src.fetch(
+            pd.Timestamp("2026-01-01 06:00", tz="UTC"),
+            range(0, 49),
+            _STATION,
+        )["KLGA"]
+        open_group_call_count = _mod._zarr.open_group.call_count
+
+    assert open_group_call_count == 2
+    pd.testing.assert_frame_equal(first, second)
+
+
 # ---------------------------------------------------------------------------
 # Non-MAJOR nearest-fail: is_extrapolated must still be present
 # ---------------------------------------------------------------------------

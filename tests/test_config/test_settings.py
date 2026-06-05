@@ -72,15 +72,15 @@ def test_train_start():
 
 
 def test_train_end():
-    assert Settings().train_end == "2025-12-31"
+    assert Settings().train_end == "2026-03-31"
 
 
 def test_val_start():
-    assert Settings().val_start == "2026-01-01"
+    assert Settings().val_start == "2026-04-01"
 
 
 def test_val_end():
-    assert Settings().val_end == "2026-02-28"
+    assert Settings().val_end == "2026-04-30"
 
 
 # ---------------------------------------------------------------------------
@@ -127,11 +127,11 @@ def test_polymarket_wallet_address_reads_from_env(monkeypatch):
 
 
 def test_test_start():
-    assert Settings().test_start == "2026-03-01"
+    assert Settings().test_start == "2026-05-01"
 
 
 def test_test_end():
-    assert Settings().test_end == "2026-04-30"
+    assert Settings().test_end == "2026-06-04"
 
 
 def test_training_decoder_cache_dir_default():

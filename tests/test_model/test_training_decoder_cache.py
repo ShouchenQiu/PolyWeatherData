@@ -12,10 +12,12 @@ from model.training_data import TrainingDatasetBuilder, TrainingDecoderCache
 class FakeDecoderSource:
     def __init__(self) -> None:
         self.calls = 0
+        self.called_inits: list[pd.Timestamp] = []
 
     def fetch(self, init_time, fxx_range, station):
         self.calls += 1
         init = pd.Timestamp(init_time).tz_convert("UTC")
+        self.called_inits.append(init)
         rows = []
         for fxx in range(0, 49):
             rows.append(
@@ -46,6 +48,7 @@ def test_decoder_cache_miss_fetches_cleans_and_persists(tmp_path):
     assert df["TMP_2m"].iloc[0] == 1.0
     assert "WS_10m" in df.columns
     assert cache.path_for("KLGA", init).exists()
+    assert cache.path_for("KLGA", init).name == "2026-01.parquet"
 
 
 def test_decoder_cache_hit_does_not_fetch(tmp_path):
@@ -58,6 +61,56 @@ def test_decoder_cache_hit_does_not_fetch(tmp_path):
 
     assert source.calls == 1
     pd.testing.assert_frame_equal(first, second)
+
+
+def test_decoder_cache_monthly_file_holds_multiple_inits(tmp_path):
+    source = FakeDecoderSource()
+    cache = TrainingDecoderCache(tmp_path, source=source)
+    station = STATIONS["KLGA"]
+    init_a = pd.Timestamp("2026-01-01 00:00:00", tz="UTC")
+    init_b = pd.Timestamp("2026-01-01 01:00:00", tz="UTC")
+
+    cache.get(station, init_a)
+    cache.get(station, init_b)
+
+    path = cache.path_for("KLGA", init_a)
+    stored = pd.read_parquet(path)
+    assert path == cache.path_for("KLGA", init_b)
+    assert len(stored) == 96
+    assert set(pd.to_datetime(stored["init_time"], utc=True)) == {init_a, init_b}
+
+
+def test_decoder_cache_cross_month_uses_separate_files(tmp_path):
+    cache = TrainingDecoderCache(tmp_path, source=FakeDecoderSource())
+    station = STATIONS["KLGA"]
+    jan = pd.Timestamp("2026-01-31 23:00:00", tz="UTC")
+    feb = pd.Timestamp("2026-02-01 00:00:00", tz="UTC")
+
+    cache.get(station, jan)
+    cache.get(station, feb)
+
+    assert cache.path_for("KLGA", jan).name == "2026-01.parquet"
+    assert cache.path_for("KLGA", feb).name == "2026-02.parquet"
+    assert cache.path_for("KLGA", jan).exists()
+    assert cache.path_for("KLGA", feb).exists()
+
+
+def test_decoder_cache_prewarm_skips_cached_inits(tmp_path):
+    source = FakeDecoderSource()
+    cache = TrainingDecoderCache(tmp_path, source=source)
+    station = STATIONS["KLGA"]
+    init_a = pd.Timestamp("2026-01-01 00:00:00", tz="UTC")
+    init_b = pd.Timestamp("2026-01-01 01:00:00", tz="UTC")
+
+    cache.get(station, init_a)
+    summary = cache.prewarm(station, [init_a, init_b], workers=2)
+
+    assert source.called_inits == [init_a, init_b]
+    assert summary["requested_inits"] == 2
+    assert summary["skipped_cached"] == 1
+    assert summary["fetched_inits"] == 1
+    assert summary["rows_written"] == 48
+    assert summary["errors"] == 0
 
 
 def _append_bootstrap_windows(

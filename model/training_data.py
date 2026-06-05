@@ -6,6 +6,8 @@ production inference, such as cached full decoder windows.
 """
 from __future__ import annotations
 
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,16 +38,89 @@ class TrainingDecoderCache:
         init_utc = _to_utc(init_time)
         station_dir = self.root_dir / station_id
         station_dir.mkdir(parents=True, exist_ok=True)
-        return station_dir / f"{init_utc.strftime('%Y%m%d_%Hz')}.parquet"
+        return station_dir / f"{init_utc.strftime('%Y-%m')}.parquet"
 
     def get(self, station: Any, init_time: pd.Timestamp) -> pd.DataFrame:
         """Return cleaned fxx 1..48 decoder rows, fetching and caching on miss."""
         init_utc = _to_utc(init_time)
-        path = self.path_for(station.station_id, init_utc)
-        if path.exists():
-            df = pd.read_parquet(path)
-            return self._validate(df, station.station_id, init_utc)
+        cached = self._read_cached_init(station.station_id, init_utc)
+        if cached is not None:
+            return cached
 
+        df = self._fetch_clean_validate(station, init_utc)
+        self._append_month(station.station_id, init_utc, df)
+        return df
+
+    def prewarm(
+        self,
+        station: Any,
+        init_times: list[pd.Timestamp],
+        workers: int = 12,
+    ) -> dict[str, Any]:
+        """Fetch and persist missing decoder windows for a list of init times.
+
+        Existing monthly-cache rows are skipped.  Writes are serialized in the
+        caller thread so concurrent downloads never race on parquet files.
+        """
+        started = time.perf_counter()
+        init_utcs = [_to_utc(ts) for ts in init_times]
+        pending = [
+            init_utc for init_utc in init_utcs
+            if self._read_cached_init(station.station_id, init_utc) is None
+        ]
+        rows_written = 0
+        errors: list[dict[str, str]] = []
+        fetched = 0
+        worker_count = max(1, int(workers))
+
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            future_map = {
+                pool.submit(self._fetch_clean_validate, station, init_utc): init_utc
+                for init_utc in pending
+            }
+            for fut in as_completed(future_map):
+                init_utc = future_map[fut]
+                try:
+                    df = fut.result()
+                    rows_written += self._append_month(
+                        station.station_id, init_utc, df
+                    )
+                    fetched += 1
+                except Exception as exc:  # noqa: BLE001
+                    errors.append({"init_time": str(init_utc), "error": str(exc)})
+
+        elapsed = time.perf_counter() - started
+        return {
+            "requested_inits": len(init_utcs),
+            "skipped_cached": len(init_utcs) - len(pending),
+            "fetched_inits": fetched,
+            "rows_written": rows_written,
+            "errors": len(errors),
+            "error_details": errors,
+            "elapsed_seconds": elapsed,
+            "init_per_second": fetched / elapsed if elapsed > 0 else 0.0,
+            "major_inits": sum(1 for ts in init_utcs if ts.hour in {0, 6, 12, 18}),
+            "offhour_inits": sum(1 for ts in init_utcs if ts.hour not in {0, 6, 12, 18}),
+        }
+
+    def _read_cached_init(
+        self,
+        station_id: str,
+        init_utc: pd.Timestamp,
+    ) -> pd.DataFrame | None:
+        path = self.path_for(station_id, init_utc)
+        if not path.exists():
+            return None
+        df = pd.read_parquet(path)
+        if df.empty or "init_time" not in df.columns:
+            return None
+        init_series = pd.to_datetime(df["init_time"], utc=True)
+        subset = df[init_series == init_utc].copy()
+        if subset.empty:
+            return None
+        return self._validate(subset, station_id, init_utc)
+
+    def _fetch_clean_validate(self, station: Any, init_utc: pd.Timestamp) -> pd.DataFrame:
         result = self.source.fetch(init_utc, range(0, 49), station)
         df = result.get(station.station_id, pd.DataFrame())
         if df is None or df.empty:
@@ -54,9 +129,43 @@ class TrainingDecoderCache:
                 f"station={station.station_id} init={init_utc}"
             )
         df = Cleaner.process_hrrr(df)
-        df = self._validate(df, station.station_id, init_utc)
-        df.to_parquet(path, index=False)
-        return df
+        return self._validate(df, station.station_id, init_utc)
+
+    def _append_month(
+        self,
+        station_id: str,
+        init_utc: pd.Timestamp,
+        df: pd.DataFrame,
+    ) -> int:
+        path = self.path_for(station_id, init_utc)
+        before_keys: set[tuple[pd.Timestamp, int]] = set()
+        if path.exists():
+            existing = pd.read_parquet(path)
+            if not existing.empty:
+                existing = existing.copy()
+                existing["init_time"] = pd.to_datetime(existing["init_time"], utc=True)
+                before_keys = set(
+                    zip(existing["init_time"], existing["fxx"].astype(int))
+                )
+                combined = pd.concat([existing, df], ignore_index=True)
+            else:
+                combined = df.copy()
+        else:
+            combined = df.copy()
+
+        combined = combined.copy()
+        combined["init_time"] = pd.to_datetime(combined["init_time"], utc=True)
+        combined["valid_time"] = pd.to_datetime(combined["valid_time"], utc=True)
+        combined["fxx"] = combined["fxx"].astype(int)
+        combined = (
+            combined.sort_values(["init_time", "fxx"])
+            .drop_duplicates(subset=["init_time", "fxx"], keep="last")
+            .reset_index(drop=True)
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        combined.to_parquet(path, index=False)
+        after_keys = set(zip(combined["init_time"], combined["fxx"].astype(int)))
+        return len(after_keys - before_keys)
 
     @staticmethod
     def _validate(

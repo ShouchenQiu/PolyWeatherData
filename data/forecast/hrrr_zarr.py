@@ -19,6 +19,7 @@ Architecture notes
 """
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING
 
@@ -102,6 +103,8 @@ class HrrrZarrSource(BaseForecastSource):
             bucket = Settings().hrrr_zarr_bucket
             self._base_url = f"https://{bucket}.s3.amazonaws.com/sfc"
         self._hrrr_fill = HrrrFill()
+        self._full_window_cache: dict[tuple[str, pd.Timestamp], pd.DataFrame] = {}
+        self._cache_lock = threading.Lock()
 
     def fetch(
         self,
@@ -163,6 +166,13 @@ class HrrrZarrSource(BaseForecastSource):
         requested_fxx = sorted({int(fxx) for fxx in fxx_range})
         if not requested_fxx:
             return {station.station_id: pd.DataFrame()}
+        cache_key: tuple[str, pd.Timestamp] | None = None
+        if requested_fxx == list(range(0, 49)):
+            cache_key = (station.station_id, init_utc)
+            with self._cache_lock:
+                cached = self._full_window_cache.get(cache_key)
+            if cached is not None:
+                return {station.station_id: cached.copy()}
 
         wants_anl = 0 in requested_fxx
         wants_fcst = any(fxx > 0 for fxx in requested_fxx)
@@ -322,7 +332,7 @@ class HrrrZarrSource(BaseForecastSource):
                     nearest_major_init,
                 )
                 non_major_df["is_extrapolated"] = False
-                return {station.station_id: non_major_df}
+                return self._maybe_cache_result(station.station_id, cache_key, non_major_df)
 
             try:
                 prior_dict = self.fetch(prior_major_init, range(0, 49), station)
@@ -337,7 +347,7 @@ class HrrrZarrSource(BaseForecastSource):
 
             filled = self._hrrr_fill.fill(non_major_df, nearest_df, prior_df)
             filled = filled[filled["fxx"].isin(requested_fxx)].reset_index(drop=True)
-            return {station.station_id: filled}
+            return self._maybe_cache_result(station.station_id, cache_key, filled)
 
         # Build rows for the requested native fxx values.  Values beyond the
         # native store range stay NaN for MAJOR runs; non-MAJOR tail requests
@@ -363,4 +373,15 @@ class HrrrZarrSource(BaseForecastSource):
 
         df = pd.DataFrame(rows)
         df["is_extrapolated"] = False
-        return {station.station_id: df}
+        return self._maybe_cache_result(station.station_id, cache_key, df)
+
+    def _maybe_cache_result(
+        self,
+        station_id: str,
+        cache_key: tuple[str, pd.Timestamp] | None,
+        df: pd.DataFrame,
+    ) -> "dict[str, pd.DataFrame]":
+        if cache_key is not None:
+            with self._cache_lock:
+                self._full_window_cache[cache_key] = df.copy()
+        return {station_id: df}
