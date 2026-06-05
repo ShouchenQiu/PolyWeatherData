@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,7 @@ _TABLES = (
     "pnl_snapshots",
     "loop_ticks",
 )
+_CLOB_BOOK_TIMEOUT_S = 10.0
 
 
 def seed_demo(
@@ -229,8 +231,10 @@ def _seed_clob_snapshots(
     written = 0
     errors = 0
     for row in rows:
+        pool = ThreadPoolExecutor(max_workers=1)
         try:
-            book = fetcher.get_book(str(row["token_id"]))
+            fut = pool.submit(fetcher.get_book, str(row["token_id"]))
+            book = fut.result(timeout=_CLOB_BOOK_TIMEOUT_S)
             spread = (
                 book["best_ask"] - book["best_bid"]
                 if book.get("best_bid") is not None and book.get("best_ask") is not None
@@ -248,8 +252,12 @@ def _seed_clob_snapshots(
                 depth_ask=sum(float(level.get("size", 0.0)) for level in book.get("asks", [])),
             )
             written += 1
+        except TimeoutError:
+            errors += 1
         except Exception:
             errors += 1
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
     return written, errors, time.perf_counter() - t0
 
 

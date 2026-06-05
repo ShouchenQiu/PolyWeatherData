@@ -117,3 +117,43 @@ def test_batch_iem_bootstrap_writes_clean_obs_store(tmp_path):
     assert df["raw_wind_gust_kt"].iloc[0] == 4.0
     assert df["p01i"].iloc[0] == 0.0
     assert "obs_WS" in df.columns
+
+
+def test_batch_iem_does_not_skip_day_with_only_boundary_obs(tmp_path):
+    store = ParquetStore(tmp_path / "obs")
+    store.append(
+        "KLGA",
+        pd.DataFrame(
+            [
+                {
+                    "valid_time": pd.Timestamp("2026-06-04 00:00:00", tz="UTC"),
+                    "raw_tmpc_tenths": 20.0,
+                    "raw_dwpc_tenths": 10.0,
+                    "raw_wind_spd_kt": 4.0,
+                    "raw_wind_gust_kt": 4.0,
+                    "obs_U": 1.0,
+                    "obs_V": 0.0,
+                    "skyc1": 0.0,
+                    "p01i": 0.0,
+                    "is_rain": 0.0,
+                    "is_snow": 0.0,
+                }
+            ]
+        ),
+    )
+    source = FakeObsSource()
+    downloader = BatchIemDownloader(
+        store,
+        station_config=STATIONS["KLGA"],
+        obs_source=source,
+        delay=0.0,
+    )
+
+    downloader.run("2026-06-04", "2026-06-04")
+
+    assert source.calls == [
+        (
+            pd.Timestamp("2026-06-04 00:00:00", tz="UTC"),
+            pd.Timestamp("2026-06-04 23:59:59", tz="UTC"),
+        )
+    ]

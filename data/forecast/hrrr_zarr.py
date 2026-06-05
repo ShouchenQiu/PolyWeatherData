@@ -228,6 +228,8 @@ class HrrrZarrSource(BaseForecastSource):
                     arr = _navigate(z_anl, zarr_path)
                     return col, float(arr[row_idx, col_idx])  # type: ignore[index]
                 except Exception as exc:  # noqa: BLE001
+                    if col in {"APCP", "PRATE"}:
+                        return col, 0.0
                     logger.warning(
                         "HrrrZarrSource: failed to read anl col={} station={} "
                         "zarr_path={} url={}: {}",

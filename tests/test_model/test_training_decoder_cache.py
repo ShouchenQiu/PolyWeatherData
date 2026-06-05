@@ -36,6 +36,12 @@ class FakeDecoderSource:
         return {station.station_id: pd.DataFrame(rows)}
 
 
+class FakeCachedDecoderSource(FakeDecoderSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self._full_window_cache = {}
+
+
 def test_decoder_cache_miss_fetches_cleans_and_persists(tmp_path):
     source = FakeDecoderSource()
     cache = TrainingDecoderCache(tmp_path, source=source)
@@ -111,6 +117,40 @@ def test_decoder_cache_prewarm_skips_cached_inits(tmp_path):
     assert summary["fetched_inits"] == 1
     assert summary["rows_written"] == 48
     assert summary["errors"] == 0
+
+
+def test_decoder_cache_prewarm_persists_multiple_missing_inits(tmp_path):
+    source = FakeDecoderSource()
+    cache = TrainingDecoderCache(tmp_path, source=source)
+    station = STATIONS["KLGA"]
+    init_a = pd.Timestamp("2026-01-01 00:00:00", tz="UTC")
+    init_b = pd.Timestamp("2026-01-01 01:00:00", tz="UTC")
+
+    summary = cache.prewarm(station, [init_a, init_b], workers=2)
+
+    stored = pd.read_parquet(cache.path_for("KLGA", init_a))
+    assert source.called_inits == [init_a, init_b]
+    assert summary["fetched_inits"] == 2
+    assert summary["rows_written"] == 96
+    assert len(stored) == 96
+    assert set(pd.to_datetime(stored["init_time"], utc=True)) == {init_a, init_b}
+
+
+def test_decoder_cache_prewarm_warms_major_dependencies_for_offhour(tmp_path):
+    source = FakeCachedDecoderSource()
+    cache = TrainingDecoderCache(tmp_path, source=source)
+    station = STATIONS["KLGA"]
+    offhour = pd.Timestamp("2026-01-01 03:00:00", tz="UTC")
+
+    summary = cache.prewarm(station, [offhour], workers=1)
+
+    assert source.called_inits == [
+        pd.Timestamp("2025-12-31 18:00:00", tz="UTC"),
+        pd.Timestamp("2026-01-01 00:00:00", tz="UTC"),
+        offhour,
+    ]
+    assert summary["fetched_inits"] == 1
+    assert summary["rows_written"] == 48
 
 
 def _append_bootstrap_windows(

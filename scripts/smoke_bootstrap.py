@@ -4,6 +4,9 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +15,7 @@ import pandas as pd
 from config.settings import Settings
 from config.stations import STATIONS
 from data.forecast.hrrr_s3 import HrrrS3Source
+from data.storage.cleaner import Cleaner
 from data.storage.parquet_store import ParquetStore
 from model.training_data import TrainingDecoderCache
 from scripts.batch_download_iem import BatchIemDownloader
@@ -34,6 +38,57 @@ class BatchHrrrS3F01Downloader(BatchZarrDownloader):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         kwargs.setdefault("forecast_source", HrrrS3Source())
         super().__init__(*args, **kwargs)
+
+    def _execute_via_source(self, pending: list[tuple[Any, int]]) -> int:
+        total_rows = 0
+        errors = 0
+        completed = 0
+        started = time.perf_counter()
+        init_workers = max(1, min(int(self._max_workers), 4))
+
+        def fetch_one(d: Any, h: int) -> pd.DataFrame:
+            init_utc = pd.Timestamp(
+                datetime(d.year, d.month, d.day, h, tzinfo=timezone.utc)
+            )
+            source = HrrrS3Source()
+            result = source.fetch(init_utc, range(1, 2), self._station)
+            return result.get(self._station_id, pd.DataFrame())
+
+        with ThreadPoolExecutor(max_workers=init_workers) as pool:
+            future_map = {pool.submit(fetch_one, d, h): (d, h) for d, h in pending}
+            for fut in as_completed(future_map):
+                d, h = future_map[fut]
+                completed += 1
+                try:
+                    df = fut.result()
+                    if df is None or df.empty:
+                        print(f"  EMPTY {d} {h:02d}z", flush=True)
+                        continue
+                    df = Cleaner.process_hrrr(df)
+                    total_rows += self._store.append(self._station_id, df)
+                except Exception as exc:  # noqa: BLE001
+                    errors += 1
+                    print(f"  ERROR {d} {h:02d}z: {exc}", flush=True)
+                    if errors <= 3:
+                        traceback.print_exc()
+
+                elapsed = time.perf_counter() - started
+                rate = completed / max(elapsed, 0.001)
+                remaining = len(pending) - completed
+                eta_min = remaining / rate / 60.0 if rate > 0 else float("inf")
+                if completed % 10 == 0 or completed <= 5:
+                    print(
+                        f"[{completed}/{len(pending)}] "
+                        f"rate={rate:.2f} init/s ETA={eta_min:.1f}m "
+                        f"errors={errors} written={total_rows}",
+                        flush=True,
+                    )
+
+        print(
+            f"\nBatchHrrrS3F01Downloader done: {total_rows} rows, errors={errors}",
+            flush=True,
+        )
+        return total_rows
 
 
 def run_smoke_bootstrap(
@@ -66,6 +121,8 @@ def run_smoke_bootstrap(
         "start_date": start_date,
         "end_date": end_date,
         "init_count": len(init_times),
+        "decoder_init_count": len(init_times),
+        "decoder_skipped_tail_cap": 0,
         "workers": workers,
         "smoke_split": SMOKE_SPLIT,
     }
@@ -137,10 +194,17 @@ def run_smoke_bootstrap(
             "init_per_second": 0.0,
             "major_inits": 0,
             "offhour_inits": 0,
+            "skipped_tail_cap": 0,
         }
     else:
         cache = decoder_cache_cls(settings.training_decoder_cache_dir)
-        decoder_summary = cache.prewarm(station, init_times, workers=workers)
+        decoder_workers = max(1, min(int(workers), 4))
+        decoder_summary = cache.prewarm(
+            station, init_times, workers=decoder_workers, progress=True
+        )
+        decoder_summary["requested_workers"] = workers
+        decoder_summary["effective_workers"] = decoder_workers
+        decoder_summary["skipped_tail_cap"] = 0
 
     summary = {
         **plan,

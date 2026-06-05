@@ -39,6 +39,7 @@ _IEM_JSON_URL = (
 )
 _DEFAULT_DELAY   = 0.4    # seconds between requests (polite rate limit)
 _DEFAULT_RETRIES = 3
+_DONE_DAY_MIN_HOURS = 20
 
 
 class BatchIemDownloader:
@@ -162,7 +163,7 @@ class BatchIemDownloader:
         return []
 
     def _already_done_dates(self) -> set[str]:
-        """Return ISO date strings already present in the store."""
+        """Return dates with enough hourly observation coverage in the store."""
         try:
             existing = self._store.read(
                 self._station_id,
@@ -174,10 +175,14 @@ class BatchIemDownloader:
             col = "valid_time" if "valid_time" in existing.columns else None
             if col is None:
                 return set()
-            return set(
-                pd.to_datetime(existing[col], utc=True)
-                .dt.date.astype(str)
+            hours = pd.to_datetime(existing[col], utc=True).dt.floor("h")
+            coverage = (
+                pd.DataFrame({"date": hours.dt.date.astype(str), "hour": hours})
+                .drop_duplicates()
+                .groupby("date")["hour"]
+                .nunique()
             )
+            return set(coverage[coverage >= _DONE_DAY_MIN_HOURS].index)
         except Exception:
             return set()
 

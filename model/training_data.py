@@ -14,6 +14,7 @@ from typing import Any
 
 import pandas as pd
 
+from data.forecast.hrrr_fill import MAJOR_HOURS, nearest_prior_major
 from data.forecast.hrrr_zarr import HrrrZarrSource
 from data.manager import InsufficientEncoderData
 from data.storage.cleaner import Cleaner
@@ -56,11 +57,15 @@ class TrainingDecoderCache:
         station: Any,
         init_times: list[pd.Timestamp],
         workers: int = 12,
+        progress: bool = False,
+        print_every: int = 10,
+        write_batch_size: int = 24,
     ) -> dict[str, Any]:
         """Fetch and persist missing decoder windows for a list of init times.
 
-        Existing monthly-cache rows are skipped.  Writes are serialized in the
-        caller thread so concurrent downloads never race on parquet files.
+        Existing monthly-cache rows are skipped.  Missing windows are downloaded
+        in parallel and appended to monthly parquet files in one batched write
+        per month, keeping download concurrency separate from file IO.
         """
         started = time.perf_counter()
         init_utcs = [_to_utc(ts) for ts in init_times]
@@ -72,8 +77,22 @@ class TrainingDecoderCache:
         errors: list[dict[str, str]] = []
         fetched = 0
         worker_count = max(1, int(workers))
+        write_batch_count = max(1, int(write_batch_size))
+        frames: list[pd.DataFrame] = []
 
-        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        if progress:
+            print(
+                "TrainingDecoderCache: "
+                f"{len(init_utcs)} inits total, {len(init_utcs) - len(pending)} "
+                f"already cached, {len(pending)} pending.",
+                flush=True,
+            )
+
+        if pending and self._source_has_window_cache():
+            self._warm_fill_dependencies(station, pending, worker_count, progress)
+
+        pool = ThreadPoolExecutor(max_workers=worker_count)
+        try:
             future_map = {
                 pool.submit(self._fetch_clean_validate, station, init_utc): init_utc
                 for init_utc in pending
@@ -81,13 +100,46 @@ class TrainingDecoderCache:
             for fut in as_completed(future_map):
                 init_utc = future_map[fut]
                 try:
-                    df = fut.result()
-                    rows_written += self._append_month(
-                        station.station_id, init_utc, df
-                    )
+                    frames.append(fut.result())
                     fetched += 1
+                    if len(frames) >= write_batch_count:
+                        rows_written += self._append_many(station.station_id, frames)
+                        frames = []
                 except Exception as exc:  # noqa: BLE001
-                    errors.append({"init_time": str(init_utc), "error": str(exc)})
+                    error = {"init_time": str(init_utc), "error": str(exc)}
+                    errors.append(error)
+                    if progress and len(errors) <= 5:
+                        print(
+                            f"  ERROR decoder fetch {init_utc}: {exc}",
+                            flush=True,
+                        )
+
+                if progress and (
+                    fetched + len(errors) <= 5
+                    or (fetched + len(errors)) % max(1, int(print_every)) == 0
+                    or fetched + len(errors) == len(pending)
+                ):
+                    elapsed_so_far = time.perf_counter() - started
+                    completed = fetched + len(errors)
+                    rate = completed / max(elapsed_so_far, 0.001)
+                    remaining = len(pending) - completed
+                    eta_min = remaining / rate / 60.0 if rate > 0 else float("inf")
+                    print(
+                        f"[decoder {completed}/{len(pending)}] "
+                        f"rate={rate:.2f} init/s ETA={eta_min:.1f}m "
+                        f"errors={len(errors)}",
+                        flush=True,
+                    )
+        except BaseException:
+            if frames:
+                rows_written += self._append_many(station.station_id, frames)
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            pool.shutdown(wait=True)
+
+        if frames:
+            rows_written += self._append_many(station.station_id, frames)
 
         elapsed = time.perf_counter() - started
         return {
@@ -102,6 +154,69 @@ class TrainingDecoderCache:
             "major_inits": sum(1 for ts in init_utcs if ts.hour in {0, 6, 12, 18}),
             "offhour_inits": sum(1 for ts in init_utcs if ts.hour not in {0, 6, 12, 18}),
         }
+
+    def _source_has_window_cache(self) -> bool:
+        return hasattr(self.source, "_full_window_cache")
+
+    def _warm_fill_dependencies(
+        self,
+        station: Any,
+        pending: list[pd.Timestamp],
+        workers: int,
+        progress: bool,
+    ) -> None:
+        major_inits: set[pd.Timestamp] = set()
+        for init_utc in pending:
+            if init_utc.hour in MAJOR_HOURS:
+                major_inits.add(init_utc)
+                continue
+            nearest = nearest_prior_major(init_utc)
+            major_inits.add(nearest)
+            major_inits.add(nearest - pd.Timedelta(hours=6))
+
+        ordered = sorted(major_inits)
+        if progress:
+            print(
+                f"TrainingDecoderCache: warming {len(ordered)} major windows "
+                "for off-hour fill.",
+                flush=True,
+            )
+        worker_count = max(1, min(int(workers), 4))
+        started = time.perf_counter()
+        completed = 0
+        errors = 0
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            future_map = {
+                pool.submit(self.source.fetch, init_utc, range(0, 49), station): init_utc
+                for init_utc in ordered
+            }
+            for fut in as_completed(future_map):
+                init_utc = future_map[fut]
+                completed += 1
+                try:
+                    fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    errors += 1
+                    if progress:
+                        print(
+                            f"  WARN dependency warm failed {init_utc}: {exc}",
+                            flush=True,
+                        )
+                if progress and (
+                    completed <= 3
+                    or completed % 5 == 0
+                    or completed == len(ordered)
+                ):
+                    elapsed = time.perf_counter() - started
+                    rate = completed / max(elapsed, 0.001)
+                    remaining = len(ordered) - completed
+                    eta_min = remaining / rate / 60.0 if rate > 0 else float("inf")
+                    print(
+                        f"[decoder warm {completed}/{len(ordered)}] "
+                        f"rate={rate:.2f} major/s ETA={eta_min:.1f}m "
+                        f"errors={errors}",
+                        flush=True,
+                    )
 
     def _read_cached_init(
         self,
@@ -137,17 +252,50 @@ class TrainingDecoderCache:
         init_utc: pd.Timestamp,
         df: pd.DataFrame,
     ) -> int:
-        path = self.path_for(station_id, init_utc)
+        return self._append_many(station_id, [df])
+
+    def _append_many(self, station_id: str, frames: list[pd.DataFrame]) -> int:
+        if not frames:
+            return 0
+        combined_new = pd.concat(
+            [frame.reset_index(drop=True) for frame in frames],
+            ignore_index=True,
+            join="outer",
+        )
+        combined_new = combined_new.copy()
+        combined_new["init_time"] = pd.to_datetime(
+            combined_new["init_time"], utc=True
+        )
+        combined_new["valid_time"] = pd.to_datetime(
+            combined_new["valid_time"], utc=True
+        )
+        combined_new["fxx"] = combined_new["fxx"].astype(int)
+
+        rows_written = 0
+        for _, month_df in combined_new.groupby(
+            combined_new["init_time"].dt.strftime("%Y-%m"), sort=True
+        ):
+            first_init = pd.Timestamp(month_df["init_time"].iloc[0])
+            path = self.path_for(station_id, first_init)
+            rows_written += self._append_month_frame(path, month_df)
+        return rows_written
+
+    @staticmethod
+    def _append_month_frame(path: Path, df: pd.DataFrame) -> int:
         before_keys: set[tuple[pd.Timestamp, int]] = set()
         if path.exists():
-            existing = pd.read_parquet(path)
+            existing = pd.read_parquet(path).reset_index(drop=True)
             if not existing.empty:
                 existing = existing.copy()
                 existing["init_time"] = pd.to_datetime(existing["init_time"], utc=True)
                 before_keys = set(
                     zip(existing["init_time"], existing["fxx"].astype(int))
                 )
-                combined = pd.concat([existing, df], ignore_index=True)
+                combined = pd.concat(
+                    [existing, df.reset_index(drop=True)],
+                    ignore_index=True,
+                    join="outer",
+                )
             else:
                 combined = df.copy()
         else:

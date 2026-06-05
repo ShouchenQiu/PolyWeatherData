@@ -31,7 +31,7 @@ class FakeDecoderCache:
     def __init__(self, *_args, **_kwargs):
         pass
 
-    def prewarm(self, station, init_times, workers=12):
+    def prewarm(self, station, init_times, workers=12, **_kwargs):
         FakeDecoderCache.calls.append((station.station_id, list(init_times), workers))
         return {
             "requested_inits": len(init_times),
@@ -55,6 +55,8 @@ def test_smoke_bootstrap_dry_run_reports_fixed_range(tmp_path):
     assert summary["start_date"] == "2026-05-20"
     assert summary["end_date"] == "2026-06-04"
     assert summary["init_count"] == 384
+    assert summary["decoder_init_count"] == 384
+    assert summary["decoder_skipped_tail_cap"] == 0
     assert summary["smoke_split"] == {
         "train": ["2026-05-26", "2026-05-30"],
         "val": ["2026-05-31", "2026-06-01"],
@@ -84,4 +86,5 @@ def test_smoke_bootstrap_calls_bootstrap_and_decoder_steps(tmp_path):
     assert summary["hrrr_f01_written"] == 384
     assert summary["obs_written"] == 384
     assert summary["decoder"]["rows_written"] == 384 * 48
+    assert summary["decoder"]["skipped_tail_cap"] == 0
     assert (tmp_path / "smoke" / "smoke_summary.json").exists()

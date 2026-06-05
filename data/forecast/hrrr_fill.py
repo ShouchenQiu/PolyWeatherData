@@ -9,8 +9,9 @@ For valid_times in the tail that are not covered by the nearest MAJOR run
 before that and logs a WARNING.  [ADR-0005]
 
 For valid_times not covered by any MAJOR run, HrrrFill linearly extrapolates
-from the last aligned value.  Extrapolation is capped at 3 hours; beyond that
-a RuntimeError is raised.  Extrapolated rows are flagged with
+from the last aligned value.  Extrapolation is capped at 5 hours, matching the
+worst-case HRRR off-hour tail needed to reach f48; beyond that a RuntimeError
+is raised.  Extrapolated rows are flagged with
 is_extrapolated=True.
 """
 from __future__ import annotations
@@ -20,7 +21,7 @@ from loguru import logger
 
 MAJOR_HOURS = frozenset({0, 6, 12, 18})
 _TARGET_FXX_COUNT = 49  # fxx 0..48 inclusive
-_MAX_EXTRAP_HOURS = 3
+_MAX_EXTRAP_HOURS = 5
 # Metadata columns excluded from data_cols union and not copied from source rows.
 _META_COLS = frozenset({"init_time", "fxx", "valid_time", "_vt", "_vt_raw", "is_extrapolated"})
 
@@ -175,7 +176,8 @@ class HrrrFill:
                 extrap_steps += 1
                 if extrap_steps > _MAX_EXTRAP_HOURS:
                     raise RuntimeError(
-                        f"HrrrFill: tail gap exceeds 3-hour cap for init={init_utc}; "
+                        f"HrrrFill: tail gap exceeds {_MAX_EXTRAP_HOURS}-hour cap "
+                        f"for init={init_utc}; "
                         f"fxx={fxx} has no coverage from any MAJOR run"
                     )
                 src_row = None
@@ -218,4 +220,3 @@ class HrrrFill:
             )
 
         return pd.DataFrame(rows)
-

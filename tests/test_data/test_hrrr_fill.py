@@ -216,14 +216,26 @@ def test_fill_tail_extrapolation_marks_is_extrapolated_true():
     assert set(extrap["fxx"]) == {46, 47, 48}
 
 
-def test_fill_tail_extrapolation_raises_beyond_3h():
-    """RuntimeError when uncovered tail exceeds 3 hours."""
+def test_fill_tail_extrapolation_covers_worst_case_5h_tail():
+    """Worst-case off-hour tail can be extrapolated through f48."""
+    fill = HrrrFill()
+    non_major = _make_df("2026-01-01 05:00", range(0, 19))
+    nearest = _make_df("2026-01-01 00:00", range(0, 49))
+    result = fill.fill(non_major, nearest)
+
+    extrap = result[result["is_extrapolated"] == True]  # noqa: E712
+    assert set(extrap["fxx"]) == {44, 45, 46, 47, 48}
+    assert len(result) == 49
+
+
+def test_fill_tail_extrapolation_raises_beyond_5h():
+    """RuntimeError when uncovered tail exceeds the HRRR off-hour worst case."""
     fill = HrrrFill()
     non_major = _make_df("2026-01-01 03:00", range(0, 19))
-    # nearest = 00Z fxx 0..43; covers 03Z fxx_out 0..40 (vt 03Z+40h = 00Z+43h)
-    # fxx_out 41..44 are uncovered (4 steps) -> raises at step 4
-    nearest = _make_df("2026-01-01 00:00", range(0, 44))
-    with pytest.raises(RuntimeError, match="tail gap exceeds 3-hour cap"):
+    # nearest = 00Z fxx 0..40; covers 03Z fxx_out 0..37.
+    # fxx_out 38..43 are uncovered (6 steps) -> raises at step 6.
+    nearest = _make_df("2026-01-01 00:00", range(0, 41))
+    with pytest.raises(RuntimeError, match="tail gap exceeds 5-hour cap"):
         fill.fill(non_major, nearest)
 
 
