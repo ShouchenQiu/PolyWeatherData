@@ -36,16 +36,22 @@ class FakeForecastSource:
 
 class FakeObsSource:
     def __init__(self) -> None:
-        self.calls: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        self.calls: list[tuple[pd.Timestamp, pd.Timestamp, pd.Timestamp | None]] = []
 
     def fetch(self, station, start, end, now_utc=None):
         start_ts = pd.Timestamp(start).tz_convert("UTC")
         end_ts = pd.Timestamp(end).tz_convert("UTC")
-        self.calls.append((start_ts, end_ts))
+        now_ts = pd.Timestamp(now_utc).tz_convert("UTC") if now_utc is not None else None
+        self.calls.append((start_ts, end_ts, now_ts))
+        valid_time = (
+            now_ts - pd.Timedelta(hours=1)
+            if now_ts is not None
+            else start_ts
+        ).replace(minute=51, second=0, microsecond=0)
         return pd.DataFrame(
             [
                 {
-                    "valid_time": start_ts + pd.Timedelta(minutes=51),
+                    "valid_time": valid_time,
                     "raw_tmpc_tenths": 20.0,
                     "raw_dwpc_tenths": 10.0,
                     "raw_wind_spd_kt": 4.0,
@@ -106,14 +112,26 @@ def test_batch_iem_bootstrap_writes_clean_obs_store(tmp_path):
         pd.Timestamp("2026-01-01", tz="UTC"),
         pd.Timestamp("2026-01-02", tz="UTC"),
     )
-    assert written == 1
-    assert source.calls == [
-        (
-            pd.Timestamp("2026-01-01 00:00:00", tz="UTC"),
-            pd.Timestamp("2026-01-01 23:59:59", tz="UTC"),
+    assert written == 24
+    assert len(source.calls) == 24
+    assert source.calls[0] == (
+        pd.Timestamp("2026-01-01 00:00:00", tz="UTC"),
+        pd.Timestamp("2026-01-01 00:00:00", tz="UTC"),
+        pd.Timestamp("2026-01-01 00:00:00", tz="UTC"),
+    )
+    assert source.calls[-1] == (
+        pd.Timestamp("2026-01-01 23:00:00", tz="UTC"),
+        pd.Timestamp("2026-01-01 23:00:00", tz="UTC"),
+        pd.Timestamp("2026-01-01 23:00:00", tz="UTC"),
+    )
+    assert list(df["valid_time"]) == list(
+        pd.date_range(
+            "2026-01-01 00:00:00",
+            "2026-01-01 23:00:00",
+            freq="h",
+            tz="UTC",
         )
-    ]
-    assert list(df["valid_time"]) == [pd.Timestamp("2026-01-01 01:00:00", tz="UTC")]
+    )
     assert df["raw_wind_gust_kt"].iloc[0] == 4.0
     assert df["p01i"].iloc[0] == 0.0
     assert "obs_WS" in df.columns
@@ -151,9 +169,6 @@ def test_batch_iem_does_not_skip_day_with_only_boundary_obs(tmp_path):
 
     downloader.run("2026-06-04", "2026-06-04")
 
-    assert source.calls == [
-        (
-            pd.Timestamp("2026-06-04 00:00:00", tz="UTC"),
-            pd.Timestamp("2026-06-04 23:59:59", tz="UTC"),
-        )
-    ]
+    assert len(source.calls) == 24
+    assert source.calls[0][2] == pd.Timestamp("2026-06-04 00:00:00", tz="UTC")
+    assert source.calls[-1][2] == pd.Timestamp("2026-06-04 23:00:00", tz="UTC")

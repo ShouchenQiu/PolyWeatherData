@@ -159,18 +159,42 @@ def test_iem_obs_uv_forward_backward_filled_then_zero_filled():
 # ---------------------------------------------------------------------------
 
 
-def test_iem_hourly_dedup_keeps_first():
+def test_iem_hourly_dedup_prefers_51_representative_observation():
     df = pd.DataFrame({
         "valid_time": [
             "2026-01-01 00:05:00",  # rounds to 00:00
             "2026-01-01 00:50:00",  # rounds to 01:00
-            "2026-01-01 00:55:00",  # also rounds to 01:00 -> drop
+            "2026-01-01 00:51:00",  # preferred representative for 01:00
         ],
         "raw_tmpc_tenths": [1.0, 2.0, 3.0],
     })
     result = Cleaner.clean_iem(df)
     assert len(result) == 2
-    assert result["raw_tmpc_tenths"].tolist() == pytest.approx([1.0, 2.0])
+    assert result["raw_tmpc_tenths"].tolist() == pytest.approx([1.0, 3.0])
+
+
+def test_iem_hourly_dedup_rejects_implausible_temperature_candidate():
+    df = pd.DataFrame({
+        "valid_time": [
+            "2026-05-20 20:51:00",
+            "2026-05-20 21:10:00",
+            "2026-05-20 21:15:00",
+        ],
+        "raw_tmpc_tenths": [34.4, -61.0, 35.0],
+        "raw_dwpc_tenths": [16.7, -61.0, 17.0],
+    })
+    messages: list[str] = []
+    from loguru import logger as _logger
+    sink_id = _logger.add(lambda msg: messages.append(msg), level="WARNING")
+    try:
+        result = Cleaner.clean_iem(df)
+    finally:
+        _logger.remove(sink_id)
+
+    assert len(result) == 1
+    assert result["valid_time"].iloc[0] == pd.Timestamp("2026-05-20 21:00:00+00:00")
+    assert result["raw_tmpc_tenths"].iloc[0] == pytest.approx(34.4)
+    assert any("implausible IEM temperature" in m for m in messages)
 
 
 # ---------------------------------------------------------------------------

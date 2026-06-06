@@ -119,3 +119,113 @@ def test_data_health_renders_daily_coverage_cleaning_and_seed_timing(tmp_path):
     assert "hrrr_fxx_all_one" in checks["check"].tolist()
     timings = next(table for table in rendered_tables if "rows_per_second" in table.columns)
     assert timings.loc[timings["stage"] == "clob", "rows_written"].iloc[0] == 22
+
+
+def test_temperature_comparison_frame_aligns_hrrr_f01_and_iem_obs(tmp_path):
+    root = tmp_path / "data_store"
+    hrrr_store = ParquetStore(root / "hrrr")
+    obs_store = ParquetStore(root / "obs")
+    hour = pd.Timestamp("2026-06-04 01:00:00", tz="UTC")
+    hrrr_store.append(
+        "KLGA",
+        pd.DataFrame(
+            [
+                {
+                    "init_time": hour - pd.Timedelta(hours=1),
+                    "fxx": 1,
+                    "valid_time": hour,
+                    "TMP_2m": 20.0,
+                }
+            ]
+        ),
+    )
+    obs_store.append(
+        "KLGA",
+        pd.DataFrame(
+            [
+                {
+                    "valid_time": hour + pd.Timedelta(minutes=5),
+                    "raw_tmpc_tenths": 19.0,
+                },
+                {
+                    "valid_time": hour + pd.Timedelta(minutes=51),
+                    "raw_tmpc_tenths": 21.5,
+                },
+            ]
+        ),
+    )
+
+    frame = data_health._temperature_comparison_frame(root, "KLGA")
+
+    assert frame["valid_hour"].tolist() == [hour]
+    assert frame["hrrr_f01_c"].tolist() == [20.0]
+    assert frame["iem_obs_c"].tolist() == [21.5]
+    assert frame["temp_error_c"].tolist() == [-1.5]
+    assert frame["has_hrrr"].tolist() == [True]
+    assert frame["has_obs"].tolist() == [True]
+
+
+def test_temperature_comparison_frame_empty_store_has_fixed_columns(tmp_path):
+    frame = data_health._temperature_comparison_frame(tmp_path / "data_store", "KLGA")
+
+    assert frame.empty
+    assert frame.columns.tolist() == [
+        "station_id",
+        "valid_hour",
+        "hrrr_f01_c",
+        "iem_obs_c",
+        "temp_error_c",
+        "has_hrrr",
+        "has_obs",
+    ]
+
+
+def test_data_health_renders_temperature_comparison_chart(tmp_path):
+    root = tmp_path / "data_store"
+    hrrr_store = ParquetStore(root / "hrrr")
+    obs_store = ParquetStore(root / "obs")
+    hour = pd.Timestamp("2026-06-04 01:00:00", tz="UTC")
+    hrrr_store.append(
+        "KLGA",
+        pd.DataFrame(
+            [
+                {
+                    "init_time": hour - pd.Timedelta(hours=1),
+                    "fxx": 1,
+                    "valid_time": hour,
+                    "TMP_2m": 20.0,
+                }
+            ]
+        ),
+    )
+    obs_store.append(
+        "KLGA",
+        pd.DataFrame(
+            [{"valid_time": hour, "raw_tmpc_tenths": 21.0}]
+        ),
+    )
+    db = DbClient(":memory:")
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("streamlit.header"))
+        stack.enter_context(patch("streamlit.subheader"))
+        stack.enter_context(patch("streamlit.info"))
+        stack.enter_context(patch("streamlit.dataframe"))
+        stack.enter_context(patch("streamlit.selectbox", side_effect=["KLGA", "All"]))
+        stack.enter_context(patch("streamlit.columns", return_value=[_MetricCol(), _MetricCol(), _MetricCol(), _MetricCol()]))
+        plotly_chart = stack.enter_context(patch("streamlit.plotly_chart"))
+
+        data_health.render(db, data_store_dir=root)
+
+    assert plotly_chart.call_count >= 1
+
+
+class _MetricCol:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def metric(self, *_args, **_kwargs):
+        return None

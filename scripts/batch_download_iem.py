@@ -1,9 +1,8 @@
-"""BatchIemDownloader: bulk-download historical IEM ASOS observations into ParquetStore.
+"""BatchIemDownloader: bulk-download hourly IEM ASOS observations into ParquetStore.
 
-Ported from Herbie-main/iem_download_klga.py.
-
-Downloads per-day ASOS observation history from the IEM obhistory JSON API,
-accumulates into a DataFrame, and appends to ParquetStore.
+Downloads the hourly representative ASOS observation for each canonical hour.
+The source fetch uses the same tick-mode semantics as live ingestion: for hour
+H, request the H-1 ``:51`` METAR and store it as H after cleaning.
 
 Usage (CLI):
     python3 -m scripts.batch_download_iem --start 2025-12-01 --end 2026-02-25
@@ -25,7 +24,6 @@ import time
 from datetime import date, timedelta
 
 import pandas as pd
-import requests
 
 from data.storage.parquet_store import ParquetStore
 from data.storage.cleaner import Cleaner
@@ -33,17 +31,14 @@ from data.obs.iem import IemSource
 from config.settings import Settings
 from config.stations import STATIONS
 
-_IEM_JSON_URL = (
-    "https://mesonet.agron.iastate.edu/api/1/obhistory.json"
-    "?station={station}&network={network}&date={date}"
-)
 _DEFAULT_DELAY   = 0.4    # seconds between requests (polite rate limit)
+_DEFAULT_TIMEOUT = 10
 _DEFAULT_RETRIES = 3
 _DONE_DAY_MIN_HOURS = 20
 
 
 class BatchIemDownloader:
-    """Download historical ASOS observations from the IEM obhistory JSON API.
+    """Download historical hourly representative ASOS observations.
 
     Parameters
     ----------
@@ -52,9 +47,9 @@ class BatchIemDownloader:
     station_id:
         Key used for the ParquetStore sub-directory (e.g. ``"KLGA"``).
     delay:
-        Seconds to wait between daily requests to be polite to IEM servers.
+        Seconds to wait between hourly requests to be polite to IEM servers.
     retries:
-        Number of retry attempts per day request on failure.
+        Retained for constructor compatibility. IemSource owns request retries.
     """
 
     def __init__(
@@ -70,10 +65,7 @@ class BatchIemDownloader:
         self._station    = station_config or STATIONS[station_id]
         self._station_id = self._station.station_id
         self._delay      = delay
-        self._retries    = retries
-        self._source     = obs_source or IemSource()
-        self._session    = requests.Session()
-        self._session.headers.update({"User-Agent": "PolyWeatherBot-IEM-downloader/1.0"})
+        self._source     = obs_source or IemSource(timeout=_DEFAULT_TIMEOUT)
 
     # ------------------------------------------------------------------
     # Public API
@@ -110,7 +102,8 @@ class BatchIemDownloader:
 
         print(
             f"BatchIemDownloader: {total_days} days, "
-            f"{len(done)} already done, station={station}"
+            f"{len(done)} already done, station={station}",
+            flush=True,
         )
 
         d = d0
@@ -119,48 +112,36 @@ class BatchIemDownloader:
                 d += timedelta(days=1)
                 continue
 
-            start = pd.Timestamp(d.isoformat() + " 00:00:00", tz="UTC")
-            end = pd.Timestamp(d.isoformat() + " 23:59:59", tz="UTC")
-            df_day = self._source.fetch(self._station, start, end)
-            if df_day is None or df_day.empty:
-                rows = []
-            else:
-                df_day = Cleaner.process_iem(df_day)
-                rows = df_day.to_dict("records")
+            rows = []
+            for valid_hour in pd.date_range(
+                pd.Timestamp(d.isoformat() + " 00:00:00", tz="UTC"),
+                pd.Timestamp(d.isoformat() + " 23:00:00", tz="UTC"),
+                freq="h",
+            ):
+                df_hour = self._source.fetch(
+                    self._station,
+                    valid_hour,
+                    valid_hour,
+                    now_utc=valid_hour,
+                )
+                if df_hour is not None and not df_hour.empty:
+                    df_hour = Cleaner.process_iem(df_hour)
+                    rows.extend(df_hour.to_dict("records"))
+                if self._delay > 0.0:
+                    time.sleep(self._delay)
             all_rows.extend(rows)
             total_rows += len(rows)
-            print(f"[{d}] {len(rows):4d} obs  (cumulative: {total_rows})")
+            print(f"[{d}] {len(rows):4d} obs  (cumulative: {total_rows})", flush=True)
 
             d += timedelta(days=1)
-            time.sleep(self._delay)
 
         if all_rows:
             df = pd.DataFrame(all_rows)
             written = self._store.append(self._station_id, df)
-            print(f"\nFlushed {written} rows to store.")
+            print(f"\nFlushed {written} rows to store.", flush=True)
 
-        print(f"BatchIemDownloader done: {total_rows} new rows.")
+        print(f"BatchIemDownloader done: {total_rows} new rows.", flush=True)
         return total_rows
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _fetch_day(
-        self, d: date, station: str, network: str
-    ) -> list[dict]:
-        url = _IEM_JSON_URL.format(
-            station=station, network=network, date=d.isoformat()
-        )
-        for attempt in range(self._retries):
-            try:
-                resp = self._session.get(url, timeout=30)
-                resp.raise_for_status()
-                return resp.json().get("data", [])
-            except Exception as exc:
-                print(f"  [{d}] attempt {attempt + 1} failed: {exc}")
-                time.sleep(2 ** attempt)
-        return []
 
     def _already_done_dates(self) -> set[str]:
         """Return dates with enough hourly observation coverage in the store."""
@@ -185,12 +166,6 @@ class BatchIemDownloader:
             return set(coverage[coverage >= _DONE_DAY_MIN_HOURS].index)
         except Exception:
             return set()
-
-    def _normalise(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Ensure consistent column types before writing to store."""
-        if "utc_valid" in df.columns:
-            df["utc_valid"] = pd.to_datetime(df["utc_valid"], utc=True)
-        return df
 
 
 # ---------------------------------------------------------------------------

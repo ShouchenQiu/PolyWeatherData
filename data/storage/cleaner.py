@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 # Temperature columns that arrive in Kelvin from GRIB2 / eccodes
 _KELVIN_COLS = [
@@ -28,6 +29,7 @@ _HRRR_CLIP_BOUNDS: dict[str, tuple[float, float]] = {
 
 # IEM numeric columns that should be zero-filled when missing
 _IEM_ZERO_FILL = ["is_rain", "is_snow", "p01i"]
+_IEM_TEMP_BOUNDS_C = (-40.0, 55.0)
 
 _KELVIN_OFFSET = 273.15
 # IEM temperatures arrive as Celsius tenths (raw_tmpc_tenths) in tenths of a degree
@@ -85,13 +87,15 @@ class Cleaner:
         """Clean a raw IEM METAR observation DataFrame.
 
         Steps applied in order:
-        1. Parse valid_time to UTC-aware Timestamp and round to the
-           representative whole hour.
-        2. Sort by valid_time so that forward/backward fills are time-directed.
-        3. Fill missing wind gust with wind speed.
-        4. Zero-fill accumulation/flag columns and fill sky cover.
-        5. Fill observed wind components from neighbouring rows.
-        6. Deduplicate by hourly valid_time (keep first).
+        1. Parse valid_time to UTC-aware Timestamp.
+        2. Drop implausible observed temperatures.
+        3. Round valid_time to the representative whole hour.
+        4. Sort by representative hour, candidate quality, and raw time so
+           fills are time-directed and hourly dedup keeps the best candidate.
+        5. Fill missing wind gust with wind speed.
+        6. Zero-fill accumulation/flag columns and fill sky cover.
+        7. Fill observed wind components from neighbouring rows.
+        8. Deduplicate by hourly valid_time (keep first).
         """
         df = df.copy()
 
@@ -99,12 +103,56 @@ class Cleaner:
         # nearest whole hour, e.g. 13:51 is stored as 14:00.
         if "valid_time" in df.columns:
             df["valid_time"] = pd.to_datetime(df["valid_time"], utc=True)
+            original_valid_time = df["valid_time"].copy()
+
+            if "raw_tmpc_tenths" in df.columns:
+                lo, hi = _IEM_TEMP_BOUNDS_C
+                temp = pd.to_numeric(df["raw_tmpc_tenths"], errors="coerce")
+                bad_temp = temp.notna() & ((temp < lo) | (temp > hi))
+                if bad_temp.any():
+                    logger.warning(
+                        "cleaner: dropped {} rows with implausible IEM temperature "
+                        "outside [{}, {}] C",
+                        int(bad_temp.sum()),
+                        lo,
+                        hi,
+                    )
+                    df = df.loc[~bad_temp].copy()
+                    original_valid_time = original_valid_time.loc[df.index].copy()
+
             df["valid_time"] = df["valid_time"].dt.round("h")
+            representative_target = df["valid_time"] - pd.Timedelta(minutes=9)
+            df["_iem_candidate_distance_s"] = (
+                original_valid_time - representative_target
+            ).abs().dt.total_seconds()
+            df["_iem_original_valid_time"] = original_valid_time
+            quality_cols = [
+                c for c in df.columns
+                if c not in {
+                    "valid_time",
+                    "_iem_candidate_distance_s",
+                    "_iem_candidate_complete",
+                    "_iem_original_valid_time",
+                }
+            ]
+            if quality_cols:
+                df["_iem_candidate_complete"] = df[quality_cols].notna().sum(axis=1)
+            else:
+                df["_iem_candidate_complete"] = 0
 
         # 2. Sort by valid_time before any fills so ffill/bfill are
         # time-directed regardless of row arrival order.
         if "valid_time" in df.columns:
-            df = df.sort_values("valid_time").reset_index(drop=True)
+            sort_cols = ["valid_time"]
+            ascending = [True]
+            if "_iem_candidate_distance_s" in df.columns:
+                sort_cols.extend([
+                    "_iem_candidate_distance_s",
+                    "_iem_candidate_complete",
+                    "_iem_original_valid_time",
+                ])
+                ascending.extend([True, False, True])
+            df = df.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
 
         # 3. Fill missing gust with speed
         if "raw_wind_gust_kt" in df.columns and "raw_wind_spd_kt" in df.columns:
@@ -129,6 +177,17 @@ class Cleaner:
         # 6. Hourly dedup: valid_time is already canonicalized to the hour.
         if "valid_time" in df.columns:
             df = df.drop_duplicates(subset="valid_time", keep="first")
+
+        df = df.drop(
+            columns=[
+                c for c in [
+                    "_iem_candidate_distance_s",
+                    "_iem_candidate_complete",
+                    "_iem_original_valid_time",
+                ]
+                if c in df.columns
+            ]
+        )
 
         return df.reset_index(drop=True)
 

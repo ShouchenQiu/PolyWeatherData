@@ -124,6 +124,9 @@ class IemSource(BaseObsSource):
             end.tz_localize("UTC") if end.tzinfo is None
             else end.tz_convert("UTC")
         )
+        request_end_utc = end_utc
+        if now_utc is not None:
+            request_end_utc = end_utc.ceil("min")
 
         # IEM uses the 4-letter ID but ASOs API takes 3 or 4 letters;
         # strip leading 'K' for ICAO->FAA conversion if needed
@@ -144,11 +147,11 @@ class IemSource(BaseObsSource):
             "day1":    str(start_utc.day),
             "hour1":   str(start_utc.hour),
             "minute1": str(start_utc.minute),
-            "year2":   str(end_utc.year),
-            "month2":  str(end_utc.month),
-            "day2":    str(end_utc.day),
-            "hour2":   str(end_utc.hour),
-            "minute2": str(end_utc.minute),
+            "year2":   str(request_end_utc.year),
+            "month2":  str(request_end_utc.month),
+            "day2":    str(request_end_utc.day),
+            "hour2":   str(request_end_utc.hour),
+            "minute2": str(request_end_utc.minute),
         }
 
         csv_text = self._download_csv(params)

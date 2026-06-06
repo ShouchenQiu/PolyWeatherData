@@ -391,14 +391,16 @@ def test_fetch_tick_mode_uses_51_timestamp():
         )
 
     # now_utc=14:00, H-1=13:00, target=13:51
-    # window=[13:50:30, 13:51:30] -> hour1=13, minute1=50, hour2=13, minute2=51
+    # window=[13:50:30, 13:51:30]. IEM's minute-granularity end bound is
+    # exclusive enough that minute2=51 omits the :51 row, so request through :52
+    # and let the tick post-filter keep only :51 +/- 30s.
     assert captured_params.get("year1") == "2026"
     assert captured_params.get("month1") == "1"
     assert captured_params.get("day1") == "1"
     assert captured_params.get("hour1") == "13"
     assert captured_params.get("minute1") == "50"
     assert captured_params.get("hour2") == "13"
-    assert captured_params.get("minute2") == "51"
+    assert captured_params.get("minute2") == "52"
 
 
 def test_fetch_tick_mode_filters_result_to_window():
