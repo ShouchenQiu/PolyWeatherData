@@ -1,8 +1,8 @@
 """BatchIemDownloader: bulk-download hourly IEM ASOS observations into ParquetStore.
 
-Downloads the hourly representative ASOS observation for each canonical hour.
-The source fetch uses the same tick-mode semantics as live ingestion: for hour
-H, request the H-1 ``:51`` METAR and store it as H after cleaning.
+Downloads one 24-hour ASOS CSV per target date, keeps only exact ``:51``
+observations locally, and stores those rows as the next canonical hour after
+cleaning.
 
 Usage (CLI):
     python3 -m scripts.batch_download_iem --start 2025-12-01 --end 2026-02-25
@@ -47,7 +47,7 @@ class BatchIemDownloader:
     station_id:
         Key used for the ParquetStore sub-directory (e.g. ``"KLGA"``).
     delay:
-        Seconds to wait between hourly requests to be polite to IEM servers.
+        Seconds to wait between daily requests to be polite to IEM servers.
     retries:
         Retained for constructor compatibility. IemSource owns request retries.
     """
@@ -112,28 +112,27 @@ class BatchIemDownloader:
                 d += timedelta(days=1)
                 continue
 
-            rows = []
-            for valid_hour in pd.date_range(
-                pd.Timestamp(d.isoformat() + " 00:00:00", tz="UTC"),
-                pd.Timestamp(d.isoformat() + " 23:00:00", tz="UTC"),
-                freq="h",
-            ):
-                df_hour = self._source.fetch(
-                    self._station,
-                    valid_hour,
-                    valid_hour,
-                    now_utc=valid_hour,
-                )
-                if df_hour is not None and not df_hour.empty:
-                    df_hour = Cleaner.process_iem(df_hour)
-                    rows.extend(df_hour.to_dict("records"))
-                if self._delay > 0.0:
-                    time.sleep(self._delay)
+            # Target canonical hours d 00:00..23:00 are represented by raw
+            # METARs from (d-1) 23:51 through d 22:51.
+            start = pd.Timestamp(d.isoformat() + " 00:00:00", tz="UTC") - pd.Timedelta(hours=1)
+            end = pd.Timestamp(d.isoformat() + " 22:59:59", tz="UTC")
+            df_day = self._source.fetch(self._station, start, end)
+            if df_day is None or df_day.empty:
+                rows = []
+            else:
+                df_day = self._filter_exact_51(df_day)
+                if df_day.empty:
+                    rows = []
+                else:
+                    df_day = Cleaner.process_iem(df_day)
+                    rows = df_day.to_dict("records")
             all_rows.extend(rows)
             total_rows += len(rows)
             print(f"[{d}] {len(rows):4d} obs  (cumulative: {total_rows})", flush=True)
 
             d += timedelta(days=1)
+            if self._delay > 0.0:
+                time.sleep(self._delay)
 
         if all_rows:
             df = pd.DataFrame(all_rows)
@@ -142,6 +141,20 @@ class BatchIemDownloader:
 
         print(f"BatchIemDownloader done: {total_rows} new rows.", flush=True)
         return total_rows
+
+    @staticmethod
+    def _filter_exact_51(df: pd.DataFrame) -> pd.DataFrame:
+        """Return only exact :51 observations before hourly canonicalization."""
+        if df.empty or "valid_time" not in df.columns:
+            return df.iloc[0:0].copy()
+        valid_time = pd.to_datetime(df["valid_time"], utc=True, errors="coerce")
+        mask = (
+            valid_time.notna()
+            & (valid_time.dt.minute == 51)
+            & (valid_time.dt.second == 0)
+            & (valid_time.dt.microsecond == 0)
+        )
+        return df.loc[mask].reset_index(drop=True)
 
     def _already_done_dates(self) -> set[str]:
         """Return dates with enough hourly observation coverage in the store."""

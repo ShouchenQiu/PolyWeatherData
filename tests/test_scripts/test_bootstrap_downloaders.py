@@ -43,15 +43,26 @@ class FakeObsSource:
         end_ts = pd.Timestamp(end).tz_convert("UTC")
         now_ts = pd.Timestamp(now_utc).tz_convert("UTC") if now_utc is not None else None
         self.calls.append((start_ts, end_ts, now_ts))
-        valid_time = (
-            now_ts - pd.Timedelta(hours=1)
-            if now_ts is not None
-            else start_ts
-        ).replace(minute=51, second=0, microsecond=0)
-        return pd.DataFrame(
-            [
+        rows = []
+        for valid_time in pd.date_range(start_ts, end_ts.floor("h"), freq="h"):
+            rows.append(
                 {
                     "valid_time": valid_time,
+                    "raw_tmpc_tenths": 99.0,
+                    "raw_dwpc_tenths": 10.0,
+                    "raw_wind_spd_kt": 4.0,
+                    "raw_wind_gust_kt": None,
+                    "obs_U": 1.0,
+                    "obs_V": 0.0,
+                    "skyc1": 0.0,
+                    "p01i": None,
+                    "is_rain": None,
+                    "is_snow": None,
+                }
+            )
+            rows.append(
+                {
+                    "valid_time": valid_time.replace(minute=51),
                     "raw_tmpc_tenths": 20.0,
                     "raw_dwpc_tenths": 10.0,
                     "raw_wind_spd_kt": 4.0,
@@ -63,7 +74,9 @@ class FakeObsSource:
                     "is_rain": None,
                     "is_snow": None,
                 }
-            ]
+            )
+        return pd.DataFrame(
+            rows
         )
 
 
@@ -113,17 +126,13 @@ def test_batch_iem_bootstrap_writes_clean_obs_store(tmp_path):
         pd.Timestamp("2026-01-02", tz="UTC"),
     )
     assert written == 24
-    assert len(source.calls) == 24
-    assert source.calls[0] == (
-        pd.Timestamp("2026-01-01 00:00:00", tz="UTC"),
-        pd.Timestamp("2026-01-01 00:00:00", tz="UTC"),
-        pd.Timestamp("2026-01-01 00:00:00", tz="UTC"),
-    )
-    assert source.calls[-1] == (
-        pd.Timestamp("2026-01-01 23:00:00", tz="UTC"),
-        pd.Timestamp("2026-01-01 23:00:00", tz="UTC"),
-        pd.Timestamp("2026-01-01 23:00:00", tz="UTC"),
-    )
+    assert source.calls == [
+        (
+            pd.Timestamp("2025-12-31 23:00:00", tz="UTC"),
+            pd.Timestamp("2026-01-01 22:59:59", tz="UTC"),
+            None,
+        )
+    ]
     assert list(df["valid_time"]) == list(
         pd.date_range(
             "2026-01-01 00:00:00",
@@ -132,9 +141,33 @@ def test_batch_iem_bootstrap_writes_clean_obs_store(tmp_path):
             tz="UTC",
         )
     )
+    assert set(df["raw_tmpc_tenths"]) == {20.0}
     assert df["raw_wind_gust_kt"].iloc[0] == 4.0
     assert df["p01i"].iloc[0] == 0.0
     assert "obs_WS" in df.columns
+
+
+def test_batch_iem_filters_daily_download_to_exact_51_observations(tmp_path):
+    store = ParquetStore(tmp_path / "obs")
+    source = FakeObsSource()
+    downloader = BatchIemDownloader(
+        store,
+        station_config=STATIONS["KLGA"],
+        obs_source=source,
+        delay=0.0,
+    )
+
+    downloader.run("2026-01-01", "2026-01-01")
+
+    df = store.read(
+        "KLGA",
+        pd.Timestamp("2026-01-01 00:00:00", tz="UTC"),
+        pd.Timestamp("2026-01-02 00:00:00", tz="UTC"),
+    )
+
+    assert len(source.calls) == 1
+    assert len(df) == 24
+    assert df["raw_tmpc_tenths"].tolist() == [20.0] * 24
 
 
 def test_batch_iem_does_not_skip_day_with_only_boundary_obs(tmp_path):
@@ -169,6 +202,10 @@ def test_batch_iem_does_not_skip_day_with_only_boundary_obs(tmp_path):
 
     downloader.run("2026-06-04", "2026-06-04")
 
-    assert len(source.calls) == 24
-    assert source.calls[0][2] == pd.Timestamp("2026-06-04 00:00:00", tz="UTC")
-    assert source.calls[-1][2] == pd.Timestamp("2026-06-04 23:00:00", tz="UTC")
+    assert source.calls == [
+        (
+            pd.Timestamp("2026-06-03 23:00:00", tz="UTC"),
+            pd.Timestamp("2026-06-04 22:59:59", tz="UTC"),
+            None,
+        )
+    ]
