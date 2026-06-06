@@ -27,12 +27,24 @@ _TEMP_COMPARISON_COLUMNS = [
     "has_hrrr",
     "has_obs",
 ]
+_HRRR_48H_COLUMNS = [
+    "station_id",
+    "init_time",
+    "fxx",
+    "valid_time",
+    "forecast_c",
+    "observed_c",
+    "error_c",
+    "abs_error_c",
+    "has_obs",
+]
 
 
 def render(db: "DbClient", data_store_dir: Path | str | None = None) -> None:
     st.header("Data Health")
 
     _render_temperature_comparison(data_store_dir)
+    _render_hrrr_48h_verification(data_store_dir)
 
     store_summary = _parquet_store_summary(data_store_dir)
     st.subheader("Bootstrap Stores")
@@ -127,6 +139,81 @@ def _render_temperature_comparison(data_store_dir: Path | str | None = None) -> 
         )
 
 
+def _render_hrrr_48h_verification(data_store_dir: Path | str | None = None) -> None:
+    root = _resolve_data_store_dir(data_store_dir)
+    st.subheader("HRRR 48h Forecast Verification")
+    stations = _stations_with_decoder_cache(root)
+    if not stations:
+        st.info("No HRRR 48h decoder cache data.")
+        return
+    station_id = st.selectbox(
+        "48h Station",
+        stations,
+        index=0,
+    )
+    range_label = st.selectbox("Init Range", ["Last 48", "Last 96", "All"], index=0)
+    init_limit = {"Last 48": 48, "Last 96": 96, "All": None}[range_label]
+    frame = _hrrr_48h_verification_frame(root, station_id, init_limit=init_limit)
+    if frame.empty:
+        st.info("No HRRR 48h decoder cache data.")
+        return
+
+    metrics = _hrrr_48h_metrics(frame)
+    cols = st.columns(4)
+    cols[0].metric("Matched Hours", metrics["matched_hours"])
+    cols[1].metric("Missing Obs", metrics["missing_obs_hours"])
+    cols[2].metric("MAE / Bias C", f"{metrics['mae_c']:.2f} / {metrics['bias_c']:.2f}")
+    cols[3].metric("Max Abs Error C", f"{metrics['max_abs_error_c']:.2f}")
+
+    heatmap_df = frame.copy()
+    heatmap_df["init_label"] = pd.to_datetime(
+        heatmap_df["init_time"], utc=True
+    ).dt.strftime("%Y-%m-%d %H:%M")
+    st.plotly_chart(
+        px.density_heatmap(
+            heatmap_df,
+            x="fxx",
+            y="init_label",
+            z="error_c",
+            color_continuous_scale="RdBu_r",
+            range_color=[
+                -max(1.0, metrics["max_abs_error_c"]),
+                max(1.0, metrics["max_abs_error_c"]),
+            ],
+            title="HRRR 48h Error by Init Time and Forecast Hour",
+            labels={"init_label": "init_time", "error_c": "error C"},
+        ),
+        use_container_width=True,
+    )
+
+    init_options = [
+        str(ts) for ts in sorted(pd.to_datetime(frame["init_time"], utc=True).unique())
+    ]
+    selected_init = st.selectbox("Init Time", init_options, index=len(init_options) - 1)
+    selected_ts = pd.Timestamp(selected_init)
+    selected = frame[pd.to_datetime(frame["init_time"], utc=True) == selected_ts].copy()
+    if selected.empty:
+        return
+    curve_df = selected.melt(
+        id_vars=["fxx", "valid_time"],
+        value_vars=["forecast_c", "observed_c"],
+        var_name="series",
+        value_name="temperature_c",
+    )
+    st.plotly_chart(
+        px.line(
+            curve_df,
+            x="valid_time",
+            y="temperature_c",
+            color="series",
+            markers=True,
+            title="Selected Init 48h Forecast vs Observed",
+        ),
+        use_container_width=True,
+    )
+    st.dataframe(selected, use_container_width=True)
+
+
 def _stations_with_temperature_data(root: Path) -> list[str]:
     stations = []
     for station_id in STATIONS:
@@ -134,6 +221,14 @@ def _stations_with_temperature_data(root: Path) -> list[str]:
         if not frame.empty:
             stations.append(station_id)
     return stations or ["KLGA"]
+
+
+def _stations_with_decoder_cache(root: Path) -> list[str]:
+    cache_root = root / "_decoder_cache"
+    return [
+        station_id for station_id in STATIONS
+        if (cache_root / station_id).exists()
+    ]
 
 
 def _filter_temperature_range(df: pd.DataFrame, range_label: str) -> pd.DataFrame:
@@ -242,6 +337,82 @@ def _hourly_temperature_frame(
 
 def _empty_temperature_comparison_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=_TEMP_COMPARISON_COLUMNS)
+
+
+def _hrrr_48h_verification_frame(
+    data_store_dir: Path | str | None,
+    station_id: str,
+    init_limit: int | None = 48,
+) -> pd.DataFrame:
+    root = _resolve_data_store_dir(data_store_dir)
+    decoder = _read_decoder_cache(root, station_id)
+    required = {"init_time", "fxx", "valid_time", "TMP_2m"}
+    if decoder.empty or not required.issubset(decoder.columns):
+        return _empty_hrrr_48h_frame()
+
+    frame = decoder[["init_time", "fxx", "valid_time", "TMP_2m"]].copy()
+    frame["station_id"] = station_id
+    frame["init_time"] = pd.to_datetime(frame["init_time"], utc=True)
+    frame["valid_time"] = pd.to_datetime(frame["valid_time"], utc=True)
+    frame["fxx"] = pd.to_numeric(frame["fxx"], errors="coerce")
+    frame = frame[frame["fxx"].between(1, 48)].copy()
+    frame["fxx"] = frame["fxx"].astype(int)
+    frame["forecast_c"] = pd.to_numeric(frame["TMP_2m"], errors="coerce")
+
+    if init_limit is not None and init_limit > 0 and not frame.empty:
+        latest_inits = (
+            pd.Series(frame["init_time"].drop_duplicates())
+            .sort_values()
+            .tail(init_limit)
+        )
+        frame = frame[frame["init_time"].isin(set(latest_inits))].copy()
+
+    obs = _read_store(root, "obs", station_id)
+    if obs.empty or not {"valid_time", "raw_tmpc_tenths"}.issubset(obs.columns):
+        frame["observed_c"] = pd.NA
+    else:
+        obs_temp = obs[["valid_time", "raw_tmpc_tenths"]].copy()
+        obs_temp["valid_time"] = pd.to_datetime(obs_temp["valid_time"], utc=True).dt.floor("h")
+        obs_temp["observed_c"] = pd.to_numeric(obs_temp["raw_tmpc_tenths"], errors="coerce")
+        obs_temp = (
+            obs_temp.sort_values("valid_time")
+            .drop_duplicates(subset=["valid_time"], keep="last")
+            [["valid_time", "observed_c"]]
+        )
+        frame = pd.merge(frame, obs_temp, on="valid_time", how="left")
+
+    frame["has_obs"] = frame["observed_c"].notna()
+    frame["error_c"] = frame["forecast_c"] - frame["observed_c"]
+    frame["abs_error_c"] = frame["error_c"].abs()
+    frame = frame.sort_values(["init_time", "fxx"]).reset_index(drop=True)
+    return frame[_HRRR_48H_COLUMNS]
+
+
+def _read_decoder_cache(root: Path, station_id: str) -> pd.DataFrame:
+    station_dir = root / "_decoder_cache" / station_id
+    if not station_dir.exists():
+        return pd.DataFrame()
+    parts = [pd.read_parquet(path) for path in sorted(station_dir.glob("*.parquet"))]
+    if not parts:
+        return pd.DataFrame()
+    return pd.concat(parts, ignore_index=True)
+
+
+def _empty_hrrr_48h_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=_HRRR_48H_COLUMNS)
+
+
+def _hrrr_48h_metrics(df: pd.DataFrame) -> dict[str, float | int]:
+    matched = df[df["has_obs"]].copy()
+    errors = pd.to_numeric(matched["error_c"], errors="coerce").dropna()
+    abs_errors = errors.abs()
+    return {
+        "matched_hours": int(len(matched)),
+        "missing_obs_hours": int((~df["has_obs"]).sum()) if not df.empty else 0,
+        "mae_c": float(abs_errors.mean()) if not abs_errors.empty else 0.0,
+        "bias_c": float(errors.mean()) if not errors.empty else 0.0,
+        "max_abs_error_c": float(abs_errors.max()) if not abs_errors.empty else 0.0,
+    }
 
 
 def _resolve_data_store_dir(data_store_dir: Path | str | None = None) -> Path:

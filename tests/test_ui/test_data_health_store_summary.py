@@ -220,6 +220,144 @@ def test_data_health_renders_temperature_comparison_chart(tmp_path):
     assert plotly_chart.call_count >= 1
 
 
+def test_hrrr_48h_verification_frame_aligns_decoder_cache_and_obs(tmp_path):
+    root = tmp_path / "data_store"
+    cache_dir = root / "_decoder_cache" / "KLGA"
+    cache_dir.mkdir(parents=True)
+    init = pd.Timestamp("2026-06-01 00:00:00", tz="UTC")
+    pd.DataFrame(
+        [
+            {
+                "init_time": init,
+                "fxx": fxx,
+                "valid_time": init + pd.Timedelta(hours=fxx),
+                "TMP_2m": 10.0 + fxx,
+            }
+            for fxx in range(1, 49)
+        ]
+    ).to_parquet(cache_dir / "2026-06.parquet", index=False)
+    obs_store = ParquetStore(root / "obs")
+    obs_store.append(
+        "KLGA",
+        pd.DataFrame(
+            [
+                {
+                    "valid_time": init + pd.Timedelta(hours=fxx),
+                    "raw_tmpc_tenths": 9.0 + fxx,
+                }
+                for fxx in range(1, 49)
+            ]
+        ),
+    )
+
+    frame = data_health._hrrr_48h_verification_frame(root, "KLGA", init_limit=None)
+
+    assert len(frame) == 48
+    assert frame["fxx"].tolist() == list(range(1, 49))
+    assert frame["forecast_c"].iloc[0] == 11.0
+    assert frame["observed_c"].iloc[0] == 10.0
+    assert frame["error_c"].iloc[0] == 1.0
+    assert frame["abs_error_c"].iloc[0] == 1.0
+    assert frame["has_obs"].all()
+
+
+def test_hrrr_48h_verification_frame_keeps_forecast_rows_without_obs(tmp_path):
+    root = tmp_path / "data_store"
+    cache_dir = root / "_decoder_cache" / "KLGA"
+    cache_dir.mkdir(parents=True)
+    init = pd.Timestamp("2026-06-01 00:00:00", tz="UTC")
+    pd.DataFrame(
+        [
+            {
+                "init_time": init,
+                "fxx": fxx,
+                "valid_time": init + pd.Timedelta(hours=fxx),
+                "TMP_2m": 20.0,
+            }
+            for fxx in range(1, 49)
+        ]
+    ).to_parquet(cache_dir / "2026-06.parquet", index=False)
+
+    frame = data_health._hrrr_48h_verification_frame(root, "KLGA", init_limit=None)
+
+    assert len(frame) == 48
+    assert not frame["has_obs"].any()
+    assert frame["observed_c"].isna().all()
+    assert frame["error_c"].isna().all()
+
+
+def test_hrrr_48h_verification_frame_defaults_to_latest_48_inits(tmp_path):
+    root = tmp_path / "data_store"
+    cache_dir = root / "_decoder_cache" / "KLGA"
+    cache_dir.mkdir(parents=True)
+    base = pd.Timestamp("2026-06-01 00:00:00", tz="UTC")
+    rows = []
+    for i in range(50):
+        init = base + pd.Timedelta(hours=i)
+        for fxx in range(1, 49):
+            rows.append(
+                {
+                    "init_time": init,
+                    "fxx": fxx,
+                    "valid_time": init + pd.Timedelta(hours=fxx),
+                    "TMP_2m": 20.0,
+                }
+            )
+    pd.DataFrame(rows).to_parquet(cache_dir / "2026-06.parquet", index=False)
+
+    frame = data_health._hrrr_48h_verification_frame(root, "KLGA")
+
+    inits = pd.to_datetime(frame["init_time"], utc=True).drop_duplicates().tolist()
+    assert len(inits) == 48
+    assert min(inits) == base + pd.Timedelta(hours=2)
+    assert max(inits) == base + pd.Timedelta(hours=49)
+
+
+def test_data_health_renders_hrrr_48h_verification_chart(tmp_path):
+    root = tmp_path / "data_store"
+    cache_dir = root / "_decoder_cache" / "KLGA"
+    cache_dir.mkdir(parents=True)
+    init = pd.Timestamp("2026-06-01 00:00:00", tz="UTC")
+    pd.DataFrame(
+        [
+            {
+                "init_time": init,
+                "fxx": fxx,
+                "valid_time": init + pd.Timedelta(hours=fxx),
+                "TMP_2m": 15.0 + fxx,
+            }
+            for fxx in range(1, 49)
+        ]
+    ).to_parquet(cache_dir / "2026-06.parquet", index=False)
+    obs_store = ParquetStore(root / "obs")
+    obs_store.append(
+        "KLGA",
+        pd.DataFrame(
+            [
+                {
+                    "valid_time": init + pd.Timedelta(hours=fxx),
+                    "raw_tmpc_tenths": 14.0 + fxx,
+                }
+                for fxx in range(1, 49)
+            ]
+        ),
+    )
+    db = DbClient(":memory:")
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("streamlit.header"))
+        stack.enter_context(patch("streamlit.subheader"))
+        stack.enter_context(patch("streamlit.info"))
+        stack.enter_context(patch("streamlit.dataframe"))
+        stack.enter_context(patch("streamlit.selectbox", side_effect=["KLGA", "All", "KLGA", "Last 48", str(init)]))
+        stack.enter_context(patch("streamlit.columns", return_value=[_MetricCol(), _MetricCol(), _MetricCol(), _MetricCol()]))
+        plotly_chart = stack.enter_context(patch("streamlit.plotly_chart"))
+
+        data_health.render(db, data_store_dir=root)
+
+    assert plotly_chart.call_count >= 2
+
+
 class _MetricCol:
     def __enter__(self):
         return self
