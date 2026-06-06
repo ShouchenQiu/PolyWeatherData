@@ -8,10 +8,17 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from config.settings import Settings
 from config.stations import STATIONS
+from data.forecast.hrrr_fill import MAJOR_HOURS
+from data.obs.weather_com import (
+    WeatherComApiKeyMissing,
+    WeatherComFetchError,
+    WeatherComTruthClient,
+)
 from data.storage.parquet_store import ParquetStore
 from ui import queries
 
@@ -37,6 +44,8 @@ _HRRR_48H_COLUMNS = [
     "error_c",
     "abs_error_c",
     "has_obs",
+    "is_extrapolated",
+    "source_kind",
 ]
 
 
@@ -138,6 +147,8 @@ def _render_temperature_comparison(data_store_dir: Path | str | None = None) -> 
             use_container_width=True,
         )
 
+    _render_iem_weather_truth(root, station_id, frame)
+
 
 def _render_hrrr_48h_verification(data_store_dir: Path | str | None = None) -> None:
     root = _resolve_data_store_dir(data_store_dir)
@@ -165,24 +176,12 @@ def _render_hrrr_48h_verification(data_store_dir: Path | str | None = None) -> N
     cols[2].metric("MAE / Bias C", f"{metrics['mae_c']:.2f} / {metrics['bias_c']:.2f}")
     cols[3].metric("Max Abs Error C", f"{metrics['max_abs_error_c']:.2f}")
 
-    heatmap_df = frame.copy()
-    heatmap_df["init_label"] = pd.to_datetime(
-        heatmap_df["init_time"], utc=True
-    ).dt.strftime("%Y-%m-%d %H:%M")
     st.plotly_chart(
-        px.density_heatmap(
-            heatmap_df,
-            x="fxx",
-            y="init_label",
-            z="error_c",
-            color_continuous_scale="RdBu_r",
-            range_color=[
-                -max(1.0, metrics["max_abs_error_c"]),
-                max(1.0, metrics["max_abs_error_c"]),
-            ],
-            title="HRRR 48h Error by Init Time and Forecast Hour",
-            labels={"init_label": "init_time", "error_c": "error C"},
-        ),
+        _hrrr_48h_error_heatmap(frame, metrics),
+        use_container_width=True,
+    )
+    st.plotly_chart(
+        _hrrr_48h_valid_time_error_heatmap(frame, metrics),
         use_container_width=True,
     )
 
@@ -194,21 +193,8 @@ def _render_hrrr_48h_verification(data_store_dir: Path | str | None = None) -> N
     selected = frame[pd.to_datetime(frame["init_time"], utc=True) == selected_ts].copy()
     if selected.empty:
         return
-    curve_df = selected.melt(
-        id_vars=["fxx", "valid_time"],
-        value_vars=["forecast_c", "observed_c"],
-        var_name="series",
-        value_name="temperature_c",
-    )
     st.plotly_chart(
-        px.line(
-            curve_df,
-            x="valid_time",
-            y="temperature_c",
-            color="series",
-            markers=True,
-            title="Selected Init 48h Forecast vs Observed",
-        ),
+        _selected_init_forecast_figure(selected),
         use_container_width=True,
     )
     st.dataframe(selected, use_container_width=True)
@@ -252,6 +238,165 @@ def _temperature_comparison_metrics(df: pd.DataFrame) -> dict[str, float | int]:
         "mae_c": float(errors.abs().mean()) if not errors.empty else 0.0,
         "bias_c": float(errors.mean()) if not errors.empty else 0.0,
     }
+
+
+def _render_iem_weather_truth(
+    root: Path,
+    station_id: str,
+    frame: pd.DataFrame,
+) -> None:
+    st.subheader("IEM vs Weather.com Truth")
+    truth, message = _iem_weather_truth_frame(root, station_id, frame)
+    if message:
+        st.info(message)
+    if truth.empty:
+        return
+    if message and not truth["has_weather_com"].any():
+        return
+
+    metrics = _iem_weather_truth_metrics(truth)
+    cols = st.columns(5)
+    cols[0].metric("Matched Hours", metrics["matched_hours"])
+    cols[1].metric("Missing Truth", metrics["missing_weather_com_hours"])
+    cols[2].metric("MAE F", f"{metrics['mae_f']:.2f}")
+    cols[3].metric("Bias F", f"{metrics['bias_f']:.2f}")
+    cols[4].metric("Max Abs Error F", f"{metrics['max_abs_error_f']:.2f}")
+
+    matched = truth[truth["has_weather_com"]].copy()
+    if not matched.empty:
+        chart_df = matched.melt(
+            id_vars=["valid_hour"],
+            value_vars=["iem_obs_f", "weather_com_temp_f"],
+            var_name="series",
+            value_name="temperature_f",
+        )
+        st.plotly_chart(
+            px.line(
+                chart_df,
+                x="valid_hour",
+                y="temperature_f",
+                color="series",
+                title="IEM Observed vs Weather.com Truth Temperature",
+            ),
+            use_container_width=True,
+        )
+        st.plotly_chart(
+            px.line(
+                matched,
+                x="valid_hour",
+                y="truth_error_f",
+                title="IEM Error vs Weather.com Truth",
+            ),
+            use_container_width=True,
+        )
+    st.dataframe(truth, use_container_width=True)
+
+
+def _iem_weather_truth_frame(
+    root: Path,
+    station_id: str,
+    temp_frame: pd.DataFrame,
+) -> tuple[pd.DataFrame, str | None]:
+    if temp_frame.empty or "iem_obs_c" not in temp_frame.columns:
+        return _empty_iem_weather_truth_frame(), None
+
+    has_obs = (
+        temp_frame["has_obs"].astype(bool)
+        if "has_obs" in temp_frame.columns
+        else pd.Series(True, index=temp_frame.index)
+    )
+    obs = temp_frame[has_obs].copy()
+    obs = obs[obs["iem_obs_c"].notna()].copy()
+    if obs.empty:
+        return _empty_iem_weather_truth_frame(), None
+
+    obs["valid_hour"] = pd.to_datetime(obs["valid_hour"], utc=True)
+    obs["iem_obs_c"] = pd.to_numeric(obs["iem_obs_c"], errors="coerce")
+    obs = obs[obs["iem_obs_c"].notna()].copy()
+    obs["iem_obs_f"] = _c_to_f(obs["iem_obs_c"])
+    obs = obs[["station_id", "valid_hour", "iem_obs_c", "iem_obs_f"]]
+
+    local_dates = (
+        obs["valid_hour"]
+        .dt.tz_convert("America/New_York")
+        .dt.date.astype(str)
+        .drop_duplicates()
+        .sort_values()
+        .tolist()
+    )
+    client = WeatherComTruthClient(root / "_truth_weather_com")
+    parts: list[pd.DataFrame] = []
+    messages: list[str] = []
+    for day in local_dates:
+        try:
+            part = client.fetch_date(station_id, day)
+        except WeatherComApiKeyMissing as exc:
+            messages.append(str(exc))
+            continue
+        except WeatherComFetchError as exc:
+            messages.append(str(exc))
+            continue
+        if not part.empty:
+            parts.append(part)
+
+    if parts:
+        truth = pd.concat(parts, ignore_index=True)
+        truth["valid_hour"] = pd.to_datetime(truth["valid_hour"], utc=True)
+        truth = (
+            truth.sort_values("valid_time")
+            .drop_duplicates(subset=["station_id", "valid_hour"], keep="last")
+            [["station_id", "valid_hour", "weather_com_temp_f", "weather_com_temp_c"]]
+        )
+    else:
+        truth = pd.DataFrame(
+            columns=[
+                "station_id",
+                "valid_hour",
+                "weather_com_temp_f",
+                "weather_com_temp_c",
+            ]
+        )
+
+    merged = pd.merge(obs, truth, on=["station_id", "valid_hour"], how="left")
+    merged["has_weather_com"] = merged["weather_com_temp_f"].notna()
+    merged["truth_error_f"] = merged["iem_obs_f"] - merged["weather_com_temp_f"]
+    merged = merged.sort_values("valid_hour").reset_index(drop=True)
+    message = messages[0] if messages else None
+    return merged[_IEM_WEATHER_TRUTH_COLUMNS], message
+
+
+_IEM_WEATHER_TRUTH_COLUMNS = [
+    "station_id",
+    "valid_hour",
+    "iem_obs_c",
+    "iem_obs_f",
+    "weather_com_temp_f",
+    "weather_com_temp_c",
+    "truth_error_f",
+    "has_weather_com",
+]
+
+
+def _empty_iem_weather_truth_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=_IEM_WEATHER_TRUTH_COLUMNS)
+
+
+def _iem_weather_truth_metrics(df: pd.DataFrame) -> dict[str, float | int]:
+    matched = df[df["has_weather_com"]].copy()
+    errors = pd.to_numeric(matched["truth_error_f"], errors="coerce").dropna()
+    abs_errors = errors.abs()
+    return {
+        "matched_hours": int(len(matched)),
+        "missing_weather_com_hours": int((~df["has_weather_com"]).sum())
+        if not df.empty else 0,
+        "mae_f": float(abs_errors.mean()) if not abs_errors.empty else 0.0,
+        "bias_f": float(errors.mean()) if not errors.empty else 0.0,
+        "max_abs_error_f": float(abs_errors.max()) if not abs_errors.empty else 0.0,
+    }
+
+
+def _c_to_f(values: pd.Series) -> pd.Series:
+    return values.astype(float) * 9.0 / 5.0 + 32.0
 
 
 def _parquet_store_summary(data_store_dir: Path | str | None = None) -> pd.DataFrame:
@@ -350,7 +495,10 @@ def _hrrr_48h_verification_frame(
     if decoder.empty or not required.issubset(decoder.columns):
         return _empty_hrrr_48h_frame()
 
-    frame = decoder[["init_time", "fxx", "valid_time", "TMP_2m"]].copy()
+    cols = ["init_time", "fxx", "valid_time", "TMP_2m"]
+    if "is_extrapolated" in decoder.columns:
+        cols.append("is_extrapolated")
+    frame = decoder[cols].copy()
     frame["station_id"] = station_id
     frame["init_time"] = pd.to_datetime(frame["init_time"], utc=True)
     frame["valid_time"] = pd.to_datetime(frame["valid_time"], utc=True)
@@ -358,6 +506,10 @@ def _hrrr_48h_verification_frame(
     frame = frame[frame["fxx"].between(1, 48)].copy()
     frame["fxx"] = frame["fxx"].astype(int)
     frame["forecast_c"] = pd.to_numeric(frame["TMP_2m"], errors="coerce")
+    if "is_extrapolated" not in frame.columns:
+        frame["is_extrapolated"] = False
+    frame["is_extrapolated"] = frame["is_extrapolated"].fillna(False).astype(bool)
+    frame["source_kind"] = frame.apply(_hrrr_source_kind, axis=1)
 
     if init_limit is not None and init_limit > 0 and not frame.empty:
         latest_inits = (
@@ -386,6 +538,155 @@ def _hrrr_48h_verification_frame(
     frame["abs_error_c"] = frame["error_c"].abs()
     frame = frame.sort_values(["init_time", "fxx"]).reset_index(drop=True)
     return frame[_HRRR_48H_COLUMNS]
+
+
+def _hrrr_source_kind(row: pd.Series) -> str:
+    if bool(row.get("is_extrapolated", False)):
+        return "extrapolated"
+    init_hour = pd.Timestamp(row["init_time"]).hour
+    if init_hour in MAJOR_HOURS or int(row["fxx"]) <= 18:
+        return "native"
+    return "spliced_prior_major"
+
+
+def _hrrr_48h_error_heatmap(
+    frame: pd.DataFrame,
+    metrics: dict[str, float | int],
+) -> go.Figure:
+    heatmap_df = frame.copy()
+    heatmap_df["init_time"] = pd.to_datetime(heatmap_df["init_time"], utc=True)
+    heatmap_df["fxx"] = pd.to_numeric(heatmap_df["fxx"], errors="coerce").astype(int)
+    init_index = sorted(heatmap_df["init_time"].drop_duplicates())
+    fxx_index = sorted(heatmap_df["fxx"].drop_duplicates())
+    pivot = (
+        heatmap_df.sort_values(["init_time", "fxx"])
+        .drop_duplicates(subset=["init_time", "fxx"], keep="last")
+        .pivot(index="init_time", columns="fxx", values="error_c")
+        .reindex(index=init_index, columns=fxx_index)
+    )
+
+    max_abs = max(1.0, float(metrics["max_abs_error_c"]))
+    fig = go.Figure(
+        data=[
+            go.Heatmap(
+                x=list(pivot.columns),
+                y=list(pivot.index),
+                z=pivot.to_numpy(),
+                colorscale="RdBu",
+                reversescale=True,
+                zmin=-max_abs,
+                zmax=max_abs,
+                colorbar={"title": "error C"},
+                hovertemplate=(
+                    "init_time=%{y|%Y-%m-%d %H:%M UTC}<br>"
+                    "fxx=%{x}<br>"
+                    "error C=%{z:.2f}<extra></extra>"
+                ),
+            )
+        ]
+    )
+    fig.update_layout(
+        title="HRRR 48h Error by Init Time and Forecast Hour",
+        xaxis_title="fxx",
+        yaxis_title="init_time",
+    )
+    return fig
+
+
+def _hrrr_48h_valid_time_error_heatmap(
+    frame: pd.DataFrame,
+    metrics: dict[str, float | int],
+) -> go.Figure:
+    heatmap_df = frame.copy()
+    heatmap_df["valid_time"] = pd.to_datetime(heatmap_df["valid_time"], utc=True)
+    heatmap_df["fxx"] = pd.to_numeric(heatmap_df["fxx"], errors="coerce").astype(int)
+    valid_time_index = sorted(heatmap_df["valid_time"].drop_duplicates())
+    fxx_index = sorted(heatmap_df["fxx"].drop_duplicates())
+    pivot = (
+        heatmap_df.sort_values(["valid_time", "fxx"])
+        .drop_duplicates(subset=["valid_time", "fxx"], keep="last")
+        .pivot(index="valid_time", columns="fxx", values="error_c")
+        .reindex(index=valid_time_index, columns=fxx_index)
+    )
+
+    max_abs = max(1.0, float(metrics["max_abs_error_c"]))
+    fig = go.Figure(
+        data=[
+            go.Heatmap(
+                x=list(pivot.columns),
+                y=list(pivot.index),
+                z=pivot.to_numpy(),
+                colorscale="RdBu",
+                reversescale=True,
+                zmin=-max_abs,
+                zmax=max_abs,
+                colorbar={"title": "error C"},
+                hovertemplate=(
+                    "valid_time=%{y|%Y-%m-%d %H:%M UTC}<br>"
+                    "fxx=%{x}<br>"
+                    "error C=%{z:.2f}<extra></extra>"
+                ),
+            )
+        ]
+    )
+    fig.update_layout(
+        title="HRRR 48h Error by Valid Time and Forecast Hour",
+        xaxis_title="fxx",
+        yaxis_title="valid_time",
+    )
+    return fig
+
+
+def _selected_init_forecast_figure(selected: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    labels = {
+        "native": ("HRRR native", "solid"),
+        "spliced_prior_major": ("HRRR spliced prior major", "dash"),
+        "extrapolated": ("HRRR extrapolated", "dot"),
+    }
+    for source_kind, (name, dash) in labels.items():
+        subset = selected[selected["source_kind"] == source_kind].sort_values("fxx")
+        if subset.empty:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=tuple(subset["fxx"]),
+                y=tuple(subset["forecast_c"]),
+                mode="lines+markers",
+                name=name,
+                line={"dash": dash},
+                customdata=list(subset["valid_time"]),
+                hovertemplate=(
+                    "fxx=%{x}<br>"
+                    "valid_time=%{customdata|%Y-%m-%d %H:%M UTC}<br>"
+                    "temperature C=%{y:.2f}<extra></extra>"
+                ),
+            )
+        )
+
+    observed = selected[selected["observed_c"].notna()].sort_values("fxx")
+    if not observed.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=tuple(observed["fxx"]),
+                y=tuple(observed["observed_c"]),
+                mode="lines+markers",
+                name="IEM observed",
+                customdata=list(observed["valid_time"]),
+                hovertemplate=(
+                    "fxx=%{x}<br>"
+                    "valid_time=%{customdata|%Y-%m-%d %H:%M UTC}<br>"
+                    "temperature C=%{y:.2f}<extra></extra>"
+                ),
+            )
+        )
+
+    fig.update_layout(
+        title="Selected Init 48h Forecast vs Observed",
+        xaxis_title="fxx",
+        yaxis_title="temperature C",
+    )
+    return fig
 
 
 def _read_decoder_cache(root: Path, station_id: str) -> pd.DataFrame:

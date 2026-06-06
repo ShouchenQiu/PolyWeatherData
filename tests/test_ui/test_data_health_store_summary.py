@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+import os
 from unittest.mock import patch
 
 import pandas as pd
@@ -220,6 +221,80 @@ def test_data_health_renders_temperature_comparison_chart(tmp_path):
     assert plotly_chart.call_count >= 1
 
 
+def test_data_health_renders_iem_weather_truth_from_cache(tmp_path):
+    root = tmp_path / "data_store"
+    obs_store = ParquetStore(root / "obs")
+    hour = pd.Timestamp("2026-06-04 01:00:00", tz="UTC")
+    obs_store.append(
+        "KLGA",
+        pd.DataFrame(
+            [{"valid_time": hour, "raw_tmpc_tenths": 20.0}]
+        ),
+    )
+    cache_dir = root / "_truth_weather_com" / "KLGA"
+    cache_dir.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "station_id": "KLGA",
+                "valid_time": hour,
+                "valid_hour": hour,
+                "weather_com_temp_f": 68.0,
+                "weather_com_temp_c": 20.0,
+            }
+        ]
+    ).to_parquet(cache_dir / "2026-06-03.parquet", index=False)
+    db = DbClient(":memory:")
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("streamlit.header"))
+        stack.enter_context(patch("streamlit.subheader"))
+        stack.enter_context(patch("streamlit.info"))
+        dataframe = stack.enter_context(patch("streamlit.dataframe"))
+        stack.enter_context(patch("streamlit.selectbox", side_effect=["KLGA", "All"]))
+        stack.enter_context(patch("streamlit.columns", return_value=[
+            _MetricCol(), _MetricCol(), _MetricCol(), _MetricCol(), _MetricCol(),
+        ]))
+        plotly_chart = stack.enter_context(patch("streamlit.plotly_chart"))
+
+        data_health.render(db, data_store_dir=root)
+
+    rendered_tables = [call.args[0] for call in dataframe.call_args_list]
+    truth_table = next(table for table in rendered_tables if "truth_error_f" in table.columns)
+    assert truth_table["truth_error_f"].tolist() == [0.0]
+    assert plotly_chart.call_count >= 2
+
+
+def test_data_health_reports_missing_weather_com_key_without_cache(tmp_path):
+    root = tmp_path / "data_store"
+    obs_store = ParquetStore(root / "obs")
+    hour = pd.Timestamp("2026-06-04 01:00:00", tz="UTC")
+    obs_store.append(
+        "KLGA",
+        pd.DataFrame(
+            [{"valid_time": hour, "raw_tmpc_tenths": 20.0}]
+        ),
+    )
+    db = DbClient(":memory:")
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, {"WEATHER_COM_API_KEY": ""}))
+        stack.enter_context(patch("streamlit.header"))
+        stack.enter_context(patch("streamlit.subheader"))
+        info = stack.enter_context(patch("streamlit.info"))
+        stack.enter_context(patch("streamlit.dataframe"))
+        stack.enter_context(patch("streamlit.selectbox", side_effect=["KLGA", "All"]))
+        stack.enter_context(patch("streamlit.columns", return_value=[
+            _MetricCol(), _MetricCol(), _MetricCol(), _MetricCol(),
+        ]))
+        stack.enter_context(patch("streamlit.plotly_chart"))
+
+        data_health.render(db, data_store_dir=root)
+
+    messages = [str(call.args[0]) for call in info.call_args_list]
+    assert any("WEATHER_COM_API_KEY" in message for message in messages)
+
+
 def test_hrrr_48h_verification_frame_aligns_decoder_cache_and_obs(tmp_path):
     root = tmp_path / "data_store"
     cache_dir = root / "_decoder_cache" / "KLGA"
@@ -284,6 +359,218 @@ def test_hrrr_48h_verification_frame_keeps_forecast_rows_without_obs(tmp_path):
     assert not frame["has_obs"].any()
     assert frame["observed_c"].isna().all()
     assert frame["error_c"].isna().all()
+
+
+def test_hrrr_48h_verification_frame_marks_non_major_spliced_tail(tmp_path):
+    root = tmp_path / "data_store"
+    cache_dir = root / "_decoder_cache" / "KLGA"
+    cache_dir.mkdir(parents=True)
+    init = pd.Timestamp("2026-06-01 01:00:00", tz="UTC")
+    pd.DataFrame(
+        [
+            {
+                "init_time": init,
+                "fxx": fxx,
+                "valid_time": init + pd.Timedelta(hours=fxx),
+                "TMP_2m": 20.0 + fxx,
+                "is_extrapolated": fxx == 48,
+            }
+            for fxx in range(1, 49)
+        ]
+    ).to_parquet(cache_dir / "2026-06.parquet", index=False)
+
+    frame = data_health._hrrr_48h_verification_frame(root, "KLGA", init_limit=None)
+
+    assert frame.loc[frame["fxx"] == 18, "source_kind"].iloc[0] == "native"
+    assert frame.loc[frame["fxx"] == 19, "source_kind"].iloc[0] == "spliced_prior_major"
+    assert frame.loc[frame["fxx"] == 48, "source_kind"].iloc[0] == "extrapolated"
+
+
+def test_hrrr_48h_error_heatmap_preserves_one_cell_per_init_and_fxx():
+    first = pd.Timestamp("2026-06-01 00:00:00", tz="UTC")
+    second = pd.Timestamp("2026-06-01 01:00:00", tz="UTC")
+    frame = pd.DataFrame(
+        [
+            {"init_time": first, "fxx": 1, "error_c": 1.0, "source_kind": "native"},
+            {"init_time": first, "fxx": 2, "error_c": 2.0, "source_kind": "native"},
+            {"init_time": second, "fxx": 1, "error_c": 3.0, "source_kind": "native"},
+            {"init_time": second, "fxx": 2, "error_c": 4.0, "source_kind": "native"},
+        ]
+    )
+
+    fig = data_health._hrrr_48h_error_heatmap(
+        frame,
+        {"max_abs_error_c": 4.0},
+    )
+
+    heatmap = fig.data[0]
+    assert heatmap.type == "heatmap"
+    assert list(heatmap.x) == [1, 2]
+    assert list(heatmap.y) == [first, second]
+    assert heatmap.z.tolist() == [[1.0, 2.0], [3.0, 4.0]]
+    assert heatmap.colorbar.title.text == "error C"
+
+
+def test_hrrr_48h_error_heatmap_keeps_all_nan_init_rows():
+    first = pd.Timestamp("2026-06-01 00:00:00", tz="UTC")
+    second = pd.Timestamp("2026-06-01 01:00:00", tz="UTC")
+    frame = pd.DataFrame(
+        [
+            {"init_time": first, "fxx": 1, "error_c": 1.0, "source_kind": "native"},
+            {"init_time": second, "fxx": 1, "error_c": pd.NA, "source_kind": "native"},
+        ]
+    )
+
+    fig = data_health._hrrr_48h_error_heatmap(
+        frame,
+        {"max_abs_error_c": 1.0},
+    )
+
+    assert list(fig.data[0].y) == [first, second]
+
+
+def test_hrrr_48h_valid_time_error_heatmap_preserves_one_cell_per_valid_time_and_fxx():
+    first = pd.Timestamp("2026-06-01 01:00:00", tz="UTC")
+    second = pd.Timestamp("2026-06-01 02:00:00", tz="UTC")
+    frame = pd.DataFrame(
+        [
+            {"valid_time": first, "fxx": 1, "error_c": 1.0},
+            {"valid_time": first, "fxx": 2, "error_c": 2.0},
+            {"valid_time": second, "fxx": 1, "error_c": 3.0},
+            {"valid_time": second, "fxx": 2, "error_c": 4.0},
+        ]
+    )
+
+    fig = data_health._hrrr_48h_valid_time_error_heatmap(
+        frame,
+        {"max_abs_error_c": 4.0},
+    )
+
+    heatmap = fig.data[0]
+    assert heatmap.type == "heatmap"
+    assert list(heatmap.x) == [1, 2]
+    assert list(heatmap.y) == [first, second]
+    assert heatmap.z.tolist() == [[1.0, 2.0], [3.0, 4.0]]
+    assert heatmap.colorbar.title.text == "error C"
+
+
+def test_hrrr_48h_valid_time_error_heatmap_keeps_all_nan_valid_time_rows():
+    first = pd.Timestamp("2026-06-01 01:00:00", tz="UTC")
+    second = pd.Timestamp("2026-06-01 02:00:00", tz="UTC")
+    frame = pd.DataFrame(
+        [
+            {"valid_time": first, "fxx": 1, "error_c": 1.0},
+            {"valid_time": second, "fxx": 1, "error_c": pd.NA},
+        ]
+    )
+
+    fig = data_health._hrrr_48h_valid_time_error_heatmap(
+        frame,
+        {"max_abs_error_c": 1.0},
+    )
+
+    assert list(fig.data[0].y) == [first, second]
+
+
+def test_selected_init_forecast_figure_splits_native_and_spliced_hrrr():
+    init = pd.Timestamp("2026-06-01 01:00:00", tz="UTC")
+    selected = pd.DataFrame(
+        [
+            {
+                "init_time": init,
+                "fxx": 18,
+                "valid_time": init + pd.Timedelta(hours=18),
+                "forecast_c": 21.0,
+                "observed_c": 20.0,
+                "source_kind": "native",
+            },
+            {
+                "init_time": init,
+                "fxx": 19,
+                "valid_time": init + pd.Timedelta(hours=19),
+                "forecast_c": 22.0,
+                "observed_c": 21.0,
+                "source_kind": "spliced_prior_major",
+            },
+        ]
+    )
+
+    fig = data_health._selected_init_forecast_figure(selected)
+
+    assert [trace.name for trace in fig.data] == [
+        "HRRR native",
+        "HRRR spliced prior major",
+        "IEM observed",
+    ]
+    assert fig.data[0].x == (18,)
+    assert fig.data[1].x == (19,)
+
+
+def test_iem_weather_truth_frame_joins_hourly_obs_and_computes_f_error(tmp_path):
+    root = tmp_path / "data_store"
+    valid_hour = pd.Timestamp("2026-06-04 01:00:00", tz="UTC")
+    temp_frame = pd.DataFrame(
+        [
+            {
+                "station_id": "KLGA",
+                "valid_hour": valid_hour,
+                "iem_obs_c": 20.0,
+                "has_obs": True,
+            }
+        ]
+    )
+    cache_dir = root / "_truth_weather_com" / "KLGA"
+    cache_dir.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "station_id": "KLGA",
+                "valid_time": valid_hour + pd.Timedelta(minutes=5),
+                "valid_hour": valid_hour,
+                "weather_com_temp_f": 69.0,
+                "weather_com_temp_c": 20.5556,
+            }
+        ]
+    ).to_parquet(cache_dir / "2026-06-03.parquet", index=False)
+
+    frame, message = data_health._iem_weather_truth_frame(root, "KLGA", temp_frame)
+
+    assert message is None
+    assert frame["valid_hour"].tolist() == [valid_hour]
+    assert frame["iem_obs_f"].tolist() == [68.0]
+    assert frame["weather_com_temp_f"].tolist() == [69.0]
+    assert frame["truth_error_f"].tolist() == [-1.0]
+    metrics = data_health._iem_weather_truth_metrics(frame)
+    assert metrics["matched_hours"] == 1
+    assert metrics["missing_weather_com_hours"] == 0
+    assert metrics["mae_f"] == 1.0
+    assert metrics["bias_f"] == -1.0
+    assert metrics["max_abs_error_f"] == 1.0
+
+
+def test_iem_weather_truth_frame_reports_missing_key_without_cache(tmp_path):
+    valid_hour = pd.Timestamp("2026-06-04 01:00:00", tz="UTC")
+    temp_frame = pd.DataFrame(
+        [
+            {
+                "station_id": "KLGA",
+                "valid_hour": valid_hour,
+                "iem_obs_c": 20.0,
+                "has_obs": True,
+            }
+        ]
+    )
+
+    frame, message = data_health._iem_weather_truth_frame(
+        tmp_path / "data_store",
+        "KLGA",
+        temp_frame,
+    )
+
+    assert not frame.empty
+    assert frame["has_weather_com"].tolist() == [False]
+    assert message is not None
+    assert "WEATHER_COM_API_KEY" in message
 
 
 def test_hrrr_48h_verification_frame_defaults_to_latest_48_inits(tmp_path):
