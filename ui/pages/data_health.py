@@ -27,6 +27,11 @@ if TYPE_CHECKING:
     from db.schema import DbClient
 
 _CHART_MARGIN = {"l": 60, "r": 40, "t": 64, "b": 48}
+_HRRR_COLOR = "#1f77b4"
+_HRRR_SPLICE_COLOR = "#ff7f0e"
+_HRRR_EXTRAPOLATED_COLOR = "#9467bd"
+_IEM_COLOR = "#2ca02c"
+_WEATHER_COM_COLOR = "#17becf"
 _POSITIVE_COLOR = "#d62728"
 _NEGATIVE_COLOR = "#1f77b4"
 _ZERO_LINE_COLOR = "#6b7280"
@@ -77,7 +82,18 @@ def render(db: "DbClient", data_store_dir: Path | str | None = None) -> None:
     if timing.empty:
         st.info("No seed timing summary.")
     else:
-        st.dataframe(timing, use_container_width=True)
+        st.caption(
+            "Elapsed seconds are wall-clock timings captured by each summary file; "
+            "seed_summary usually covers its seed_date, while smoke_summary covers the smoke bootstrap run."
+        )
+        st.dataframe(
+            timing,
+            use_container_width=True,
+            column_config={
+                "elapsed_seconds": st.column_config.NumberColumn(format="%.2f"),
+                "rows_per_second": st.column_config.NumberColumn(format="%.2f"),
+            },
+        )
 
     ticks = queries.loop_ticks(db, loop_name="ForecastLoop")
     if ticks.empty:
@@ -171,10 +187,30 @@ def _render_hrrr_48h_verification(data_store_dir: Path | str | None = None) -> N
         use_container_width=True,
     )
 
-    init_options = [
-        str(ts) for ts in sorted(pd.to_datetime(frame["init_time"], utc=True).unique())
-    ]
-    selected_init = st.selectbox("Init Time", init_options, index=len(init_options) - 1)
+    init_times = sorted(pd.to_datetime(frame["init_time"], utc=True).unique())
+    init_options = [str(ts) for ts in init_times]
+    nav_key = f"data_health_48h_init_index_{station_id}_{range_label}"
+    selected_key = f"{nav_key}_selected"
+    if st.session_state.get(selected_key) not in init_options:
+        st.session_state[selected_key] = init_options[-1]
+    current_index = init_options.index(st.session_state[selected_key])
+    nav_cols = st.columns([8, 1, 1])
+    with nav_cols[0]:
+        selected_init = st.selectbox("Init Time", init_options, key=selected_key)
+    nav_cols[1].button(
+        "←",
+        key=f"{nav_key}_prev",
+        disabled=current_index <= 0,
+        on_click=_move_init_selection,
+        args=(st.session_state, selected_key, init_options, -1),
+    )
+    nav_cols[2].button(
+        "→",
+        key=f"{nav_key}_next",
+        disabled=current_index >= len(init_options) - 1,
+        on_click=_move_init_selection,
+        args=(st.session_state, selected_key, init_options, 1),
+    )
     selected_ts = pd.Timestamp(selected_init)
     selected = frame[pd.to_datetime(frame["init_time"], utc=True) == selected_ts].copy()
     if selected.empty:
@@ -183,7 +219,11 @@ def _render_hrrr_48h_verification(data_store_dir: Path | str | None = None) -> N
         _selected_init_forecast_figure(selected),
         use_container_width=True,
     )
-    st.dataframe(selected, use_container_width=True)
+    st.dataframe(
+        selected,
+        use_container_width=True,
+        column_config={"abs_error_c": None},
+    )
 
 
 def _stations_with_temperature_data(root: Path) -> list[str]:
@@ -234,6 +274,7 @@ def _temperature_comparison_figure(matched: pd.DataFrame) -> go.Figure:
             y=tuple(matched["hrrr_f01_c"]),
             mode="lines",
             name="HRRR f01 C",
+            line={"color": _HRRR_COLOR},
         )
     )
     fig.add_trace(
@@ -242,6 +283,7 @@ def _temperature_comparison_figure(matched: pd.DataFrame) -> go.Figure:
             y=tuple(matched["iem_obs_c"]),
             mode="lines",
             name="IEM observed C",
+            line={"color": _IEM_COLOR},
         )
     )
     _apply_timeseries_layout(
@@ -273,6 +315,7 @@ def _iem_weather_truth_figure(matched: pd.DataFrame) -> go.Figure:
             y=tuple(matched["iem_obs_f"]),
             mode="lines",
             name="IEM observed F",
+            line={"color": _IEM_COLOR},
         )
     )
     fig.add_trace(
@@ -281,6 +324,7 @@ def _iem_weather_truth_figure(matched: pd.DataFrame) -> go.Figure:
             y=tuple(matched["weather_com_temp_f"]),
             mode="lines",
             name="Weather.com truth F",
+            line={"color": _WEATHER_COM_COLOR},
         )
     )
     _apply_timeseries_layout(
@@ -770,11 +814,11 @@ def _hrrr_48h_valid_time_error_heatmap(
 def _selected_init_forecast_figure(selected: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
     labels = {
-        "native": ("HRRR native", "solid"),
-        "spliced_prior_major": ("HRRR spliced prior major", "dash"),
-        "extrapolated": ("HRRR extrapolated", "dot"),
+        "native": ("HRRR native", "solid", _HRRR_COLOR),
+        "spliced_prior_major": ("HRRR spliced prior major", "dash", _HRRR_SPLICE_COLOR),
+        "extrapolated": ("HRRR extrapolated", "dot", _HRRR_EXTRAPOLATED_COLOR),
     }
-    for source_kind, (name, dash) in labels.items():
+    for source_kind, (name, dash, color) in labels.items():
         subset = selected[selected["source_kind"] == source_kind].sort_values("fxx")
         if subset.empty:
             continue
@@ -784,7 +828,7 @@ def _selected_init_forecast_figure(selected: pd.DataFrame) -> go.Figure:
                 y=tuple(subset["forecast_c"]),
                 mode="lines+markers",
                 name=name,
-                line={"dash": dash},
+                line={"dash": dash, "color": color},
                 customdata=list(subset["valid_time"]),
                 hovertemplate=(
                     "fxx=%{x}<br>"
@@ -802,6 +846,7 @@ def _selected_init_forecast_figure(selected: pd.DataFrame) -> go.Figure:
                 y=tuple(observed["observed_c"]),
                 mode="lines+markers",
                 name="IEM observed",
+                line={"color": _IEM_COLOR},
                 customdata=list(observed["valid_time"]),
                 hovertemplate=(
                     "fxx=%{x}<br>"
@@ -815,8 +860,39 @@ def _selected_init_forecast_figure(selected: pd.DataFrame) -> go.Figure:
         title="Selected Init 48h Forecast vs Observed",
         xaxis_title="fxx",
         yaxis_title="temperature C",
+        margin=_CHART_MARGIN,
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "xanchor": "left",
+            "x": 0.0,
+        },
     )
+    fig.update_xaxes(domain=[0.0, 1.0])
     return fig
+
+
+def _shift_init_index(current_index: int, step: int, option_count: int) -> int:
+    if option_count <= 0:
+        return 0
+    return max(0, min(option_count - 1, current_index + step))
+
+
+def _move_init_selection(
+    state: dict,
+    selected_key: str,
+    options: list[str],
+    step: int,
+) -> None:
+    if not options:
+        return
+    current_value = state.get(selected_key, options[-1])
+    try:
+        current_index = options.index(current_value)
+    except ValueError:
+        current_index = len(options) - 1
+    state[selected_key] = options[_shift_init_index(current_index, step, len(options))]
 
 
 def _read_decoder_cache(root: Path, station_id: str) -> pd.DataFrame:
@@ -947,14 +1023,20 @@ def _seed_timing_summary(data_store_dir: Path | str | None = None) -> pd.DataFra
     rows = []
     for label, summary in _load_timing_summaries(root):
         for stage, values in (summary.get("timings") or {}).items():
+            elapsed_seconds = float(values.get("elapsed_seconds", 0.0))
+            rows_written = int(values.get("rows_written", 0))
+            errors = int(values.get("errors", 0))
+            rows_per_second = float(values.get("rows_per_second", 0.0))
+            if elapsed_seconds == 0.0 and rows_written == 0 and errors == 0:
+                continue
             rows.append(
                 {
                     "summary": label,
                     "stage": stage,
-                    "elapsed_seconds": float(values.get("elapsed_seconds", 0.0)),
-                    "rows_written": int(values.get("rows_written", 0)),
-                    "errors": int(values.get("errors", 0)),
-                    "rows_per_second": float(values.get("rows_per_second", 0.0)),
+                    "elapsed_seconds": round(elapsed_seconds, 2),
+                    "rows_written": rows_written,
+                    "errors": errors,
+                    "rows_per_second": round(rows_per_second, 2),
                 }
             )
     return pd.DataFrame(rows)

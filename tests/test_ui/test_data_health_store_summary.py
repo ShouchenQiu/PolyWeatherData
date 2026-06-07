@@ -374,12 +374,34 @@ def test_seed_timing_summary_includes_smoke_bootstrap_timing(tmp_path):
 
     summary = data_health._seed_timing_summary(root)
 
-    assert set(summary["summary"]) == {"smoke_summary", "seed_summary"}
+    assert set(summary["summary"]) == {"smoke_summary"}
     smoke_iem = summary[
         (summary["summary"] == "smoke_summary") & (summary["stage"] == "iem")
     ].iloc[0]
     assert smoke_iem["rows_written"] == 100
     assert smoke_iem["rows_per_second"] == 10.0
+
+
+def test_seed_timing_summary_hides_empty_rows_and_rounds_float_columns(tmp_path):
+    root = tmp_path / "data_store"
+    (tmp_path / "seed_summary.json").write_text(
+        """
+        {
+          "seed_date": "2026-06-04",
+          "timings": {
+            "hrrr": {"elapsed_seconds": 0, "rows_written": 0, "errors": 0, "rows_per_second": 0},
+            "iem": {"elapsed_seconds": 12.3456, "rows_written": 384, "errors": 0, "rows_per_second": 31.1049}
+          }
+        }
+        """,
+        encoding="ascii",
+    )
+
+    summary = data_health._seed_timing_summary(root)
+
+    assert summary["stage"].tolist() == ["iem"]
+    assert summary["elapsed_seconds"].tolist() == [12.35]
+    assert summary["rows_per_second"].tolist() == [31.1]
 
 
 def test_data_health_renders_weather_truth_location_caption(tmp_path):
@@ -633,8 +655,58 @@ def test_selected_init_forecast_figure_splits_native_and_spliced_hrrr():
         "HRRR spliced prior major",
         "IEM observed",
     ]
+    assert fig.layout.legend.orientation == "h"
+    assert fig.layout.margin.r == 40
+    assert fig.data[0].line.color == "#1f77b4"
+    assert fig.data[1].line.color == "#ff7f0e"
+    assert fig.data[2].line.color == "#2ca02c"
     assert fig.data[0].x == (18,)
     assert fig.data[1].x == (19,)
+
+
+def test_init_time_navigation_index_is_bounded():
+    assert data_health._shift_init_index(2, -1, 4) == 1
+    assert data_health._shift_init_index(0, -1, 4) == 0
+    assert data_health._shift_init_index(3, 1, 4) == 3
+
+
+def test_move_init_selection_updates_shared_selected_value():
+    options = ["2026-06-01 00:00:00+00:00", "2026-06-01 01:00:00+00:00"]
+    state = {"selected": options[0]}
+
+    data_health._move_init_selection(state, "selected", options, 1)
+    data_health._move_init_selection(state, "selected", options, 1)
+
+    assert state["selected"] == options[1]
+
+
+def test_temperature_figures_use_stable_series_colors():
+    hour = pd.Timestamp("2026-06-04 01:00:00", tz="UTC")
+    temp = pd.DataFrame(
+        [
+            {
+                "valid_hour": hour,
+                "hrrr_f01_c": 21.0,
+                "iem_obs_c": 20.0,
+            }
+        ]
+    )
+    truth = pd.DataFrame(
+        [
+            {
+                "valid_hour": hour,
+                "iem_obs_f": 68.0,
+                "weather_com_temp_f": 69.0,
+            }
+        ]
+    )
+
+    temp_fig = data_health._temperature_comparison_figure(temp)
+    truth_fig = data_health._iem_weather_truth_figure(truth)
+
+    assert temp_fig.data[1].line.color == "#2ca02c"
+    assert truth_fig.data[0].line.color == "#2ca02c"
+    assert truth_fig.data[1].line.color == "#17becf"
 
 
 def test_iem_weather_truth_frame_joins_hourly_obs_and_computes_f_error(tmp_path):
@@ -816,7 +888,7 @@ def test_data_health_renders_hrrr_48h_verification_chart(tmp_path):
         stack.enter_context(patch("streamlit.header"))
         stack.enter_context(patch("streamlit.subheader"))
         stack.enter_context(patch("streamlit.info"))
-        stack.enter_context(patch("streamlit.dataframe"))
+        dataframe = stack.enter_context(patch("streamlit.dataframe"))
         stack.enter_context(patch("streamlit.selectbox", side_effect=["KLGA", "All", "KLGA", "Last 48", str(init)]))
         stack.enter_context(patch("ui.pages.data_health.WeatherComTruthClient", _EmptyTruthClient))
         stack.enter_context(patch("streamlit.columns", return_value=[_MetricCol(), _MetricCol(), _MetricCol(), _MetricCol(), _MetricCol()]))
@@ -825,6 +897,11 @@ def test_data_health_renders_hrrr_48h_verification_chart(tmp_path):
         data_health.render(db, data_store_dir=root)
 
     assert plotly_chart.call_count >= 2
+    selected_call = next(
+        call for call in dataframe.call_args_list
+        if "abs_error_c" in call.args[0].columns
+    )
+    assert selected_call.kwargs["column_config"]["abs_error_c"] is None
 
 
 class _MetricCol:
@@ -836,3 +913,6 @@ class _MetricCol:
 
     def metric(self, *_args, **_kwargs):
         return None
+
+    def button(self, *_args, **_kwargs):
+        return False
