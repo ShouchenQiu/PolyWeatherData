@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
@@ -26,6 +27,10 @@ if TYPE_CHECKING:
     from db.schema import DbClient
 
 _CHART_MARGIN = {"l": 60, "r": 40, "t": 64, "b": 48}
+_POSITIVE_COLOR = "#d62728"
+_NEGATIVE_COLOR = "#1f77b4"
+_ZERO_LINE_COLOR = "#6b7280"
+_NY_TZ = ZoneInfo("America/New_York")
 
 _TEMP_COMPARISON_COLUMNS = [
     "station_id",
@@ -239,11 +244,114 @@ def _temperature_comparison_figure(matched: pd.DataFrame) -> go.Figure:
             name="IEM observed C",
         )
     )
-    fig.update_layout(
+    _apply_timeseries_layout(
+        fig,
         title="HRRR f01 vs IEM Observed Temperature",
-        xaxis_title="valid_hour",
         yaxis_title="temperature C",
+        valid_hours=matched["valid_hour"],
+        show_legend=True,
+    )
+    return fig
+
+
+def _temperature_error_figure(matched: pd.DataFrame) -> go.Figure:
+    return _signed_error_bar_figure(
+        matched,
+        error_col="temp_error_c",
+        title="HRRR f01 Error vs IEM Observed Temperature",
+        yaxis_title="error C",
+        trace_name="HRRR - IEM C",
+        value_label="error C",
+    )
+
+
+def _iem_weather_truth_figure(matched: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=tuple(matched["valid_hour"]),
+            y=tuple(matched["iem_obs_f"]),
+            mode="lines",
+            name="IEM observed F",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=tuple(matched["valid_hour"]),
+            y=tuple(matched["weather_com_temp_f"]),
+            mode="lines",
+            name="Weather.com truth F",
+        )
+    )
+    _apply_timeseries_layout(
+        fig,
+        title="IEM Observed vs Weather.com Truth Temperature",
+        yaxis_title="temperature F",
+        valid_hours=matched["valid_hour"],
+        show_legend=True,
+    )
+    return fig
+
+
+def _iem_weather_truth_error_figure(matched: pd.DataFrame) -> go.Figure:
+    return _signed_error_bar_figure(
+        matched,
+        error_col="truth_error_f",
+        title="IEM Error vs Weather.com Truth",
+        yaxis_title="error F",
+        trace_name="IEM - Weather.com F",
+        value_label="error F",
+    )
+
+
+def _signed_error_bar_figure(
+    frame: pd.DataFrame,
+    error_col: str,
+    title: str,
+    yaxis_title: str,
+    trace_name: str,
+    value_label: str,
+) -> go.Figure:
+    errors = pd.to_numeric(frame[error_col], errors="coerce")
+    colors = [_POSITIVE_COLOR if value >= 0 else _NEGATIVE_COLOR for value in errors]
+    fig = go.Figure(
+        data=[
+            go.Bar(
+                x=tuple(frame["valid_hour"]),
+                y=tuple(errors),
+                marker={"color": colors},
+                name=trace_name,
+                hovertemplate=(
+                    "valid_hour=%{x|%Y-%m-%d %H:%M UTC}<br>"
+                    f"{value_label}=%{{y:.2f}}<extra></extra>"
+                ),
+            )
+        ]
+    )
+    fig.add_hline(y=0, line_color=_ZERO_LINE_COLOR, line_width=1)
+    _apply_timeseries_layout(
+        fig,
+        title=title,
+        yaxis_title=yaxis_title,
+        valid_hours=frame["valid_hour"],
+        show_legend=False,
+    )
+    return fig
+
+
+def _apply_timeseries_layout(
+    fig: go.Figure,
+    title: str,
+    yaxis_title: str,
+    valid_hours: pd.Series,
+    show_legend: bool,
+) -> None:
+    fig.update_layout(
+        title=title,
+        xaxis_title=_valid_hour_axis_title(valid_hours),
+        yaxis_title=yaxis_title,
         margin=_CHART_MARGIN,
+        showlegend=show_legend,
         legend={
             "orientation": "h",
             "yanchor": "bottom",
@@ -253,36 +361,20 @@ def _temperature_comparison_figure(matched: pd.DataFrame) -> go.Figure:
         },
     )
     fig.update_xaxes(domain=[0.0, 1.0])
-    return fig
 
 
-def _temperature_error_figure(matched: pd.DataFrame) -> go.Figure:
-    errors = pd.to_numeric(matched["temp_error_c"], errors="coerce")
-    colors = ["#d62728" if value >= 0 else "#1f77b4" for value in errors]
-    fig = go.Figure(
-        data=[
-            go.Bar(
-                x=tuple(matched["valid_hour"]),
-                y=tuple(errors),
-                marker={"color": colors},
-                name="HRRR - IEM C",
-                hovertemplate=(
-                    "valid_hour=%{x|%Y-%m-%d %H:%M UTC}<br>"
-                    "error C=%{y:.2f}<extra></extra>"
-                ),
-            )
-        ]
-    )
-    fig.add_hline(y=0, line_color="#6b7280", line_width=1)
-    fig.update_layout(
-        title="HRRR f01 Error vs IEM Observed Temperature",
-        xaxis_title="valid_hour",
-        yaxis_title="error C",
-        margin=_CHART_MARGIN,
-        showlegend=False,
-    )
-    fig.update_xaxes(domain=[0.0, 1.0])
-    return fig
+def _valid_hour_axis_title(valid_hours: pd.Series) -> str:
+    offsets = []
+    for ts in pd.to_datetime(valid_hours, utc=True).dropna():
+        local = ts.to_pydatetime().astimezone(_NY_TZ)
+        offset = local.utcoffset()
+        if offset is None:
+            continue
+        hours = int(offset.total_seconds() // 3600)
+        offsets.append(f"UTC{hours:+d}")
+    unique = sorted(set(offsets))
+    suffix = "/".join(unique) if unique else "UTC-4/UTC-5"
+    return f"valid_hour (UTC; NYC local {suffix})"
 
 
 def _render_iem_weather_truth(
@@ -310,29 +402,12 @@ def _render_iem_weather_truth(
 
     matched = truth[truth["has_weather_com"]].copy()
     if not matched.empty:
-        chart_df = matched.melt(
-            id_vars=["valid_hour"],
-            value_vars=["iem_obs_f", "weather_com_temp_f"],
-            var_name="series",
-            value_name="temperature_f",
-        )
         st.plotly_chart(
-            px.line(
-                chart_df,
-                x="valid_hour",
-                y="temperature_f",
-                color="series",
-                title="IEM Observed vs Weather.com Truth Temperature",
-            ),
+            _iem_weather_truth_figure(matched),
             use_container_width=True,
         )
         st.plotly_chart(
-            px.line(
-                matched,
-                x="valid_hour",
-                y="truth_error_f",
-                title="IEM Error vs Weather.com Truth",
-            ),
+            _iem_weather_truth_error_figure(matched),
             use_container_width=True,
         )
     st.dataframe(truth, use_container_width=True)
@@ -388,16 +463,24 @@ def _iem_weather_truth_frame(
     if parts:
         truth = pd.concat(parts, ignore_index=True)
         truth["valid_hour"] = pd.to_datetime(truth["valid_hour"], utc=True)
+        truth["valid_time"] = pd.to_datetime(truth["valid_time"], utc=True)
         truth = (
-            truth.sort_values("valid_time")
-            .drop_duplicates(subset=["station_id", "valid_hour"], keep="last")
-            [["station_id", "valid_hour", "weather_com_temp_f", "weather_com_temp_c"]]
+            WeatherComTruthClient._select_representative_hours(truth)
+            [[
+                "station_id",
+                "valid_hour",
+                "valid_time",
+                "weather_com_temp_f",
+                "weather_com_temp_c",
+            ]]
+            .rename(columns={"valid_time": "weather_com_valid_time"})
         )
     else:
         truth = pd.DataFrame(
             columns=[
                 "station_id",
                 "valid_hour",
+                "weather_com_valid_time",
                 "weather_com_temp_f",
                 "weather_com_temp_c",
             ]
@@ -416,6 +499,7 @@ _IEM_WEATHER_TRUTH_COLUMNS = [
     "valid_hour",
     "iem_obs_c",
     "iem_obs_f",
+    "weather_com_valid_time",
     "weather_com_temp_f",
     "weather_com_temp_c",
     "truth_error_f",

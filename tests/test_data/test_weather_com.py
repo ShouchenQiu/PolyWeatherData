@@ -99,3 +99,67 @@ def test_weather_com_client_uses_reference_default_key_when_env_missing(tmp_path
     client.fetch_date("KLGA", "2026-06-04")
 
     assert session.calls[0]["params"]["apiKey"] == DEFAULT_WEATHER_COM_API_KEY
+
+
+def test_weather_com_prefers_iem_representative_hour_candidate(tmp_path):
+    valid_hour = pd.Timestamp("2026-05-24 12:00:00", tz="UTC")
+    payload = {
+        "observations": [
+            {
+                "valid_time_gmt": int((valid_hour - pd.Timedelta(minutes=9)).timestamp()),
+                "temp": 53,
+            },
+            {
+                "valid_time_gmt": int((valid_hour + pd.Timedelta(minutes=19)).timestamp()),
+                "temp": 54,
+            },
+        ]
+    }
+    client = WeatherComTruthClient(
+        tmp_path / "truth",
+        api_key="secret",
+        session=_Session(payload),
+    )
+
+    frame = client.fetch_date("KLGA", "2026-05-24")
+
+    assert frame["valid_hour"].tolist() == [valid_hour]
+    assert frame["valid_time"].tolist() == [valid_hour - pd.Timedelta(minutes=9)]
+    assert frame["weather_com_temp_f"].tolist() == [53.0]
+
+
+def test_weather_com_refetches_stale_alignment_cache_when_key_available(tmp_path):
+    cache_dir = tmp_path / "truth" / "KLGA"
+    cache_dir.mkdir(parents=True)
+    valid_hour = pd.Timestamp("2026-05-21 00:00:00", tz="UTC")
+    pd.DataFrame(
+        [
+            {
+                "station_id": "KLGA",
+                "valid_time": valid_hour + pd.Timedelta(minutes=23),
+                "valid_hour": valid_hour,
+                "weather_com_temp_f": 70.0,
+                "weather_com_temp_c": 21.111111,
+            }
+        ]
+    ).to_parquet(cache_dir / "2026-05-20.parquet", index=False)
+    payload = {
+        "observations": [
+            {
+                "valid_time_gmt": int((valid_hour - pd.Timedelta(minutes=9)).timestamp()),
+                "temp": 74,
+            },
+            {
+                "valid_time_gmt": int((valid_hour + pd.Timedelta(minutes=23)).timestamp()),
+                "temp": 70,
+            },
+        ]
+    }
+    session = _Session(payload)
+    client = WeatherComTruthClient(tmp_path / "truth", api_key="secret", session=session)
+
+    frame = client.fetch_date("KLGA", "2026-05-20")
+
+    assert len(session.calls) == 1
+    assert frame["valid_time"].tolist() == [valid_hour - pd.Timedelta(minutes=9)]
+    assert frame["weather_com_temp_f"].tolist() == [74.0]

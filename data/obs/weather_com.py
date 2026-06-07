@@ -9,6 +9,7 @@ import pandas as pd
 import requests
 
 DEFAULT_WEATHER_COM_API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
+_ALIGNMENT_VERSION = "iem_representative_hour_v2"
 
 
 class WeatherComApiKeyMissing(RuntimeError):
@@ -53,7 +54,9 @@ class WeatherComTruthClient:
         day = pd.Timestamp(local_date).date().isoformat()
         path = self._cache_path(station_id, day)
         if path.exists():
-            return self._read_cache(path)
+            cached = self._read_cache(path)
+            if self._cache_is_current(cached) or not self._api_key:
+                return self._public_columns(cached)
 
         if not self._api_key:
             raise WeatherComApiKeyMissing(
@@ -81,7 +84,7 @@ class WeatherComTruthClient:
         frame = self._normalize(station_id, payload)
         path.parent.mkdir(parents=True, exist_ok=True)
         frame.to_parquet(path, index=False)
-        return frame
+        return self._public_columns(frame)
 
     def fetch_dates(
         self,
@@ -126,16 +129,54 @@ class WeatherComTruthClient:
                     "valid_hour": ts_utc.round("h"),
                     "weather_com_temp_f": temp_f_float,
                     "weather_com_temp_c": (temp_f_float - 32.0) * 5.0 / 9.0,
+                    "_weather_com_alignment_version": _ALIGNMENT_VERSION,
                 }
             )
         if not rows:
             return cls._empty_frame()
         frame = pd.DataFrame(rows)
+        frame = cls._select_representative_hours(frame)
+        frame["_weather_com_alignment_version"] = _ALIGNMENT_VERSION
+        return frame.reset_index(drop=True)
+
+    @staticmethod
+    def _select_representative_hours(frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty:
+            return frame
+        aligned = frame.copy()
+        aligned["valid_time"] = pd.to_datetime(aligned["valid_time"], utc=True)
+        aligned["valid_hour"] = pd.to_datetime(aligned["valid_hour"], utc=True)
+        target_time = aligned["valid_hour"] - pd.Timedelta(minutes=9)
+        aligned["_representative_distance_s"] = (
+            aligned["valid_time"] - target_time
+        ).abs().dt.total_seconds()
         return (
-            frame.sort_values("valid_time")
-            .drop_duplicates(subset=["station_id", "valid_hour"], keep="last")
+            aligned.sort_values(
+                ["station_id", "valid_hour", "_representative_distance_s", "valid_time"],
+                ascending=[True, True, True, True],
+            )
+            .drop_duplicates(subset=["station_id", "valid_hour"], keep="first")
+            .drop(columns=["_representative_distance_s"])
             .reset_index(drop=True)
         )
+
+    @staticmethod
+    def _cache_is_current(frame: pd.DataFrame) -> bool:
+        if "_weather_com_alignment_version" not in frame.columns:
+            return False
+        versions = frame["_weather_com_alignment_version"].dropna().unique().tolist()
+        return versions == [_ALIGNMENT_VERSION]
+
+    @staticmethod
+    def _public_columns(frame: pd.DataFrame) -> pd.DataFrame:
+        columns = [
+            "station_id",
+            "valid_time",
+            "valid_hour",
+            "weather_com_temp_f",
+            "weather_com_temp_c",
+        ]
+        return frame[[col for col in columns if col in frame.columns]].copy()
 
     @staticmethod
     def _empty_frame() -> pd.DataFrame:

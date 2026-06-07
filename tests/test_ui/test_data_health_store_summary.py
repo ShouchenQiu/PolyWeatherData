@@ -264,6 +264,7 @@ def test_data_health_renders_iem_weather_truth_from_cache(tmp_path):
                 "valid_hour": hour,
                 "weather_com_temp_f": 68.0,
                 "weather_com_temp_c": 20.0,
+                "_weather_com_alignment_version": "iem_representative_hour_v2",
             }
         ]
     ).to_parquet(cache_dir / "2026-06-03.parquet", index=False)
@@ -313,6 +314,37 @@ def test_temperature_comparison_figures_share_x_domain_and_error_colors():
     assert comparison.layout.xaxis.domain == error.layout.xaxis.domain
     assert comparison.layout.margin.r == error.layout.margin.r
     assert comparison.layout.legend.orientation == "h"
+    assert "UTC; NYC local" in comparison.layout.xaxis.title.text
+    assert "UTC; NYC local" in error.layout.xaxis.title.text
+    assert set(error.data[0].marker.color) == {"#d62728", "#1f77b4"}
+
+
+def test_iem_weather_truth_figures_share_layout_and_error_colors():
+    hour = pd.Timestamp("2026-06-04 01:00:00", tz="UTC")
+    matched = pd.DataFrame(
+        [
+            {
+                "valid_hour": hour,
+                "iem_obs_f": 68.0,
+                "weather_com_temp_f": 67.0,
+                "truth_error_f": 1.0,
+            },
+            {
+                "valid_hour": hour + pd.Timedelta(hours=1),
+                "iem_obs_f": 68.0,
+                "weather_com_temp_f": 69.0,
+                "truth_error_f": -1.0,
+            },
+        ]
+    )
+
+    comparison = data_health._iem_weather_truth_figure(matched)
+    error = data_health._iem_weather_truth_error_figure(matched)
+
+    assert comparison.layout.xaxis.domain == error.layout.xaxis.domain
+    assert comparison.layout.margin.r == error.layout.margin.r
+    assert comparison.layout.legend.orientation == "h"
+    assert "UTC; NYC local" in comparison.layout.xaxis.title.text
     assert set(error.data[0].marker.color) == {"#d62728", "#1f77b4"}
 
 
@@ -370,6 +402,7 @@ def test_data_health_renders_weather_truth_location_caption(tmp_path):
                 "valid_hour": hour,
                 "weather_com_temp_f": 68.0,
                 "weather_com_temp_c": 20.0,
+                "_weather_com_alignment_version": "iem_representative_hour_v2",
             }
         ]
     ).to_parquet(cache_dir / "2026-06-03.parquet", index=False)
@@ -627,6 +660,7 @@ def test_iem_weather_truth_frame_joins_hourly_obs_and_computes_f_error(tmp_path)
                 "valid_hour": valid_hour,
                 "weather_com_temp_f": 69.0,
                 "weather_com_temp_c": 20.5556,
+                "_weather_com_alignment_version": "iem_representative_hour_v2",
             }
         ]
     ).to_parquet(cache_dir / "2026-06-03.parquet", index=False)
@@ -635,6 +669,9 @@ def test_iem_weather_truth_frame_joins_hourly_obs_and_computes_f_error(tmp_path)
 
     assert message is None
     assert frame["valid_hour"].tolist() == [valid_hour]
+    assert frame["weather_com_valid_time"].tolist() == [
+        valid_hour + pd.Timedelta(minutes=5)
+    ]
     assert frame["iem_obs_f"].tolist() == [68.0]
     assert frame["weather_com_temp_f"].tolist() == [69.0]
     assert frame["truth_error_f"].tolist() == [-1.0]
@@ -644,6 +681,51 @@ def test_iem_weather_truth_frame_joins_hourly_obs_and_computes_f_error(tmp_path)
     assert metrics["mae_f"] == 1.0
     assert metrics["bias_f"] == -1.0
     assert metrics["max_abs_error_f"] == 1.0
+
+
+def test_iem_weather_truth_frame_prefers_iem_representative_weather_candidate(tmp_path):
+    root = tmp_path / "data_store"
+    valid_hour = pd.Timestamp("2026-05-24 12:00:00", tz="UTC")
+    temp_frame = pd.DataFrame(
+        [
+            {
+                "station_id": "KLGA",
+                "valid_hour": valid_hour,
+                "iem_obs_c": 11.6667,
+                "has_obs": True,
+            }
+        ]
+    )
+    cache_dir = root / "_truth_weather_com" / "KLGA"
+    cache_dir.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "station_id": "KLGA",
+                "valid_time": valid_hour - pd.Timedelta(minutes=9),
+                "valid_hour": valid_hour,
+                "weather_com_temp_f": 53.0,
+                "weather_com_temp_c": 11.6667,
+                "_weather_com_alignment_version": "iem_representative_hour_v2",
+            },
+            {
+                "station_id": "KLGA",
+                "valid_time": valid_hour + pd.Timedelta(minutes=19),
+                "valid_hour": valid_hour,
+                "weather_com_temp_f": 54.0,
+                "weather_com_temp_c": 12.2222,
+                "_weather_com_alignment_version": "iem_representative_hour_v2",
+            },
+        ]
+    ).to_parquet(cache_dir / "2026-05-24.parquet", index=False)
+
+    frame, message = data_health._iem_weather_truth_frame(root, "KLGA", temp_frame)
+
+    assert message is None
+    assert frame["weather_com_valid_time"].tolist() == [
+        valid_hour - pd.Timedelta(minutes=9)
+    ]
+    assert frame["weather_com_temp_f"].tolist() == [53.0]
 
 
 def test_iem_weather_truth_frame_keeps_iem_rows_when_truth_fetch_empty(tmp_path, monkeypatch):
