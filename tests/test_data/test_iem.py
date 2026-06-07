@@ -82,6 +82,7 @@ def test_parse_csv_t_group_precision():
     src = IemSource()
     df = src._parse_csv(_IEM_CSV)
     assert df["raw_tmpc_tenths"].iloc[0] == pytest.approx(1.7, abs=0.01)
+    assert df["_raw_tmpc_source"].iloc[0] == "tgroup"
 
 
 def test_parse_csv_t_group_dewpoint():
@@ -89,6 +90,7 @@ def test_parse_csv_t_group_dewpoint():
     src = IemSource()
     df = src._parse_csv(_IEM_CSV)
     assert df["raw_dwpc_tenths"].iloc[0] == pytest.approx(3.9, abs=0.01)
+    assert df["_raw_dwpc_source"].iloc[0] == "tgroup"
 
 
 def test_parse_csv_wind_fields():
@@ -131,6 +133,22 @@ def test_parse_csv_missing_column_is_nan():
     assert len(df) == 1
     expected_tmpc = _f_to_c(35.6)
     assert df["raw_tmpc_tenths"].iloc[0] == pytest.approx(expected_tmpc, abs=0.05)
+    assert df["_raw_tmpc_source"].iloc[0] == "fallback"
+    assert df["_raw_dwpc_source"].iloc[0] == "fallback"
+
+
+def test_parse_csv_missing_temperature_source_marked_missing():
+    csv = (
+        "station,valid,tmpf,dwpf,drct,sknt,p01i,alti,vsby,gust,skyc1,wxcodes,metar\n"
+        "LGA,2026-01-01 00:00,,,270,10,0.0,29.92,10,,CLR,,"
+        "KLGA 010000Z AUTO 27010KT 10SM CLR A2992\n"
+    )
+    src = IemSource()
+    df = src._parse_csv(csv)
+    assert pd.isna(df["raw_tmpc_tenths"].iloc[0])
+    assert pd.isna(df["raw_dwpc_tenths"].iloc[0])
+    assert df["_raw_tmpc_source"].iloc[0] == "missing"
+    assert df["_raw_dwpc_source"].iloc[0] == "missing"
 
 
 def test_parse_csv_empty_text_returns_empty():

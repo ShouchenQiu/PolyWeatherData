@@ -32,6 +32,19 @@ def _make_hrrr_rows(n: int, start: pd.Timestamp) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _make_f01_rows_for_valid_window(n: int, valid_start: pd.Timestamp) -> pd.DataFrame:
+    rows = []
+    for i in range(n):
+        vt = valid_start + pd.Timedelta(hours=i)
+        rows.append({
+            "init_time": str(vt - pd.Timedelta(hours=1)),
+            "fxx": 1,
+            "valid_time": str(vt),
+            "TMP_2m": 5.0 + i * 0.1,
+        })
+    return pd.DataFrame(rows)
+
+
 def _make_obs_rows(n: int, start: pd.Timestamp) -> pd.DataFrame:
     rows = []
     for i in range(n):
@@ -78,20 +91,66 @@ def test_build_encoder_obs_window_returns_merged_72_rows():
     assert result["valid_time"].is_monotonic_increasing
 
 
-def test_build_encoder_obs_window_reads_exact_window_from_stores():
-    """Store.read() is called with exactly [init - n_hours, init - 1h] -- no extra rows."""
+def test_build_encoder_obs_window_reads_hrrr_by_f01_init_window_and_obs_by_valid_window():
+    """HRRR f01 is stored by init_time, so read init_time = valid_time - 1h."""
     init = pd.Timestamp("2026-01-10 12:00:00", tz="UTC")
     expected_start = init - pd.Timedelta(hours=72)
     expected_end   = init - pd.Timedelta(hours=1)
 
-    hrrr_df = _make_hrrr_rows(72, expected_start)
+    hrrr_df = _make_f01_rows_for_valid_window(72, expected_start)
     obs_df  = _make_obs_rows(72, expected_start)
     mgr, fc_store, obs_store = _make_manager(hrrr_df, obs_df)
 
     mgr.build_encoder_obs_window(_make_station("KLGA"), init, n_hours=72)
 
-    fc_store.read.assert_called_once_with("KLGA", expected_start, expected_end)
+    fc_store.read.assert_called_once_with(
+        "KLGA",
+        expected_start - pd.Timedelta(hours=1),
+        expected_end - pd.Timedelta(hours=1),
+    )
     obs_store.read.assert_called_once_with("KLGA", expected_start, expected_end)
+
+
+def test_build_encoder_obs_window_filters_hrrr_f01_rows_by_valid_time():
+    init = pd.Timestamp("2026-01-10 12:00:00", tz="UTC")
+    window_start = init - pd.Timedelta(hours=72)
+    # Stores may return an adjacent f01 row because the read is keyed by init_time.
+    hrrr_df = pd.concat(
+        [
+            _make_f01_rows_for_valid_window(1, window_start - pd.Timedelta(hours=1)),
+            _make_f01_rows_for_valid_window(72, window_start),
+            _make_f01_rows_for_valid_window(1, init),
+        ],
+        ignore_index=True,
+    )
+    obs_df = _make_obs_rows(72, window_start)
+    mgr, _, _ = _make_manager(hrrr_df, obs_df)
+
+    result = mgr.build_encoder_obs_window(_make_station(), init, n_hours=72)
+
+    assert len(result) == 72
+    assert result["valid_time"].min() == window_start
+    assert result["valid_time"].max() == init - pd.Timedelta(hours=1)
+
+
+def test_build_training_decoder_window_normalizes_datetime_resolution():
+    start = pd.Timestamp("2026-01-10 13:00:00", tz="UTC")
+    decoder = _make_f01_rows_for_valid_window(48, start)
+    decoder["fxx"] = list(range(1, 49))
+    decoder["valid_time"] = pd.to_datetime(decoder["valid_time"], utc=True).astype(
+        "datetime64[us, UTC]"
+    )
+    obs = _make_obs_rows(48, start)
+    obs["valid_time"] = pd.to_datetime(obs["valid_time"], utc=True).astype(
+        "datetime64[ns, UTC]"
+    )
+    mgr, _, obs_store = _make_manager(pd.DataFrame(), obs)
+
+    result = mgr.build_training_decoder_window(_make_station("KLGA"), decoder)
+
+    assert len(result) == 48
+    assert result["temp_error"].notna().all()
+    obs_store.read.assert_called_once()
 
 
 def test_build_encoder_obs_window_copies_store_results():

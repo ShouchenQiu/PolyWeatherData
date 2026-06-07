@@ -208,10 +208,12 @@ class IemSource(BaseObsSource):
         raw = raw.loc[out.index].copy()
 
         # Temperatures: prefer T-group precision when metar column exists
-        tmp_c = self._extract_temp_c(raw, "tmpf", "metar", tgroup_idx=0)
-        dpt_c = self._extract_temp_c(raw, "dwpf", "metar", tgroup_idx=1)
+        tmp_c, tmp_source = self._extract_temp_c(raw, "tmpf", "metar", tgroup_idx=0)
+        dpt_c, dpt_source = self._extract_temp_c(raw, "dwpf", "metar", tgroup_idx=1)
         out["raw_tmpc_tenths"] = tmp_c.values
         out["raw_dwpc_tenths"] = dpt_c.values
+        out["_raw_tmpc_source"] = tmp_source.values
+        out["_raw_dwpc_source"] = dpt_source.values
 
         def _col(name: str) -> pd.Series:
             if name in raw.columns:
@@ -262,13 +264,17 @@ class IemSource(BaseObsSource):
         f_col: str,
         metar_col: str,
         tgroup_idx: int,
-    ) -> pd.Series:
+    ) -> tuple[pd.Series, pd.Series]:
         """Extract temperature (Celsius) preferring T-group tenths precision.
 
-        Logs a WARNING when any row had to fall back from T-group to tmpf/dwpf.
+        Returns (temperature_c, source), where source is one of:
+        ``tgroup`` for METAR T-group, ``fallback`` for tmpf/dwpf fallback, or
+        ``missing`` when neither source is available.  Logs a WARNING when any
+        row had to fall back from T-group to tmpf/dwpf.
         """
         n = len(raw)
         result = np.full(n, np.nan)
+        source = np.full(n, "missing", dtype=object)
 
         # Try T-group from metar first
         if metar_col in raw.columns:
@@ -280,6 +286,7 @@ class IemSource(BaseObsSource):
                         result[i] = _t_group_to_c(groups[0], groups[1])
                     else:
                         result[i] = _t_group_to_c(groups[2], groups[3])
+                    source[i] = "tgroup"
 
         # Fall back to tmpf/dwpf for rows where T-group was not found
         fallback_count = 0
@@ -291,6 +298,7 @@ class IemSource(BaseObsSource):
             result[missing] = np.where(
                 np.isnan(f_vals[missing]), np.nan, _f_to_c(f_vals[missing])
             )
+            source[needed_fallback] = "fallback"
 
         if fallback_count > 0:
             col_label = "temp" if tgroup_idx == 0 else "dewpoint"
@@ -300,7 +308,7 @@ class IemSource(BaseObsSource):
                 fallback_count, col_label, f_col,
             )
 
-        return pd.Series(result, dtype=float)
+        return pd.Series(result, dtype=float), pd.Series(source, dtype="object")
 
     @staticmethod
     def _empty_df() -> pd.DataFrame:
@@ -309,5 +317,6 @@ class IemSource(BaseObsSource):
             "raw_wind_spd_kt", "raw_wind_gust_kt", "obs_U", "obs_V",
             "raw_vis_sm", "raw_alti_inhg", "skyc1", "skyl1",
             "p01i", "is_rain", "is_snow",
+            "_raw_tmpc_source", "_raw_dwpc_source",
         ]
         return pd.DataFrame(columns=cols)

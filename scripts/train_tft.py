@@ -360,11 +360,24 @@ class TftTrainer:
     def _eval_mae(self, trainer: Any, model: Any, loader: Any) -> float:
         """Compute MAE on the median quantile over the test loader."""
         try:
-            preds = trainer.predict(model, dataloaders=loader)
-            # preds is a list of tensors; median = quantile index 1 (0.5)
             import torch
-            all_pred = torch.cat([p[0][:, :, 1] for p in preds])  # (N, T)
-            all_tgt  = torch.cat([p[1][0] for p in preds])        # (N, T)
+
+            prediction = model.predict(
+                loader,
+                return_y=True,
+                trainer_kwargs={
+                    "accelerator": "auto",
+                    "logger": False,
+                    "enable_progress_bar": False,
+                },
+            )
+            all_pred = prediction.output
+            if all_pred.ndim == 3:
+                all_pred = all_pred[:, :, 1]
+            target = prediction.y[0] if isinstance(prediction.y, tuple) else prediction.y
+            if target is None:
+                raise ValueError("prediction target is missing")
+            all_tgt = target
             mae = float((all_pred - all_tgt).abs().mean())
             return round(mae, 5)
         except Exception as exc:
@@ -380,6 +393,53 @@ from typing import Any  # noqa: E402
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+def _settings_from_cli_args(args: Any) -> Settings:
+    """Build Settings from CLI overrides while preserving production defaults."""
+    smoke_summary_path = getattr(args, "smoke_summary", None)
+    smoke_summary: dict[str, Any] = {}
+    if smoke_summary_path:
+        with open(smoke_summary_path, encoding="utf-8") as fh:
+            smoke_summary = json.load(fh)
+
+    data_store = getattr(args, "data_store", None)
+    if data_store is None and smoke_summary.get("data_store_dir"):
+        data_store = smoke_summary["data_store_dir"]
+
+    settings_kwargs: dict[str, Any] = {}
+    if data_store is not None:
+        settings_kwargs["data_store_dir"] = Path(data_store)
+
+    model_store = getattr(args, "model_store", None)
+    if model_store is not None:
+        settings_kwargs["model_store_dir"] = Path(model_store)
+
+    settings = Settings(**settings_kwargs)
+
+    smoke_split = smoke_summary.get("smoke_split")
+    if smoke_split:
+        for split_name in ("train", "val", "test"):
+            bounds = smoke_split[split_name]
+            if isinstance(bounds, dict):
+                start = bounds["start"]
+                end = bounds["end"]
+            else:
+                start, end = bounds
+            setattr(settings, f"{split_name}_start", start)
+            setattr(settings, f"{split_name}_end", end)
+
+    min_epochs = getattr(args, "min_epochs", None)
+    if min_epochs is not None:
+        settings.tft_min_epochs = int(min_epochs)
+    max_epochs = getattr(args, "max_epochs", None)
+    if max_epochs is not None:
+        settings.tft_max_epochs = int(max_epochs)
+    batch_size = getattr(args, "batch_size", None)
+    if batch_size is not None:
+        settings.tft_batch_size = int(batch_size)
+
+    return settings
+
+
 def _cli() -> None:
     parser = argparse.ArgumentParser(description="Train TFT model from ParquetStore data")
     parser.add_argument("--station",    default="KLGA",   help="Station key in ParquetStore")
@@ -387,6 +447,13 @@ def _cli() -> None:
     parser.add_argument("--start",      default="2000-01-01")
     parser.add_argument("--end",        default="2100-01-01")
     parser.add_argument("--output-dir", default="checkpoints", dest="output_dir")
+    parser.add_argument("--data-store", default=None, dest="data_store")
+    parser.add_argument("--db", default=None, dest="db")
+    parser.add_argument("--model-store", default=None, dest="model_store")
+    parser.add_argument("--smoke-summary", default=None, dest="smoke_summary")
+    parser.add_argument("--min-epochs", type=int, default=None, dest="min_epochs")
+    parser.add_argument("--max-epochs", type=int, default=None, dest="max_epochs")
+    parser.add_argument("--batch-size", type=int, default=None, dest="batch_size")
     args = parser.parse_args()
 
     from data.storage.parquet_store import ParquetStore
@@ -395,12 +462,12 @@ def _cli() -> None:
     from model.store.registry import ModelRegistry
     from db.schema import DbClient
 
-    settings  = Settings()
+    settings  = _settings_from_cli_args(args)
     forecast_store = ParquetStore(settings.forecast_store_dir)
     obs_store = ParquetStore(settings.obs_store_dir)
     data_mgr = DataManager([], [], forecast_store, obs_store, settings=settings)
     decoder_cache = TrainingDecoderCache(settings.training_decoder_cache_dir)
-    db_path   = settings.project_root / "polyweather.db"
+    db_path   = Path(args.db) if args.db else settings.project_root / "polyweather.db"
     db        = DbClient(str(db_path))
     registry  = ModelRegistry(settings.model_store_dir, db)
 

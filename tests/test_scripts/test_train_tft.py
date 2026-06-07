@@ -3,12 +3,13 @@ from __future__ import annotations
 import sys
 import types
 from pathlib import Path
+import json
 
 import pandas as pd
 
 from config.settings import Settings
 from config.stations import STATIONS
-from scripts.train_tft import TftTrainer
+from scripts.train_tft import TftTrainer, _settings_from_cli_args
 
 
 class FakeBuilder:
@@ -152,3 +153,42 @@ def test_tft_trainer_uses_settings_splits_and_publishes_dataset_pkl(
     assert registry.publish_kwargs["training_dataset_pkl"].exists()
     assert registry.publish_kwargs["metrics"]["train_mae"] != registry.publish_kwargs["metrics"]["best_val_loss"]
     assert result["test_mae"] == 1.23
+
+
+def test_settings_from_cli_args_applies_smoke_summary_and_paths(tmp_path):
+    summary_path = tmp_path / "smoke_summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "data_store_dir": str(tmp_path / "summary_data"),
+                "smoke_split": {
+                    "train": ["2026-05-26", "2026-05-30"],
+                    "val": ["2026-05-31", "2026-06-01"],
+                    "test": ["2026-06-02", "2026-06-04"],
+                },
+            }
+        ),
+        encoding="ascii",
+    )
+    args = types.SimpleNamespace(
+        data_store=tmp_path / "data",
+        model_store=tmp_path / "models",
+        smoke_summary=summary_path,
+        min_epochs=1,
+        max_epochs=2,
+        batch_size=16,
+    )
+
+    settings = _settings_from_cli_args(args)
+
+    assert settings.data_store_dir == tmp_path / "data"
+    assert settings.forecast_store_dir == tmp_path / "data" / "hrrr"
+    assert settings.obs_store_dir == tmp_path / "data" / "obs"
+    assert settings.training_decoder_cache_dir == tmp_path / "data" / "_decoder_cache"
+    assert settings.model_store_dir == tmp_path / "models"
+    assert (settings.train_start, settings.train_end) == ("2026-05-26", "2026-05-30")
+    assert (settings.val_start, settings.val_end) == ("2026-05-31", "2026-06-01")
+    assert (settings.test_start, settings.test_end) == ("2026-06-02", "2026-06-04")
+    assert settings.tft_min_epochs == 1
+    assert settings.tft_max_epochs == 2
+    assert settings.tft_batch_size == 16

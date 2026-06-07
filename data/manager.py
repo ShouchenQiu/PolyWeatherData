@@ -363,7 +363,7 @@ class DataManager:
 
         # .copy() immediately after store reads to avoid shared-reference
         # side effects when the caller or Cleaner mutates the DataFrame.
-        hrrr_raw = self._forecast_store.read(
+        hrrr_raw = self._read_hrrr_f01_valid_window(
             station.station_id, window_start, window_end
         ).copy()
         obs_raw = self._obs_store.read(
@@ -393,8 +393,8 @@ class DataManager:
                 f"HRRR missing: {missing_hrrr}, obs missing: {missing_obs}"
             )
 
-        hrrr_raw["valid_time"] = pd.to_datetime(hrrr_raw["valid_time"], utc=True)
-        obs_raw["valid_time"]  = pd.to_datetime(obs_raw["valid_time"],  utc=True)
+        hrrr_raw["valid_time"] = self._to_utc_ns(hrrr_raw["valid_time"])
+        obs_raw["valid_time"]  = self._to_utc_ns(obs_raw["valid_time"])
 
         hrrr_sorted = hrrr_raw.sort_values("valid_time").reset_index(drop=True)
         obs_sorted  = obs_raw.sort_values("valid_time").reset_index(drop=True)
@@ -461,7 +461,7 @@ class DataManager:
             )
 
         decoder = decoder_df.copy()
-        decoder["valid_time"] = pd.to_datetime(decoder["valid_time"], utc=True)
+        decoder["valid_time"] = self._to_utc_ns(decoder["valid_time"])
         decoder = decoder[decoder["fxx"].astype(int).between(1, 48)].copy()
         decoder = decoder.sort_values("valid_time").reset_index(drop=True)
         actual_fxx = set(decoder["fxx"].astype(int).tolist())
@@ -484,7 +484,7 @@ class DataManager:
             raise RuntimeError(
                 f"build_training_decoder_window: obs missing columns {missing_obs}"
             )
-        obs_raw["valid_time"] = pd.to_datetime(obs_raw["valid_time"], utc=True)
+        obs_raw["valid_time"] = self._to_utc_ns(obs_raw["valid_time"])
         obs_sorted = obs_raw.sort_values("valid_time").reset_index(drop=True)
         merged = pd.merge_asof(
             decoder,
@@ -551,7 +551,7 @@ class DataManager:
         window_start = init_utc - pd.Timedelta(hours=encoder_hours)
         window_end   = init_utc - pd.Timedelta(hours=1)
 
-        hrrr_window = self._forecast_store.read(
+        hrrr_window = self._read_hrrr_f01_valid_window(
             station.station_id, window_start, window_end
         )
         obs_window = self._obs_store.read(
@@ -658,6 +658,33 @@ class DataManager:
     # ------------------------------------------------------------------
     # Private helpers for inference_readiness
     # ------------------------------------------------------------------
+
+    def _read_hrrr_f01_valid_window(
+        self,
+        station_id: str,
+        valid_start: pd.Timestamp,
+        valid_end: pd.Timestamp,
+    ) -> pd.DataFrame:
+        """Read f01 HRRR rows for a valid_time window.
+
+        ParquetStore keys HRRR rows by ``init_time`` + ``fxx``.  For f01,
+        ``valid_time = init_time + 1h``, while encoder windows are defined in
+        valid_time.  Read the shifted init_time range, then trim exactly by
+        valid_time so the returned rows align with obs.
+        """
+        init_start = valid_start - pd.Timedelta(hours=1)
+        init_end = valid_end - pd.Timedelta(hours=1)
+        df = self._forecast_store.read(station_id, init_start, init_end).copy()
+        if df.empty or "valid_time" not in df.columns:
+            return df
+        df["valid_time"] = self._to_utc_ns(df["valid_time"])
+        mask = (df["valid_time"] >= valid_start) & (df["valid_time"] <= valid_end)
+        return df[mask].sort_values("valid_time").reset_index(drop=True)
+
+    @staticmethod
+    def _to_utc_ns(values: object) -> pd.Series:
+        """Return UTC timestamps with nanosecond resolution for pandas joins."""
+        return pd.to_datetime(values, utc=True).astype("datetime64[ns, UTC]")
 
     @staticmethod
     def _min_valid_time(df: pd.DataFrame) -> "pd.Timestamp | None":

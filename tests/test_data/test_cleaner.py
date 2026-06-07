@@ -173,6 +173,53 @@ def test_iem_hourly_dedup_prefers_51_representative_observation():
     assert result["raw_tmpc_tenths"].tolist() == pytest.approx([1.0, 3.0])
 
 
+def test_iem_hourly_dedup_prefers_tgroup_over_closer_fallback():
+    df = pd.DataFrame({
+        "valid_time": [
+            "2026-01-01 00:45:00",  # farther from 00:51 but T-group sourced
+            "2026-01-01 00:51:00",  # closer but fallback sourced
+        ],
+        "raw_tmpc_tenths": [1.7, 3.0],
+        "_raw_tmpc_source": ["tgroup", "fallback"],
+        "raw_dwpc_tenths": [0.0, 0.0],
+    })
+    result = Cleaner.clean_iem(df)
+    assert len(result) == 1
+    assert result["raw_tmpc_tenths"].iloc[0] == pytest.approx(1.7)
+    assert "_raw_tmpc_source" not in result.columns
+
+
+def test_iem_hourly_dedup_prefers_nearest_target_within_tgroup():
+    df = pd.DataFrame({
+        "valid_time": [
+            "2026-01-01 00:40:00",
+            "2026-01-01 00:51:00",
+        ],
+        "raw_tmpc_tenths": [1.7, 2.8],
+        "_raw_tmpc_source": ["tgroup", "tgroup"],
+        "raw_dwpc_tenths": [0.0, 0.0],
+    })
+    result = Cleaner.clean_iem(df)
+    assert len(result) == 1
+    assert result["raw_tmpc_tenths"].iloc[0] == pytest.approx(2.8)
+
+
+def test_iem_hourly_dedup_uses_completeness_after_source_and_time():
+    df = pd.DataFrame({
+        "valid_time": [
+            "2026-01-01 00:51:00",
+            "2026-01-01 00:51:00",
+        ],
+        "raw_tmpc_tenths": [1.7, 2.8],
+        "_raw_tmpc_source": ["tgroup", "tgroup"],
+        "raw_dwpc_tenths": [0.0, 0.0],
+        "raw_vis_sm": [float("nan"), 10.0],
+    })
+    result = Cleaner.clean_iem(df)
+    assert len(result) == 1
+    assert result["raw_tmpc_tenths"].iloc[0] == pytest.approx(2.8)
+
+
 def test_iem_hourly_dedup_rejects_implausible_temperature_candidate():
     df = pd.DataFrame({
         "valid_time": [
@@ -318,6 +365,32 @@ def test_build_features_iem_observed_wind_decomp():
     assert result["obs_WS"].iloc[0] == pytest.approx(5.0)
     assert result["obs_WD_sin"].iloc[0] == pytest.approx(np.sin(expected_wd), rel=1e-5)
     assert result["obs_WD_cos"].iloc[0] == pytest.approx(np.cos(expected_wd), rel=1e-5)
+
+
+def test_process_iem_drops_temperature_source_markers_and_keeps_model_features():
+    df = pd.DataFrame({
+        "valid_time": ["2026-01-01 00:51:00"],
+        "raw_tmpc_tenths": [1.7],
+        "raw_dwpc_tenths": [0.5],
+        "raw_wind_spd_kt": [5.0],
+        "raw_wind_gust_kt": [float("nan")],
+        "obs_U": [3.0],
+        "obs_V": [4.0],
+        "raw_vis_sm": [10.0],
+        "raw_alti_inhg": [29.92],
+        "skyc1": [15.0],
+        "skyl1": [2500.0],
+        "p01i": [float("nan")],
+        "is_rain": [float("nan")],
+        "is_snow": [float("nan")],
+        "_raw_tmpc_source": ["tgroup"],
+        "_raw_dwpc_source": ["tgroup"],
+    })
+    result = Cleaner.process_iem(df)
+    assert "_raw_tmpc_source" not in result.columns
+    assert "_raw_dwpc_source" not in result.columns
+    assert {"obs_WS", "obs_WD_sin", "obs_WD_cos"}.issubset(result.columns)
+    assert result["raw_wind_gust_kt"].iloc[0] == pytest.approx(5.0)
 
 
 # ---------------------------------------------------------------------------

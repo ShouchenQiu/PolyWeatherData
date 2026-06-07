@@ -126,6 +126,12 @@ class Cleaner:
                 original_valid_time - representative_target
             ).abs().dt.total_seconds()
             df["_iem_original_valid_time"] = original_valid_time
+            if "_raw_tmpc_source" in df.columns:
+                df["_iem_tmpc_tgroup"] = (
+                    df["_raw_tmpc_source"].fillna("").astype(str) == "tgroup"
+                )
+            else:
+                df["_iem_tmpc_tgroup"] = False
             quality_cols = [
                 c for c in df.columns
                 if c not in {
@@ -133,6 +139,9 @@ class Cleaner:
                     "_iem_candidate_distance_s",
                     "_iem_candidate_complete",
                     "_iem_original_valid_time",
+                    "_iem_tmpc_tgroup",
+                    "_raw_tmpc_source",
+                    "_raw_dwpc_source",
                 }
             ]
             if quality_cols:
@@ -147,11 +156,12 @@ class Cleaner:
             ascending = [True]
             if "_iem_candidate_distance_s" in df.columns:
                 sort_cols.extend([
+                    "_iem_tmpc_tgroup",
                     "_iem_candidate_distance_s",
                     "_iem_candidate_complete",
                     "_iem_original_valid_time",
                 ])
-                ascending.extend([True, False, True])
+                ascending.extend([False, True, False, True])
             df = df.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
 
         # 3. Fill missing gust with speed
@@ -184,6 +194,9 @@ class Cleaner:
                     "_iem_candidate_distance_s",
                     "_iem_candidate_complete",
                     "_iem_original_valid_time",
+                    "_iem_tmpc_tgroup",
+                    "_raw_tmpc_source",
+                    "_raw_dwpc_source",
                 ]
                 if c in df.columns
             ]
