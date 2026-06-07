@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
-import os
 from unittest.mock import patch
 
 import pandas as pd
@@ -9,6 +8,26 @@ import pandas as pd
 from data.storage.parquet_store import ParquetStore
 from db.schema import DbClient
 from ui.pages import data_health
+
+
+class _EmptyTruthClient:
+    @classmethod
+    def location_code(cls, station_id: str) -> str:
+        return f"{station_id}:9:US"
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        return None
+
+    def fetch_date(self, *_args, **_kwargs) -> pd.DataFrame:
+        return pd.DataFrame(
+            columns=[
+                "station_id",
+                "valid_time",
+                "valid_hour",
+                "weather_com_temp_f",
+                "weather_com_temp_c",
+            ]
+        )
 
 
 def test_data_health_renders_parquet_store_summary(tmp_path):
@@ -44,12 +63,14 @@ def test_data_health_renders_parquet_store_summary(tmp_path):
         stack.enter_context(patch("streamlit.header"))
         stack.enter_context(patch("streamlit.subheader"))
         stack.enter_context(patch("streamlit.info"))
+        stack.enter_context(patch("ui.pages.data_health.WeatherComTruthClient", _EmptyTruthClient))
         dataframe = stack.enter_context(patch("streamlit.dataframe"))
         stack.enter_context(patch("streamlit.plotly_chart"))
 
         data_health.render(db, data_store_dir=tmp_path / "data_store")
 
-    rendered = dataframe.call_args_list[0].args[0]
+    rendered_tables = [call.args[0] for call in dataframe.call_args_list]
+    rendered = next(table for table in rendered_tables if "store" in table.columns)
     assert set(rendered["store"]) == {"hrrr", "obs"}
     assert rendered["rows"].tolist() == [1, 1]
 
@@ -106,6 +127,7 @@ def test_data_health_renders_daily_coverage_cleaning_and_seed_timing(tmp_path):
         stack.enter_context(patch("streamlit.header"))
         stack.enter_context(patch("streamlit.subheader"))
         stack.enter_context(patch("streamlit.info"))
+        stack.enter_context(patch("ui.pages.data_health.WeatherComTruthClient", _EmptyTruthClient))
         dataframe = stack.enter_context(patch("streamlit.dataframe"))
         stack.enter_context(patch("streamlit.plotly_chart"))
 
@@ -213,7 +235,8 @@ def test_data_health_renders_temperature_comparison_chart(tmp_path):
         stack.enter_context(patch("streamlit.info"))
         stack.enter_context(patch("streamlit.dataframe"))
         stack.enter_context(patch("streamlit.selectbox", side_effect=["KLGA", "All"]))
-        stack.enter_context(patch("streamlit.columns", return_value=[_MetricCol(), _MetricCol(), _MetricCol(), _MetricCol()]))
+        stack.enter_context(patch("ui.pages.data_health.WeatherComTruthClient", _EmptyTruthClient))
+        stack.enter_context(patch("streamlit.columns", return_value=[_MetricCol(), _MetricCol(), _MetricCol(), _MetricCol(), _MetricCol()]))
         plotly_chart = stack.enter_context(patch("streamlit.plotly_chart"))
 
         data_health.render(db, data_store_dir=root)
@@ -265,7 +288,69 @@ def test_data_health_renders_iem_weather_truth_from_cache(tmp_path):
     assert plotly_chart.call_count >= 2
 
 
-def test_data_health_reports_missing_weather_com_key_without_cache(tmp_path):
+def test_temperature_comparison_figures_share_x_domain_and_error_colors():
+    hour = pd.Timestamp("2026-06-04 01:00:00", tz="UTC")
+    matched = pd.DataFrame(
+        [
+            {
+                "valid_hour": hour,
+                "hrrr_f01_c": 21.0,
+                "iem_obs_c": 20.0,
+                "temp_error_c": 1.0,
+            },
+            {
+                "valid_hour": hour + pd.Timedelta(hours=1),
+                "hrrr_f01_c": 19.0,
+                "iem_obs_c": 20.0,
+                "temp_error_c": -1.0,
+            },
+        ]
+    )
+
+    comparison = data_health._temperature_comparison_figure(matched)
+    error = data_health._temperature_error_figure(matched)
+
+    assert comparison.layout.xaxis.domain == error.layout.xaxis.domain
+    assert comparison.layout.margin.r == error.layout.margin.r
+    assert comparison.layout.legend.orientation == "h"
+    assert set(error.data[0].marker.color) == {"#d62728", "#1f77b4"}
+
+
+def test_seed_timing_summary_includes_smoke_bootstrap_timing(tmp_path):
+    root = tmp_path / "data_store"
+    (tmp_path / "smoke_summary.json").write_text(
+        """
+        {
+          "timings": {
+            "iem": {"elapsed_seconds": 10, "rows_written": 100, "errors": 0, "rows_per_second": 10},
+            "hrrr_f01": {"elapsed_seconds": 20, "rows_written": 40, "errors": 1, "rows_per_second": 2}
+          }
+        }
+        """,
+        encoding="ascii",
+    )
+    (tmp_path / "seed_summary.json").write_text(
+        """
+        {
+          "timings": {
+            "hrrr": {"elapsed_seconds": 0, "rows_written": 0, "errors": 0, "rows_per_second": 0}
+          }
+        }
+        """,
+        encoding="ascii",
+    )
+
+    summary = data_health._seed_timing_summary(root)
+
+    assert set(summary["summary"]) == {"smoke_summary", "seed_summary"}
+    smoke_iem = summary[
+        (summary["summary"] == "smoke_summary") & (summary["stage"] == "iem")
+    ].iloc[0]
+    assert smoke_iem["rows_written"] == 100
+    assert smoke_iem["rows_per_second"] == 10.0
+
+
+def test_data_health_renders_weather_truth_location_caption(tmp_path):
     root = tmp_path / "data_store"
     obs_store = ParquetStore(root / "obs")
     hour = pd.Timestamp("2026-06-04 01:00:00", tz="UTC")
@@ -275,24 +360,37 @@ def test_data_health_reports_missing_weather_com_key_without_cache(tmp_path):
             [{"valid_time": hour, "raw_tmpc_tenths": 20.0}]
         ),
     )
+    cache_dir = root / "_truth_weather_com" / "KLGA"
+    cache_dir.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "station_id": "KLGA",
+                "valid_time": hour,
+                "valid_hour": hour,
+                "weather_com_temp_f": 68.0,
+                "weather_com_temp_c": 20.0,
+            }
+        ]
+    ).to_parquet(cache_dir / "2026-06-03.parquet", index=False)
     db = DbClient(":memory:")
 
     with ExitStack() as stack:
-        stack.enter_context(patch.dict(os.environ, {"WEATHER_COM_API_KEY": ""}))
         stack.enter_context(patch("streamlit.header"))
         stack.enter_context(patch("streamlit.subheader"))
-        info = stack.enter_context(patch("streamlit.info"))
+        stack.enter_context(patch("streamlit.info"))
+        caption = stack.enter_context(patch("streamlit.caption"))
         stack.enter_context(patch("streamlit.dataframe"))
         stack.enter_context(patch("streamlit.selectbox", side_effect=["KLGA", "All"]))
         stack.enter_context(patch("streamlit.columns", return_value=[
-            _MetricCol(), _MetricCol(), _MetricCol(), _MetricCol(),
+            _MetricCol(), _MetricCol(), _MetricCol(), _MetricCol(), _MetricCol(),
         ]))
         stack.enter_context(patch("streamlit.plotly_chart"))
 
         data_health.render(db, data_store_dir=root)
 
-    messages = [str(call.args[0]) for call in info.call_args_list]
-    assert any("WEATHER_COM_API_KEY" in message for message in messages)
+    messages = [str(call.args[0]) for call in caption.call_args_list]
+    assert any("KLGA:9:US" in message for message in messages)
 
 
 def test_hrrr_48h_verification_frame_aligns_decoder_cache_and_obs(tmp_path):
@@ -548,7 +646,7 @@ def test_iem_weather_truth_frame_joins_hourly_obs_and_computes_f_error(tmp_path)
     assert metrics["max_abs_error_f"] == 1.0
 
 
-def test_iem_weather_truth_frame_reports_missing_key_without_cache(tmp_path):
+def test_iem_weather_truth_frame_keeps_iem_rows_when_truth_fetch_empty(tmp_path, monkeypatch):
     valid_hour = pd.Timestamp("2026-06-04 01:00:00", tz="UTC")
     temp_frame = pd.DataFrame(
         [
@@ -561,6 +659,8 @@ def test_iem_weather_truth_frame_reports_missing_key_without_cache(tmp_path):
         ]
     )
 
+    monkeypatch.setattr(data_health, "WeatherComTruthClient", _EmptyTruthClient)
+
     frame, message = data_health._iem_weather_truth_frame(
         tmp_path / "data_store",
         "KLGA",
@@ -569,8 +669,7 @@ def test_iem_weather_truth_frame_reports_missing_key_without_cache(tmp_path):
 
     assert not frame.empty
     assert frame["has_weather_com"].tolist() == [False]
-    assert message is not None
-    assert "WEATHER_COM_API_KEY" in message
+    assert message is None
 
 
 def test_hrrr_48h_verification_frame_defaults_to_latest_48_inits(tmp_path):
@@ -637,7 +736,8 @@ def test_data_health_renders_hrrr_48h_verification_chart(tmp_path):
         stack.enter_context(patch("streamlit.info"))
         stack.enter_context(patch("streamlit.dataframe"))
         stack.enter_context(patch("streamlit.selectbox", side_effect=["KLGA", "All", "KLGA", "Last 48", str(init)]))
-        stack.enter_context(patch("streamlit.columns", return_value=[_MetricCol(), _MetricCol(), _MetricCol(), _MetricCol()]))
+        stack.enter_context(patch("ui.pages.data_health.WeatherComTruthClient", _EmptyTruthClient))
+        stack.enter_context(patch("streamlit.columns", return_value=[_MetricCol(), _MetricCol(), _MetricCol(), _MetricCol(), _MetricCol()]))
         plotly_chart = stack.enter_context(patch("streamlit.plotly_chart"))
 
         data_health.render(db, data_store_dir=root)

@@ -25,6 +25,8 @@ from ui import queries
 if TYPE_CHECKING:
     from db.schema import DbClient
 
+_CHART_MARGIN = {"l": 60, "r": 40, "t": 64, "b": 48}
+
 _TEMP_COMPARISON_COLUMNS = [
     "station_id",
     "valid_hour",
@@ -113,20 +115,8 @@ def _render_temperature_comparison(data_store_dir: Path | str | None = None) -> 
     if matched.empty:
         st.info("No overlapping HRRR f01 and IEM observation hours.")
     else:
-        chart_df = matched.melt(
-            id_vars=["valid_hour"],
-            value_vars=["hrrr_f01_c", "iem_obs_c"],
-            var_name="series",
-            value_name="temperature_c",
-        )
         st.plotly_chart(
-            px.line(
-                chart_df,
-                x="valid_hour",
-                y="temperature_c",
-                color="series",
-                title="HRRR f01 vs IEM Observed Temperature",
-            ),
+            _temperature_comparison_figure(matched),
             use_container_width=True,
         )
 
@@ -138,12 +128,7 @@ def _render_temperature_comparison(data_store_dir: Path | str | None = None) -> 
     cols[3].metric("MAE / Bias C", f"{metrics['mae_c']:.2f} / {metrics['bias_c']:.2f}")
     if not matched.empty:
         st.plotly_chart(
-            px.line(
-                matched,
-                x="valid_hour",
-                y="temp_error_c",
-                title="HRRR f01 Error vs IEM Observed Temperature",
-            ),
+            _temperature_error_figure(matched),
             use_container_width=True,
         )
 
@@ -176,10 +161,6 @@ def _render_hrrr_48h_verification(data_store_dir: Path | str | None = None) -> N
     cols[2].metric("MAE / Bias C", f"{metrics['mae_c']:.2f} / {metrics['bias_c']:.2f}")
     cols[3].metric("Max Abs Error C", f"{metrics['max_abs_error_c']:.2f}")
 
-    st.plotly_chart(
-        _hrrr_48h_error_heatmap(frame, metrics),
-        use_container_width=True,
-    )
     st.plotly_chart(
         _hrrr_48h_valid_time_error_heatmap(frame, metrics),
         use_container_width=True,
@@ -240,12 +221,77 @@ def _temperature_comparison_metrics(df: pd.DataFrame) -> dict[str, float | int]:
     }
 
 
+def _temperature_comparison_figure(matched: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=tuple(matched["valid_hour"]),
+            y=tuple(matched["hrrr_f01_c"]),
+            mode="lines",
+            name="HRRR f01 C",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=tuple(matched["valid_hour"]),
+            y=tuple(matched["iem_obs_c"]),
+            mode="lines",
+            name="IEM observed C",
+        )
+    )
+    fig.update_layout(
+        title="HRRR f01 vs IEM Observed Temperature",
+        xaxis_title="valid_hour",
+        yaxis_title="temperature C",
+        margin=_CHART_MARGIN,
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "xanchor": "left",
+            "x": 0.0,
+        },
+    )
+    fig.update_xaxes(domain=[0.0, 1.0])
+    return fig
+
+
+def _temperature_error_figure(matched: pd.DataFrame) -> go.Figure:
+    errors = pd.to_numeric(matched["temp_error_c"], errors="coerce")
+    colors = ["#d62728" if value >= 0 else "#1f77b4" for value in errors]
+    fig = go.Figure(
+        data=[
+            go.Bar(
+                x=tuple(matched["valid_hour"]),
+                y=tuple(errors),
+                marker={"color": colors},
+                name="HRRR - IEM C",
+                hovertemplate=(
+                    "valid_hour=%{x|%Y-%m-%d %H:%M UTC}<br>"
+                    "error C=%{y:.2f}<extra></extra>"
+                ),
+            )
+        ]
+    )
+    fig.add_hline(y=0, line_color="#6b7280", line_width=1)
+    fig.update_layout(
+        title="HRRR f01 Error vs IEM Observed Temperature",
+        xaxis_title="valid_hour",
+        yaxis_title="error C",
+        margin=_CHART_MARGIN,
+        showlegend=False,
+    )
+    fig.update_xaxes(domain=[0.0, 1.0])
+    return fig
+
+
 def _render_iem_weather_truth(
     root: Path,
     station_id: str,
     frame: pd.DataFrame,
 ) -> None:
     st.subheader("IEM vs Weather.com Truth")
+    st.caption(f"Truth location: {WeatherComTruthClient.location_code(station_id)}")
     truth, message = _iem_weather_truth_frame(root, station_id, frame)
     if message:
         st.info(message)
@@ -814,20 +860,19 @@ def _check_row(check: str, station_id: str, passed: bool, df: pd.DataFrame) -> d
 
 def _seed_timing_summary(data_store_dir: Path | str | None = None) -> pd.DataFrame:
     root = _resolve_data_store_dir(data_store_dir)
-    summary = _load_seed_summary(root)
-    if not summary:
-        return pd.DataFrame()
     rows = []
-    for stage, values in (summary.get("timings") or {}).items():
-        rows.append(
-            {
-                "stage": stage,
-                "elapsed_seconds": float(values.get("elapsed_seconds", 0.0)),
-                "rows_written": int(values.get("rows_written", 0)),
-                "errors": int(values.get("errors", 0)),
-                "rows_per_second": float(values.get("rows_per_second", 0.0)),
-            }
-        )
+    for label, summary in _load_timing_summaries(root):
+        for stage, values in (summary.get("timings") or {}).items():
+            rows.append(
+                {
+                    "summary": label,
+                    "stage": stage,
+                    "elapsed_seconds": float(values.get("elapsed_seconds", 0.0)),
+                    "rows_written": int(values.get("rows_written", 0)),
+                    "errors": int(values.get("errors", 0)),
+                    "rows_per_second": float(values.get("rows_per_second", 0.0)),
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -840,10 +885,23 @@ def _seed_summary_day(root: Path) -> pd.Timestamp | None:
 
 
 def _load_seed_summary(root: Path) -> dict:
-    summary_path = root.parent / "seed_summary.json"
-    if not summary_path.exists():
-        return {}
+    return _load_summary_file(root.parent / "seed_summary.json")
+
+
+def _load_timing_summaries(root: Path) -> list[tuple[str, dict]]:
+    rows = []
+    for label, filename in (
+        ("smoke_summary", "smoke_summary.json"),
+        ("seed_summary", "seed_summary.json"),
+    ):
+        summary = _load_summary_file(root.parent / filename)
+        if summary:
+            rows.append((label, summary))
+    return rows
+
+
+def _load_summary_file(summary_path: Path) -> dict:
     try:
         return json.loads(summary_path.read_text(encoding="ascii"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
         return {}

@@ -8,6 +8,8 @@ from typing import Any
 import pandas as pd
 import requests
 
+DEFAULT_WEATHER_COM_API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
+
 
 class WeatherComApiKeyMissing(RuntimeError):
     """Raised when Weather.com data is uncached and no API key is configured."""
@@ -38,8 +40,10 @@ class WeatherComTruthClient:
         timeout: float = 15.0,
     ) -> None:
         self._cache_root = Path(cache_root)
-        self._api_key = api_key if api_key is not None else os.environ.get(
-            "WEATHER_COM_API_KEY", ""
+        self._api_key = (
+            api_key
+            if api_key is not None
+            else os.environ.get("WEATHER_COM_API_KEY") or DEFAULT_WEATHER_COM_API_KEY
         )
         self._session = session or requests.Session()
         self._timeout = float(timeout)
@@ -56,7 +60,7 @@ class WeatherComTruthClient:
                 "WEATHER_COM_API_KEY is required to fetch uncached Weather.com truth data"
             )
 
-        location = self._LOCATION_CODES.get(station_id, f"{station_id}:9:US")
+        location = self.location_code(station_id)
         date_param = day.replace("-", "")
         url = self._BASE_URL.format(location=location)
         params = {
@@ -88,6 +92,10 @@ class WeatherComTruthClient:
         if not parts:
             return self._empty_frame()
         return pd.concat(parts, ignore_index=True)
+
+    @classmethod
+    def location_code(cls, station_id: str) -> str:
+        return cls._LOCATION_CODES.get(station_id, f"{station_id}:9:US")
 
     def _cache_path(self, station_id: str, day: str) -> Path:
         return self._cache_root / station_id / f"{day}.parquet"

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from data.obs.weather_com import WeatherComApiKeyMissing, WeatherComTruthClient
+from data.obs.weather_com import DEFAULT_WEATHER_COM_API_KEY, WeatherComApiKeyMissing, WeatherComTruthClient
 
 
 class _Response:
@@ -88,3 +88,14 @@ def test_weather_com_fetch_without_key_and_cache_raises(tmp_path):
 
     with pytest.raises(WeatherComApiKeyMissing):
         client.fetch_date("KLGA", "2026-06-04")
+
+
+def test_weather_com_client_uses_reference_default_key_when_env_missing(tmp_path, monkeypatch):
+    payload = {"observations": [{"valid_time_gmt": 1_780_000_000, "temp": 50}]}
+    session = _Session(payload)
+    monkeypatch.delenv("WEATHER_COM_API_KEY", raising=False)
+    client = WeatherComTruthClient(tmp_path / "truth", session=session)
+
+    client.fetch_date("KLGA", "2026-06-04")
+
+    assert session.calls[0]["params"]["apiKey"] == DEFAULT_WEATHER_COM_API_KEY
