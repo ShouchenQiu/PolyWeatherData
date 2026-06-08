@@ -158,6 +158,37 @@ def test_n_fcst_steps_probe_failure_raises():
             )
 
 
+def test_n_fcst_steps_probe_retries_transient_tmp2m_failure():
+    """Transient TMP_2m probe failures are retried before failing the init."""
+    import data.forecast.hrrr_zarr as _mod
+
+    z_anl, z_fcst, navigate_fn = _make_zarr_mocks()
+    attempts = {"tmp_probe": 0}
+
+    def flaky_navigate(root, path):
+        if "fcst" in str(root) and path == ZARR_VARS["TMP_2m"]:
+            attempts["tmp_probe"] += 1
+            if attempts["tmp_probe"] == 1:
+                raise RuntimeError("temporary zarr metadata timeout")
+        return navigate_fn(root, path)
+
+    with (
+        patch.object(_mod, "_zarr", MagicMock()),
+        patch.object(_mod, "_fsspec", MagicMock()),
+        patch.object(_mod, "_navigate", flaky_navigate),
+    ):
+        _mod._zarr.open_group.return_value = z_fcst
+        src = _mod.HrrrZarrSource(critical_retries=1, retry_backoff_s=0.0)
+        result = src.fetch(
+            pd.Timestamp("2026-01-01 06:00", tz="UTC"),
+            range(1, 2),
+            _STATION,
+        )
+
+    assert attempts["tmp_probe"] >= 2
+    assert list(result["KLGA"]["fxx"]) == [1]
+
+
 # ---------------------------------------------------------------------------
 # MAJOR init: is_extrapolated=False + base_url override
 # ---------------------------------------------------------------------------
@@ -291,14 +322,14 @@ def test_zarr_full_window_repeat_uses_memory_cache():
 # ---------------------------------------------------------------------------
 
 
-def test_zarr_non_major_nearest_fail_has_is_extrapolated():
-    """When nearest MAJOR fetch fails, non-MAJOR fallback DataFrame has is_extrapolated=False.
+def test_zarr_non_major_full_window_nearest_fail_raises():
+    """Full decoder windows must not silently return short non-MAJOR data.
 
     The non-MAJOR path opens z_anl/z_fcst for the 03Z init (open_group calls
     1 and 2), then recursively calls self.fetch() for the nearest MAJOR run
     which tries open_group again (call 3).  We raise on call 3 to simulate an
-    unavailable MAJOR store, triggering the early return.  The returned
-    DataFrame must carry is_extrapolated=False.
+    unavailable MAJOR store.  Full training decoder windows should fall through
+    to the cache fallback source instead of caching an incomplete zarr result.
     """
     import data.forecast.hrrr_zarr as _mod
 
@@ -322,12 +353,9 @@ def test_zarr_non_major_nearest_fail_has_is_extrapolated():
         _mod._zarr.open_group.side_effect = open_group_side
 
         src = _mod.HrrrZarrSource()
-        result = src.fetch(
-            pd.Timestamp("2026-01-01 03:00", tz="UTC"),
-            range(0, 49),
-            _STATION,
-        )
-
-    df = result["KLGA"]
-    assert "is_extrapolated" in df.columns
-    assert (df["is_extrapolated"] == False).all()  # noqa: E712
+        with pytest.raises(RuntimeError, match="nearest MAJOR fetch failed"):
+            src.fetch(
+                pd.Timestamp("2026-01-01 03:00", tz="UTC"),
+                range(0, 49),
+                _STATION,
+            )

@@ -30,6 +30,7 @@ _HRRR_CLIP_BOUNDS: dict[str, tuple[float, float]] = {
 # IEM numeric columns that should be zero-filled when missing
 _IEM_ZERO_FILL = ["is_rain", "is_snow", "p01i"]
 _IEM_TEMP_BOUNDS_C = (-40.0, 55.0)
+_IEM_REPRESENTATIVE_TOLERANCE_S = 20 * 60
 
 _KELVIN_OFFSET = 273.15
 # IEM temperatures arrive as Celsius tenths (raw_tmpc_tenths) in tenths of a degree
@@ -125,6 +126,10 @@ class Cleaner:
             df["_iem_candidate_distance_s"] = (
                 original_valid_time - representative_target
             ).abs().dt.total_seconds()
+            df = df[
+                df["_iem_candidate_distance_s"] <= _IEM_REPRESENTATIVE_TOLERANCE_S
+            ].copy()
+            original_valid_time = original_valid_time.loc[df.index].copy()
             df["_iem_original_valid_time"] = original_valid_time
             if "_raw_tmpc_source" in df.columns:
                 df["_iem_tmpc_tgroup"] = (

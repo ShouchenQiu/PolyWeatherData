@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from scripts import smoke_bootstrap
 
 
@@ -46,6 +50,14 @@ class FakeDecoderCache:
         }
 
 
+class InterruptingDecoderCache:
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def prewarm(self, station, init_times, workers=12, **_kwargs):
+        raise KeyboardInterrupt()
+
+
 def test_smoke_bootstrap_dry_run_reports_fixed_range(tmp_path):
     summary = smoke_bootstrap.run_smoke_bootstrap(
         smoke_dir=tmp_path / "smoke",
@@ -88,3 +100,23 @@ def test_smoke_bootstrap_calls_bootstrap_and_decoder_steps(tmp_path):
     assert summary["decoder"]["rows_written"] == 384 * 48
     assert summary["decoder"]["skipped_tail_cap"] == 0
     assert (tmp_path / "smoke" / "smoke_summary.json").exists()
+
+
+def test_smoke_bootstrap_writes_partial_summary_on_decoder_interrupt(tmp_path):
+    with pytest.raises(KeyboardInterrupt):
+        smoke_bootstrap.run_smoke_bootstrap(
+            smoke_dir=tmp_path / "smoke",
+            f01_downloader_cls=FakeF01Downloader,
+            iem_downloader_cls=FakeIemDownloader,
+            decoder_cache_cls=InterruptingDecoderCache,
+            skip_polymarket=True,
+            workers=3,
+        )
+
+    partial_path = tmp_path / "smoke" / "smoke_summary.partial.json"
+    assert partial_path.exists()
+    partial = json.loads(partial_path.read_text(encoding="ascii"))
+    assert partial["interrupted"] is True
+    assert partial["phase"] == "decoder"
+    assert partial["decoder"]["requested_inits"] == 384
+    assert partial["decoder"]["complete_inits"] == 0

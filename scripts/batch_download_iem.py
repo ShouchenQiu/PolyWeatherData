@@ -34,7 +34,7 @@ from config.stations import STATIONS
 _DEFAULT_DELAY   = 0.4    # seconds between requests (polite rate limit)
 _DEFAULT_TIMEOUT = 10
 _DEFAULT_RETRIES = 3
-_DONE_DAY_MIN_HOURS = 20
+_DONE_DAY_MIN_HOURS = 24
 
 
 class BatchIemDownloader:
@@ -120,12 +120,9 @@ class BatchIemDownloader:
             if df_day is None or df_day.empty:
                 rows = []
             else:
-                df_day = self._filter_exact_51(df_day)
-                if df_day.empty:
-                    rows = []
-                else:
-                    df_day = Cleaner.process_iem(df_day)
-                    rows = df_day.to_dict("records")
+                df_day = Cleaner.process_iem(df_day)
+                df_day = self._filter_canonical_day(df_day, d.isoformat())
+                rows = df_day.to_dict("records")
             all_rows.extend(rows)
             total_rows += len(rows)
             print(f"[{d}] {len(rows):4d} obs  (cumulative: {total_rows})", flush=True)
@@ -144,7 +141,12 @@ class BatchIemDownloader:
 
     @staticmethod
     def _filter_exact_51(df: pd.DataFrame) -> pd.DataFrame:
-        """Return only exact :51 observations before hourly canonicalization."""
+        """Return only exact :51 observations before hourly canonicalization.
+
+        Retained for compatibility with older tests/callers.  Historical batch
+        downloads now pass all candidates to Cleaner so missing exact :51 hours
+        can be represented by nearby observations.
+        """
         if df.empty or "valid_time" not in df.columns:
             return df.iloc[0:0].copy()
         valid_time = pd.to_datetime(df["valid_time"], utc=True, errors="coerce")
@@ -154,6 +156,17 @@ class BatchIemDownloader:
             & (valid_time.dt.second == 0)
             & (valid_time.dt.microsecond == 0)
         )
+        return df.loc[mask].reset_index(drop=True)
+
+    @staticmethod
+    def _filter_canonical_day(df: pd.DataFrame, day: str) -> pd.DataFrame:
+        """Keep only canonical hourly rows for the requested UTC day."""
+        if df.empty or "valid_time" not in df.columns:
+            return df.iloc[0:0].copy()
+        start = pd.Timestamp(day + " 00:00:00", tz="UTC")
+        end = pd.Timestamp(day + " 23:00:00", tz="UTC")
+        valid_time = pd.to_datetime(df["valid_time"], utc=True, errors="coerce")
+        mask = valid_time.between(start, end)
         return df.loc[mask].reset_index(drop=True)
 
     def _already_done_dates(self) -> set[str]:

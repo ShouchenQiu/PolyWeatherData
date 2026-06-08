@@ -30,6 +30,7 @@ class TrainingDecoderCache:
     root_dir: Path
     source: Any | None = None
     fallback_source: Any | None = None
+    slow_init_threshold_s: float = 30.0
 
     def __post_init__(self) -> None:
         self.root_dir = Path(self.root_dir)
@@ -92,24 +93,57 @@ class TrainingDecoderCache:
                 flush=True,
             )
 
+        warm_started = time.perf_counter()
+        warm_summary = {
+            "warm_requested_inits": 0,
+            "warm_completed_inits": 0,
+            "warm_errors": 0,
+        }
         if pending and self._source_has_window_cache():
-            self._warm_fill_dependencies(station, pending, worker_count, progress)
+            warm_summary = self._warm_fill_dependencies(
+                station, pending, worker_count, progress
+            )
+        warm_elapsed = time.perf_counter() - warm_started
 
+        fetch_started = time.perf_counter()
+        zarr_success = 0
+        fallback_success = 0
+        fallback_failed = 0
+        zarr_timeout_count = 0
+        slow_init_samples: list[dict[str, Any]] = []
         pool = ThreadPoolExecutor(max_workers=worker_count)
         try:
             future_map = {
-                pool.submit(self._fetch_clean_validate, station, init_utc): init_utc
+                pool.submit(self._fetch_clean_validate_with_source, station, init_utc): init_utc
                 for init_utc in pending
             }
             for fut in as_completed(future_map):
                 init_utc = future_map[fut]
                 try:
-                    frames.append(fut.result())
+                    df, source_name, primary_exc, fetch_elapsed = fut.result()
+                    frames.append(df)
+                    if source_name == "primary":
+                        zarr_success += 1
+                    else:
+                        fallback_success += 1
+                        if primary_exc is not None and _looks_like_timeout(primary_exc):
+                            zarr_timeout_count += 1
+                    if fetch_elapsed >= self.slow_init_threshold_s:
+                        slow_init_samples.append(
+                            {
+                                "init_time": str(init_utc),
+                                "elapsed_seconds": fetch_elapsed,
+                                "source": source_name,
+                            }
+                        )
                     fetched += 1
                     if len(frames) >= write_batch_count:
                         rows_written += self._append_many(station.station_id, frames)
                         frames = []
                 except Exception as exc:  # noqa: BLE001
+                    fallback_failed += 1
+                    if _looks_like_timeout(exc):
+                        zarr_timeout_count += 1
                     error = {"init_time": str(init_utc), "error": str(exc)}
                     errors.append(error)
                     if progress and len(errors) <= 5:
@@ -146,6 +180,7 @@ class TrainingDecoderCache:
             rows_written += self._append_many(station.station_id, frames)
 
         elapsed = time.perf_counter() - started
+        fetch_elapsed = time.perf_counter() - fetch_started
         return {
             "requested_inits": len(init_utcs),
             "skipped_cached": len(init_utcs) - len(pending),
@@ -154,7 +189,16 @@ class TrainingDecoderCache:
             "errors": len(errors),
             "error_details": errors,
             "elapsed_seconds": elapsed,
+            "warm_elapsed_seconds": warm_elapsed,
+            "fetch_elapsed_seconds": fetch_elapsed,
             "init_per_second": fetched / elapsed if elapsed > 0 else 0.0,
+            "fetch_init_per_second": fetched / fetch_elapsed if fetch_elapsed > 0 else 0.0,
+            "zarr_success_inits": zarr_success,
+            "fallback_success_inits": fallback_success,
+            "fallback_failed_inits": fallback_failed,
+            "zarr_timeout_count": zarr_timeout_count,
+            "slow_init_samples": slow_init_samples[:10],
+            **warm_summary,
             "major_inits": sum(1 for ts in init_utcs if ts.hour in {0, 6, 12, 18}),
             "offhour_inits": sum(1 for ts in init_utcs if ts.hour not in {0, 6, 12, 18}),
         }
@@ -168,7 +212,7 @@ class TrainingDecoderCache:
         pending: list[pd.Timestamp],
         workers: int,
         progress: bool,
-    ) -> None:
+    ) -> dict[str, int]:
         major_inits: set[pd.Timestamp] = set()
         for init_utc in pending:
             if init_utc.hour in MAJOR_HOURS:
@@ -221,6 +265,11 @@ class TrainingDecoderCache:
                         f"errors={errors}",
                         flush=True,
                     )
+        return {
+            "warm_requested_inits": len(ordered),
+            "warm_completed_inits": completed,
+            "warm_errors": errors,
+        }
 
     def _read_cached_init(
         self,
@@ -240,17 +289,30 @@ class TrainingDecoderCache:
         return self._validate(subset, station_id, init_utc)
 
     def _fetch_clean_validate(self, station: Any, init_utc: pd.Timestamp) -> pd.DataFrame:
+        df, _source_name, _primary_exc, _elapsed = self._fetch_clean_validate_with_source(
+            station, init_utc
+        )
+        return df
+
+    def _fetch_clean_validate_with_source(
+        self,
+        station: Any,
+        init_utc: pd.Timestamp,
+    ) -> tuple[pd.DataFrame, str, Exception | None, float]:
+        started = time.perf_counter()
         try:
-            return self._fetch_clean_validate_from_source(
+            df = self._fetch_clean_validate_from_source(
                 self.source, station, init_utc
             )
+            return df, "primary", None, time.perf_counter() - started
         except Exception as primary_exc:
             if self.fallback_source is None:
                 raise
             try:
-                return self._fetch_clean_validate_from_source(
+                df = self._fetch_clean_validate_from_source(
                     self.fallback_source, station, init_utc
                 )
+                return df, "fallback", primary_exc, time.perf_counter() - started
             except Exception as fallback_exc:
                 raise RuntimeError(
                     f"TrainingDecoderCache: primary source failed for "
@@ -447,3 +509,8 @@ def _to_utc(ts: pd.Timestamp) -> pd.Timestamp:
     if stamp.tzinfo is None:
         return stamp.tz_localize("UTC")
     return stamp.tz_convert("UTC")
+
+
+def _looks_like_timeout(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "timeout" in text or "timed out" in text

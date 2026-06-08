@@ -199,9 +199,30 @@ def run_smoke_bootstrap(
     else:
         cache = decoder_cache_cls(settings.training_decoder_cache_dir)
         decoder_workers = max(1, min(int(workers), 4))
-        decoder_summary = cache.prewarm(
-            station, init_times, workers=decoder_workers, progress=True
-        )
+        try:
+            decoder_summary = cache.prewarm(
+                station, init_times, workers=decoder_workers, progress=True
+            )
+        except KeyboardInterrupt:
+            partial_summary = {
+                **plan,
+                "interrupted": True,
+                "phase": "decoder",
+                "polymarket": polymarket_summary,
+                "hrrr_f01_written": hrrr_f01_written,
+                "obs_written": obs_written,
+                "decoder": _partial_decoder_summary(
+                    settings.training_decoder_cache_dir,
+                    station_id,
+                    init_times,
+                ),
+                "timings": timings,
+            }
+            (root / "smoke_summary.partial.json").write_text(
+                json.dumps(partial_summary, indent=2, sort_keys=True, default=str),
+                encoding="ascii",
+            )
+            raise
         decoder_summary["requested_workers"] = workers
         decoder_summary["effective_workers"] = decoder_workers
         decoder_summary["skipped_tail_cap"] = 0
@@ -239,6 +260,45 @@ def _timing(elapsed_seconds: float, rows_written: int, errors: int) -> dict[str,
             else 0.0
         ),
     }
+
+
+def _partial_decoder_summary(
+    cache_dir: Path,
+    station_id: str,
+    init_times: list[pd.Timestamp],
+) -> dict[str, Any]:
+    requested = {_to_utc(ts) for ts in init_times}
+    complete: set[pd.Timestamp] = set()
+    station_dir = Path(cache_dir) / station_id
+    if station_dir.exists():
+        for path in sorted(station_dir.glob("*.parquet")):
+            try:
+                df = pd.read_parquet(path)
+            except Exception:  # noqa: BLE001
+                continue
+            if df.empty or "init_time" not in df.columns or "fxx" not in df.columns:
+                continue
+            work = df.copy()
+            work["init_time"] = pd.to_datetime(work["init_time"], utc=True)
+            work["fxx"] = work["fxx"].astype(int)
+            for init_utc, group in work.groupby("init_time", sort=False):
+                if pd.Timestamp(init_utc) not in requested:
+                    continue
+                if set(group["fxx"].astype(int)) >= set(range(1, 49)):
+                    complete.add(pd.Timestamp(init_utc))
+    return {
+        "requested_inits": len(requested),
+        "complete_inits": len(complete),
+        "pending_inits": len(requested) - len(complete),
+        "cache_dir": str(cache_dir),
+    }
+
+
+def _to_utc(ts: pd.Timestamp) -> pd.Timestamp:
+    stamp = pd.Timestamp(ts)
+    if stamp.tzinfo is None:
+        return stamp.tz_localize("UTC")
+    return stamp.tz_convert("UTC")
 
 
 def _cli() -> None:

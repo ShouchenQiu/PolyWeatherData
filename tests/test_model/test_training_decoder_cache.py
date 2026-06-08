@@ -161,6 +161,24 @@ def test_decoder_cache_prewarm_persists_multiple_missing_inits(tmp_path):
     assert set(pd.to_datetime(stored["init_time"], utc=True)) == {init_a, init_b}
 
 
+def test_decoder_cache_prewarm_reports_fallback_success_and_elapsed_phases(tmp_path):
+    primary = FailingDecoderSource()
+    fallback = FakeDecoderSource()
+    cache = TrainingDecoderCache(tmp_path, source=primary, fallback_source=fallback)
+    station = STATIONS["KLGA"]
+    init = pd.Timestamp("2026-01-01 23:00:00", tz="UTC")
+
+    summary = cache.prewarm(station, [init], workers=1)
+
+    assert summary["fetched_inits"] == 1
+    assert summary["zarr_success_inits"] == 0
+    assert summary["fallback_success_inits"] == 1
+    assert summary["fallback_failed_inits"] == 0
+    assert summary["warm_elapsed_seconds"] >= 0.0
+    assert summary["fetch_elapsed_seconds"] >= 0.0
+    assert summary["slow_init_samples"] == []
+
+
 def test_decoder_cache_prewarm_warms_major_dependencies_for_offhour(tmp_path):
     source = FakeCachedDecoderSource()
     cache = TrainingDecoderCache(tmp_path, source=source)
@@ -191,7 +209,7 @@ def _append_bootstrap_windows(
         vt = start + pd.Timedelta(hours=i)
         hrrr_rows.append(
             {
-                "init_time": vt,
+                "init_time": vt - pd.Timedelta(hours=1),
                 "fxx": 1,
                 "valid_time": vt,
                 "TMP_2m": 5.0,

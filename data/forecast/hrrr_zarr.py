@@ -20,8 +20,9 @@ Architecture notes
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, TypeVar
 
 import numpy as np
 import pandas as pd
@@ -45,6 +46,7 @@ except ImportError:
 _ZARR_DEFAULT_BASE = "https://hrrrzarr.s3.amazonaws.com/sfc"
 _ZARR_S3_BASE = "s3://hrrrzarr/sfc"
 _VAR_READ_THREADS = 12
+_T = TypeVar("_T")
 
 # DATA_COLS / ZARR_VARS consistency guard: fail at module load if they diverge.
 assert set(DATA_COLS) == set(ZARR_VARS.keys()), (
@@ -95,13 +97,20 @@ class HrrrZarrSource(BaseForecastSource):
     Requires: zarr, fsspec  (pip install zarr fsspec s3fs)
     """
 
-    def __init__(self, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str | None = None,
+        critical_retries: int = 2,
+        retry_backoff_s: float = 0.25,
+    ) -> None:
         if base_url is not None:
             self._base_url = base_url.rstrip("/")
         else:
             from config.settings import Settings
             bucket = Settings().hrrr_zarr_bucket
             self._base_url = f"https://{bucket}.s3.amazonaws.com/sfc"
+        self._critical_retries = max(0, int(critical_retries))
+        self._retry_backoff_s = max(0.0, float(retry_backoff_s))
         self._hrrr_fill = HrrrFill()
         self._full_window_cache: dict[tuple[str, pd.Timestamp], pd.DataFrame] = {}
         self._cache_lock = threading.Lock()
@@ -190,7 +199,10 @@ class HrrrZarrSource(BaseForecastSource):
         if wants_fcst:
             z_fcst = _zarr.open_group(_mapper_for_url(url_fcst), mode="r")
             try:
-                tmp_fcst = _navigate(z_fcst, ZARR_VARS["TMP_2m"])
+                tmp_fcst = self._retry_critical(
+                    "TMP_2m shape probe",
+                    lambda: _navigate(z_fcst, ZARR_VARS["TMP_2m"]),
+                )
                 raw_fcst_steps = int(tmp_fcst.shape[0])  # type: ignore[union-attr]
                 max_native = 48 if is_major else 18
                 n_fcst_steps = min(raw_fcst_steps, max_native)
@@ -225,8 +237,13 @@ class HrrrZarrSource(BaseForecastSource):
         if z_anl is not None:
             def read_anl_col(col: str, zarr_path: str) -> tuple[str, float]:
                 try:
-                    arr = _navigate(z_anl, zarr_path)
-                    return col, float(arr[row_idx, col_idx])  # type: ignore[index]
+                    def read_value() -> float:
+                        arr = _navigate(z_anl, zarr_path)
+                        return float(arr[row_idx, col_idx])  # type: ignore[index]
+
+                    if col == "TMP_2m":
+                        return col, self._retry_critical("TMP_2m anl read", read_value)
+                    return col, read_value()
                 except Exception as exc:  # noqa: BLE001
                     if col in {"APCP", "PRATE"}:
                         return col, 0.0
@@ -267,12 +284,19 @@ class HrrrZarrSource(BaseForecastSource):
 
             def read_fcst_col(col: str, zarr_path: str) -> tuple[str, dict[int, float]]:
                 try:
-                    arr = _navigate(z_fcst, zarr_path)
-                    vals = np.atleast_1d(
-                        np.asarray(
-                            arr[start_idx:stop_idx, row_idx, col_idx],  # type: ignore[index]
-                            dtype=np.float32,
+                    def read_values() -> np.ndarray:
+                        arr = _navigate(z_fcst, zarr_path)
+                        return np.atleast_1d(
+                            np.asarray(
+                                arr[start_idx:stop_idx, row_idx, col_idx],  # type: ignore[index]
+                                dtype=np.float32,
+                            )
                         )
+
+                    vals = (
+                        self._retry_critical("TMP_2m fcst read", read_values)
+                        if col == "TMP_2m"
+                        else read_values()
                     )
                     return col, {
                         fxx: float(vals[fxx - 1 - start_idx]) for fxx in fcst_fxx
@@ -327,12 +351,20 @@ class HrrrZarrSource(BaseForecastSource):
             try:
                 nearest_dict = self.fetch(nearest_major_init, range(0, 49), station)
                 nearest_df   = nearest_dict[station.station_id]
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "HrrrZarrSource: nearest MAJOR fetch failed for init={}; "
-                    "returning non-MAJOR data only",
+                    "{}",
                     nearest_major_init,
+                    "raising for full decoder window"
+                    if cache_key is not None
+                    else "returning non-MAJOR data only",
                 )
+                if cache_key is not None:
+                    raise RuntimeError(
+                        f"HrrrZarrSource: nearest MAJOR fetch failed for "
+                        f"full decoder init={init_utc}: {exc}"
+                    ) from exc
                 non_major_df["is_extrapolated"] = False
                 return self._maybe_cache_result(station.station_id, cache_key, non_major_df)
 
@@ -376,6 +408,27 @@ class HrrrZarrSource(BaseForecastSource):
         df = pd.DataFrame(rows)
         df["is_extrapolated"] = False
         return self._maybe_cache_result(station.station_id, cache_key, df)
+
+    def _retry_critical(self, label: str, func: Callable[[], _T]) -> _T:
+        last_exc: Exception | None = None
+        for attempt in range(self._critical_retries + 1):
+            try:
+                return func()
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt >= self._critical_retries:
+                    break
+                if self._retry_backoff_s > 0:
+                    time.sleep(self._retry_backoff_s * (2 ** attempt))
+                logger.warning(
+                    "HrrrZarrSource: retrying critical {} after failure {}/{}: {}",
+                    label,
+                    attempt + 1,
+                    self._critical_retries,
+                    exc,
+                )
+        assert last_exc is not None
+        raise last_exc
 
     def _maybe_cache_result(
         self,
