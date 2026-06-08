@@ -52,6 +52,7 @@ class FakeTimeSeriesDataSet:
     def __init__(self, df, **kwargs):
         self.df = df
         self.kwargs = kwargs
+        self.target_normalizer = kwargs.get("target_normalizer")
         FakeTimeSeriesDataSet.created_train_frames.append(df.copy())
 
     @classmethod
@@ -89,15 +90,26 @@ class FakeCheckpoint:
 def _install_training_fakes(monkeypatch):
     FakeTimeSeriesDataSet.created_train_frames = []
     torch_mod = types.ModuleType("torch")
+    torch_mod.__version__ = "2.fake"
+    torch_mod.version = types.SimpleNamespace(cuda="12.fake")
+    torch_mod.backends = types.SimpleNamespace(
+        cudnn=types.SimpleNamespace(version=lambda: 8900)
+    )
+    torch_mod.cuda = types.SimpleNamespace(
+        is_available=lambda: False,
+        get_device_name=lambda *_args, **_kwargs: None,
+    )
     lightning_pkg = types.ModuleType("lightning")
     pl_mod = types.ModuleType("lightning.pytorch")
     callbacks_mod = types.ModuleType("lightning.pytorch.callbacks")
     pf_mod = types.ModuleType("pytorch_forecasting")
+    pf_mod.__version__ = "1.fake"
     metrics_mod = types.ModuleType("pytorch_forecasting.metrics")
     data_mod = types.ModuleType("pytorch_forecasting.data")
     encoders_mod = types.ModuleType("pytorch_forecasting.data.encoders")
 
     pl_mod.seed_everything = lambda *args, **kwargs: None
+    pl_mod.__version__ = "2.lightning"
     pl_mod.Trainer = FakeTrainer
     callbacks_mod.EarlyStopping = lambda *args, **kwargs: object()
     callbacks_mod.ModelCheckpoint = FakeCheckpoint
@@ -155,6 +167,55 @@ def test_tft_trainer_uses_settings_splits_and_publishes_dataset_pkl(
     assert result["test_mae"] == 1.23
 
 
+def test_tft_trainer_writes_training_metadata_and_result_json(tmp_path, monkeypatch):
+    _install_training_fakes(monkeypatch)
+    settings = Settings(
+        data_store_dir=tmp_path / "data",
+        train_start="2026-01-01",
+        train_end="2026-01-01",
+        val_start="2026-01-02",
+        val_end="2026-01-02",
+        test_start="2026-01-03",
+        test_end="2026-01-03",
+    )
+    builder = FakeBuilder()
+    registry = FakeRegistry()
+    monkeypatch.setattr(TftTrainer, "_eval_mae", lambda *args, **kwargs: 1.23)
+
+    trainer = TftTrainer(
+        store=None,
+        registry=registry,
+        output_dir=tmp_path / "checkpoints",
+        settings=settings,
+        dataset_builder=builder,
+        station_config=STATIONS["KLGA"],
+        random_seed=7,
+        torch_deterministic=True,
+        precision="32",
+        num_workers=2,
+        activate_model=False,
+    )
+
+    result = trainer.run(station_id="KLGA", version="vmeta")
+
+    version_dir = tmp_path / "checkpoints" / "vmeta"
+    metadata = json.loads((version_dir / "training_metadata.json").read_text())
+    result_json = json.loads((version_dir / "train_result.json").read_text())
+    assert registry.publish_kwargs["activate"] is False
+    assert metadata["random_seed"] == 7
+    assert metadata["torch_deterministic"] is True
+    assert metadata["precision"] == "32"
+    assert metadata["num_workers"] == 2
+    assert metadata["train_sample_count"] == 1
+    assert metadata["val_sample_count"] == 1
+    assert metadata["test_sample_count"] == 1
+    assert metadata["train_row_count"] == 120
+    assert metadata["feature_list_and_order"]["known_reals"] == metadata["known_reals"]
+    assert metadata["target"] == "temp_error"
+    assert metadata["data_order_hash"]
+    assert result_json["version"] == result["version"]
+
+
 def test_settings_from_cli_args_applies_smoke_summary_and_paths(tmp_path):
     summary_path = tmp_path / "smoke_summary.json"
     summary_path.write_text(
@@ -177,6 +238,10 @@ def test_settings_from_cli_args_applies_smoke_summary_and_paths(tmp_path):
         min_epochs=1,
         max_epochs=2,
         batch_size=16,
+        seed=7,
+        deterministic=True,
+        precision="bf16-mixed",
+        num_workers=2,
     )
 
     settings = _settings_from_cli_args(args)

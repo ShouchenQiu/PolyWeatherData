@@ -131,6 +131,21 @@ def test_load_covariance_returns_none_when_file_absent(registry, db, tmp_path):
     assert any("covariance" in m.lower() for m in messages)
 
 
+def test_publish_can_skip_active_version_for_candidate_model(registry, tmp_path):
+    ckpt = tmp_path / "model.ckpt"
+    ckpt.write_text("fake", encoding="ascii")
+
+    registry.publish(
+        "candidate_v1",
+        ckpt,
+        {"train_mae": 0.5, "test_mae": 0.6},
+        activate=False,
+    )
+
+    assert (registry.store_dir / "candidate_v1" / "model.ckpt").exists()
+    assert not (registry.store_dir / "active_version.txt").exists()
+
+
 def test_load_covariance_returns_matrix_when_present(registry, db, tmp_path):
     """When covariance.npy is present beside the checkpoint, it is returned as ndarray."""
     ckpt = tmp_path / "model.ckpt"

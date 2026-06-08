@@ -54,6 +54,8 @@ class ModelRegistry:
         ckpt_path: Path,
         metrics: dict,
         training_dataset_pkl: Path | None = None,
+        activate: bool = True,
+        extra_artifacts: list[Path] | None = None,
     ) -> None:
         """Copy checkpoint to the registry and register it.
 
@@ -77,6 +79,8 @@ class ModelRegistry:
         if training_dataset_pkl is not None:
             dest_pkl = version_dir / "training_dataset.pkl"
             shutil.copy2(training_dataset_pkl, dest_pkl)
+        for artifact in extra_artifacts or []:
+            shutil.copy2(artifact, version_dir / artifact.name)
 
         created_at = datetime.now(timezone.utc).isoformat()
 
@@ -97,8 +101,8 @@ class ModelRegistry:
             created_at      = created_at,
         )
 
-        # Auto-promote published version to active
-        self._write_active_version(version)
+        if activate:
+            self._write_active_version(version)
 
     # ------------------------------------------------------------------
     # Load latest

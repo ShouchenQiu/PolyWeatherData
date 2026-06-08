@@ -19,9 +19,11 @@ Usage (API):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import pickle
+import platform
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -93,6 +95,11 @@ class TftTrainer:
         decoder_cache: object | None = None,
         dataset_builder: object | None = None,
         station_config: object | None = None,
+        random_seed: int = 42,
+        torch_deterministic: bool = True,
+        precision: str | int = 32,
+        num_workers: int = 0,
+        activate_model: bool = True,
     ) -> None:
         self._store     = store
         self._registry  = registry
@@ -101,6 +108,11 @@ class TftTrainer:
         self._decoder_cache = decoder_cache
         self._dataset_builder = dataset_builder
         self._station_config = station_config
+        self._random_seed = int(random_seed)
+        self._torch_deterministic = bool(torch_deterministic)
+        self._precision = precision
+        self._num_workers = int(num_workers)
+        self._activate_model = bool(activate_model)
         self._out_dir   = Path(output_dir) if output_dir else Path("checkpoints")
         self._out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -156,7 +168,9 @@ class TftTrainer:
             )
             raise
 
-        pl.seed_everything(42, workers=True)
+        pl.seed_everything(self._random_seed, workers=True)
+        if self._torch_deterministic and hasattr(torch, "use_deterministic_algorithms"):
+            torch.use_deterministic_algorithms(True)
 
         # -- Load and prepare data -------------------------------------------
         df_train, df_val, df_test = self._build_split_frames(station_id)
@@ -201,13 +215,16 @@ class TftTrainer:
         )
 
         train_loader = training.to_dataloader(
-            train=True,  batch_size=self._settings.tft_batch_size, num_workers=0, shuffle=True
+            train=True,
+            batch_size=self._settings.tft_batch_size,
+            num_workers=self._num_workers,
+            shuffle=True,
         )
         val_loader = validation.to_dataloader(
-            train=False, batch_size=self._settings.tft_batch_size, num_workers=0
+            train=False, batch_size=self._settings.tft_batch_size, num_workers=self._num_workers
         )
         test_loader = testing.to_dataloader(
-            train=False, batch_size=self._settings.tft_batch_size, num_workers=0
+            train=False, batch_size=self._settings.tft_batch_size, num_workers=self._num_workers
         )
 
         # -- Instantiate model -----------------------------------------------
@@ -247,7 +264,7 @@ class TftTrainer:
         # -- Train -----------------------------------------------------------
         trainer = pl.Trainer(
             accelerator         = "auto",
-            precision           = 32,
+            precision           = self._precision,
             min_epochs          = self._settings.tft_min_epochs,
             max_epochs          = self._settings.tft_max_epochs,
             callbacks           = [early_stop, checkpoint],
@@ -275,13 +292,6 @@ class TftTrainer:
             "best_val_loss": best_loss,
             "epochs_run": epochs_run,
         }
-        self._registry.publish(
-            version      = version,
-            ckpt_path    = best_ckpt,
-            metrics      = metrics,
-            training_dataset_pkl = training_dataset_pkl,
-        )
-
         result = {
             "version":          version,
             "best_val_loss":    best_loss,
@@ -290,6 +300,37 @@ class TftTrainer:
             "train_mae":        train_mae,
             "test_mae":         test_mae,
         }
+        metadata = self._training_metadata(
+            station_id=station_id,
+            version=version,
+            df_train=df_train,
+            df_val=df_val,
+            df_test=df_test,
+            known=known,
+            unknown=unk,
+            training=training,
+            result=result,
+            torch_module=torch,
+            lightning_module=pl,
+        )
+        metadata_path = ckpt_dir / "training_metadata.json"
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2, sort_keys=True, default=str),
+            encoding="ascii",
+        )
+        result_path = ckpt_dir / "train_result.json"
+        result_path.write_text(
+            json.dumps(result, indent=2, sort_keys=True, default=str),
+            encoding="ascii",
+        )
+        self._registry.publish(
+            version      = version,
+            ckpt_path    = best_ckpt,
+            metrics      = metrics,
+            training_dataset_pkl = training_dataset_pkl,
+            activate=self._activate_model,
+            extra_artifacts=[metadata_path, result_path],
+        )
         logger.info("TftTrainer finished: %s", result)
         return result
 
@@ -384,9 +425,127 @@ class TftTrainer:
             logger.warning("Could not compute test MAE: %s", exc)
             return float("nan")
 
+    def _training_metadata(
+        self,
+        station_id: str,
+        version: str,
+        df_train: pd.DataFrame,
+        df_val: pd.DataFrame,
+        df_test: pd.DataFrame,
+        known: list[str],
+        unknown: list[str],
+        training: Any,
+        result: dict[str, Any],
+        torch_module: Any,
+        lightning_module: Any,
+    ) -> dict[str, Any]:
+        return {
+            "version": version,
+            "station_id": station_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "random_seed": self._random_seed,
+            "torch_deterministic": self._torch_deterministic,
+            "torch_version": getattr(torch_module, "__version__", None),
+            "lightning_version": getattr(lightning_module, "__version__", None),
+            "pytorch_forecasting_version": _module_version("pytorch_forecasting"),
+            "cuda_available": bool(torch_module.cuda.is_available()) if hasattr(torch_module, "cuda") else False,
+            "cuda_version": getattr(getattr(torch_module, "version", None), "cuda", None),
+            "cudnn_version": _cudnn_version(torch_module),
+            "gpu_model": _gpu_model(torch_module),
+            "amp_enabled": "mixed" in str(self._precision),
+            "precision": str(self._precision),
+            "accelerator": "auto",
+            "num_workers": self._num_workers,
+            "batch_size": self._settings.tft_batch_size,
+            "min_epochs": self._settings.tft_min_epochs,
+            "max_epochs": self._settings.tft_max_epochs,
+            "train_sample_count": _init_sample_count(df_train),
+            "val_sample_count": _init_sample_count(df_val),
+            "test_sample_count": _init_sample_count(df_test),
+            "train_row_count": len(df_train),
+            "val_row_count": len(df_val),
+            "test_row_count": len(df_test),
+            "data_order_hash": _data_order_hash(df_train, df_val, df_test),
+            "target_normalization_params": _target_normalizer_params(training),
+            "feature_list_and_order": {
+                "known_reals": list(known),
+                "unknown_reals": list(unknown),
+                "target": _TARGET,
+            },
+            "known_reals": list(known),
+            "unknown_reals": list(unknown),
+            "target": _TARGET,
+            "split_ranges": {
+                "train": [self._settings.train_start, self._settings.train_end],
+                "val": [self._settings.val_start, self._settings.val_end],
+                "test": [self._settings.test_start, self._settings.test_end],
+            },
+            "platform": platform.platform(),
+            "result": result,
+        }
+
 
 # Satisfy type checker for _eval_mae Any annotation
 from typing import Any  # noqa: E402
+
+
+def _init_sample_count(df: pd.DataFrame) -> int:
+    if "init_time_str" in df.columns:
+        return int(df["init_time_str"].nunique())
+    return 0
+
+
+def _data_order_hash(*frames: pd.DataFrame) -> str:
+    hasher = hashlib.sha256()
+    cols = ["split", "init_time_str", "local_idx", "valid_time", "fxx", _TARGET]
+    for frame in frames:
+        present = [col for col in cols if col in frame.columns]
+        work = frame[present].copy()
+        for col in work.columns:
+            if pd.api.types.is_datetime64_any_dtype(work[col]):
+                work[col] = pd.to_datetime(work[col], utc=True).astype(str)
+        payload = work.to_json(orient="records", date_format="iso")
+        hasher.update(payload.encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def _target_normalizer_params(training: Any) -> dict[str, Any]:
+    normalizer = getattr(training, "target_normalizer", None)
+    if normalizer is None:
+        return {"repr": None}
+    params: dict[str, Any] = {"class": type(normalizer).__name__, "repr": repr(normalizer)}
+    get_parameters = getattr(normalizer, "get_parameters", None)
+    if callable(get_parameters):
+        try:
+            value = get_parameters()
+            params["parameters"] = value.tolist() if hasattr(value, "tolist") else value
+        except Exception as exc:  # noqa: BLE001
+            params["parameters_error"] = str(exc)
+    return params
+
+
+def _module_version(module_name: str) -> str | None:
+    import sys
+
+    module = sys.modules.get(module_name)
+    return getattr(module, "__version__", None)
+
+
+def _cudnn_version(torch_module: Any) -> int | None:
+    try:
+        version_fn = torch_module.backends.cudnn.version
+        return int(version_fn()) if callable(version_fn) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _gpu_model(torch_module: Any) -> str | None:
+    try:
+        if hasattr(torch_module, "cuda") and torch_module.cuda.is_available():
+            return str(torch_module.cuda.get_device_name(0))
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +613,11 @@ def _cli() -> None:
     parser.add_argument("--min-epochs", type=int, default=None, dest="min_epochs")
     parser.add_argument("--max-epochs", type=int, default=None, dest="max_epochs")
     parser.add_argument("--batch-size", type=int, default=None, dest="batch_size")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--precision", default="32")
+    parser.add_argument("--num-workers", type=int, default=0, dest="num_workers")
+    parser.add_argument("--candidate-only", action="store_true", dest="candidate_only")
     args = parser.parse_args()
 
     from data.storage.parquet_store import ParquetStore
@@ -479,6 +643,11 @@ def _cli() -> None:
         data_manager=data_mgr,
         decoder_cache=decoder_cache,
         station_config=STATIONS[args.station],
+        random_seed=args.seed,
+        torch_deterministic=args.deterministic,
+        precision=args.precision,
+        num_workers=args.num_workers,
+        activate_model=not args.candidate_only,
     )
     result  = trainer.run(
         station_id = args.station,
