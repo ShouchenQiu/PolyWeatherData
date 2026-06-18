@@ -350,7 +350,7 @@ class TftTrainer:
         if df.empty:
             raise ValueError(
                 f"No data found for station {station_id!r} in range {start}..{end}. "
-                "Run batch_download_zarr.py and batch_download_iem.py first."
+                "Run scripts.run_remote_training download/audit first."
             )
         return df
 

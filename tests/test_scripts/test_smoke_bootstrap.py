@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from scripts import batch_prepare_training_data
 from scripts import smoke_bootstrap
 
 
@@ -59,8 +60,8 @@ class InterruptingDecoderCache:
 
 
 def test_smoke_bootstrap_dry_run_reports_fixed_range(tmp_path):
-    summary = smoke_bootstrap.run_smoke_bootstrap(
-        smoke_dir=tmp_path / "smoke",
+    summary = batch_prepare_training_data.run_batch_prepare_training_data(
+        run_dir=tmp_path / "smoke",
         dry_run=True,
     )
 
@@ -82,8 +83,8 @@ def test_smoke_bootstrap_calls_bootstrap_and_decoder_steps(tmp_path):
     FakeIemDownloader.calls = []
     FakeDecoderCache.calls = []
 
-    summary = smoke_bootstrap.run_smoke_bootstrap(
-        smoke_dir=tmp_path / "smoke",
+    summary = batch_prepare_training_data.run_batch_prepare_training_data(
+        run_dir=tmp_path / "smoke",
         f01_downloader_cls=FakeF01Downloader,
         iem_downloader_cls=FakeIemDownloader,
         decoder_cache_cls=FakeDecoderCache,
@@ -104,8 +105,8 @@ def test_smoke_bootstrap_calls_bootstrap_and_decoder_steps(tmp_path):
 
 def test_smoke_bootstrap_writes_partial_summary_on_decoder_interrupt(tmp_path):
     with pytest.raises(KeyboardInterrupt):
-        smoke_bootstrap.run_smoke_bootstrap(
-            smoke_dir=tmp_path / "smoke",
+        batch_prepare_training_data.run_batch_prepare_training_data(
+            run_dir=tmp_path / "smoke",
             f01_downloader_cls=FakeF01Downloader,
             iem_downloader_cls=FakeIemDownloader,
             decoder_cache_cls=InterruptingDecoderCache,
@@ -120,3 +121,11 @@ def test_smoke_bootstrap_writes_partial_summary_on_decoder_interrupt(tmp_path):
     assert partial["phase"] == "decoder"
     assert partial["decoder"]["requested_inits"] == 384
     assert partial["decoder"]["complete_inits"] == 0
+
+
+def test_legacy_smoke_bootstrap_module_reexports_batch_prepare_training_data():
+    assert smoke_bootstrap.run_smoke_bootstrap is batch_prepare_training_data.run_smoke_bootstrap
+    assert (
+        smoke_bootstrap.run_batch_prepare_training_data
+        is batch_prepare_training_data.run_batch_prepare_training_data
+    )

@@ -15,8 +15,6 @@ from typing import Any
 import pandas as pd
 
 from data.forecast.hrrr_fill import MAJOR_HOURS, nearest_prior_major
-from data.forecast.hrrr_s3 import HrrrS3Source
-from data.forecast.hrrr_zarr import HrrrZarrSource
 from data.manager import InsufficientEncoderData
 from data.storage.cleaner import Cleaner
 from model.features import add_model_features
@@ -36,8 +34,12 @@ class TrainingDecoderCache:
         self.root_dir = Path(self.root_dir)
         self.root_dir.mkdir(parents=True, exist_ok=True)
         if self.source is None:
+            from data.forecast.hrrr_zarr import HrrrZarrSource
+
             self.source = HrrrZarrSource()
         if self.fallback_source is None:
+            from data.forecast.hrrr_s3 import HrrrS3Source
+
             self.fallback_source = HrrrS3Source()
 
     def path_for(self, station_id: str, init_time: pd.Timestamp) -> Path:

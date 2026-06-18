@@ -4,8 +4,11 @@ import pandas as pd
 
 from data.storage.parquet_store import ParquetStore
 from model.features import TFT_KNOWN_REALS
-from scripts.audit_weather_backfill import audit_weather_backfill
-from scripts.audit_weather_backfill import audit_training_readiness
+from scripts.audit_training_data import audit_training_readiness
+from scripts.audit_training_data import audit_weather_backfill
+from scripts.audit_weather_backfill import (
+    audit_training_readiness as compat_audit_training_readiness,
+)
 
 
 def test_audit_weather_backfill_reports_store_and_decoder_gaps(tmp_path):
@@ -118,3 +121,7 @@ def test_audit_training_readiness_reports_hash_samples_and_feature_order(tmp_pat
     assert summary["data_order_hash"]
     assert "TMP_2m" in summary["feature_list_and_order"]["known_reals"]
     assert summary["feature_list_and_order"]["target"] == "temp_error"
+
+
+def test_legacy_audit_weather_backfill_module_reexports_training_readiness():
+    assert compat_audit_training_readiness is audit_training_readiness
