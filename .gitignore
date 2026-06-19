@@ -18,6 +18,8 @@ logs/
 *.egg-info/
 dist/
 build/
+*.tar.gz
+*.tgz
 .pytest_cache/
 .coverage
 htmlcov/
