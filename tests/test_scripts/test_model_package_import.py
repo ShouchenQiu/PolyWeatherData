@@ -16,6 +16,11 @@ def _make_candidate_package(tmp_path: Path, version: str = "candidate_v1") -> Pa
     (version_dir / "model.ckpt").write_text("ckpt", encoding="ascii")
     (version_dir / "training_dataset.pkl").write_text("pkl", encoding="ascii")
     (version_dir / "training_metadata.json").write_text("{}", encoding="ascii")
+    (version_dir / "experiment_config.json").write_text("{}", encoding="ascii")
+    (version_dir / "model_contract.json").write_text(
+        json.dumps({"schema_version": 1}),
+        encoding="ascii",
+    )
     (version_dir / "meta.json").write_text(
         json.dumps(
             {
@@ -68,6 +73,25 @@ def test_import_candidate_model_rejects_decoder_cache_member(tmp_path):
         assert "_decoder_cache" in str(exc)
     else:
         raise AssertionError("expected decoder cache package rejection")
+
+
+def test_import_candidate_model_requires_contract_artifacts(tmp_path):
+    root = tmp_path / "src"
+    version_dir = root / "model_store" / "candidate_v1"
+    version_dir.mkdir(parents=True)
+    for name in ("model.ckpt", "training_dataset.pkl", "meta.json", "training_metadata.json"):
+        (version_dir / name).write_text("x", encoding="ascii")
+    package = tmp_path / "candidate_v1.tar.gz"
+    with tarfile.open(package, "w:gz") as tar:
+        for path in sorted(version_dir.rglob("*")):
+            tar.add(path, arcname=path.relative_to(root).as_posix())
+
+    try:
+        import_candidate_model(package, tmp_path / "models", tmp_path / "db.sqlite")
+    except FileNotFoundError as exc:
+        assert "model_contract.json" in str(exc) or "experiment_config.json" in str(exc)
+    else:
+        raise AssertionError("expected missing contract artifacts to be rejected")
 
 
 def test_promote_model_version_writes_active_and_audit_log(tmp_path):

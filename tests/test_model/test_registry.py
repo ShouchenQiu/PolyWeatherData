@@ -1,6 +1,7 @@
 """Tests for model/store/registry.py -- ModelRegistry max_bias and _db_latest_row."""
 from __future__ import annotations
 
+import json
 import numpy as np
 import pytest
 from loguru import logger
@@ -209,4 +210,53 @@ def test_load_latest_raises_when_ckpt_deleted_from_disk(registry, tmp_path):
     (registry.store_dir / "v1" / "model.ckpt").unlink()
 
     with pytest.raises(FileNotFoundError, match="model.ckpt"):
+        registry.load_latest()
+
+
+def test_load_latest_requires_model_contract(registry, tmp_path):
+    ckpt = tmp_path / "model.ckpt"
+    pkl = tmp_path / "training_dataset.pkl"
+    ckpt.write_text("fake", encoding="ascii")
+    pkl.write_text("fake", encoding="ascii")
+    registry.publish(
+        "v1",
+        ckpt,
+        {"train_mae": 0.5, "test_mae": 0.6},
+        training_dataset_pkl=pkl,
+    )
+
+    with pytest.raises(FileNotFoundError, match="model_contract.json"):
+        registry.load_latest()
+
+
+def test_load_latest_rejects_incompatible_model_contract(registry, tmp_path):
+    ckpt = tmp_path / "model.ckpt"
+    pkl = tmp_path / "training_dataset.pkl"
+    contract = tmp_path / "model_contract.json"
+    ckpt.write_text("fake", encoding="ascii")
+    pkl.write_text("fake", encoding="ascii")
+    contract.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "station_id": "KLGA",
+                "target": "temp_error",
+                "known_reals": ["wrong_feature"],
+                "unknown_reals": [],
+                "max_encoder_length": 72,
+                "max_prediction_length": 48,
+                "quantiles": [0.1, 0.5, 0.9],
+            }
+        ),
+        encoding="ascii",
+    )
+    registry.publish(
+        "v1",
+        ckpt,
+        {"train_mae": 0.5, "test_mae": 0.6},
+        training_dataset_pkl=pkl,
+        extra_artifacts=[contract],
+    )
+
+    with pytest.raises(ValueError, match="known_reals"):
         registry.load_latest()

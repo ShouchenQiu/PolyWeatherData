@@ -109,6 +109,7 @@ def run_train_stage(
     deterministic: bool = True,
     precision: str = "32",
     num_workers: int = 0,
+    experiment_config: Path | str | None = None,
     train_fn: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     started_at = datetime.now(timezone.utc).isoformat()
@@ -138,6 +139,7 @@ def run_train_stage(
         deterministic=deterministic,
         precision=precision,
         num_workers=num_workers,
+        experiment_config=experiment_config,
     )
     train_result_path = paths["run_dir"] / "train_result.json"
     _write_json(train_result_path, train_result)
@@ -311,6 +313,8 @@ def package_candidate_model(run_dir: Path | str, version: str) -> dict[str, Any]
         root / "model_store" / version / "training_dataset.pkl",
         root / "model_store" / version / "meta.json",
         root / "model_store" / version / "training_metadata.json",
+        root / "model_store" / version / "experiment_config.json",
+        root / "model_store" / version / "model_contract.json",
     ]
     for path in required:
         if not path.exists():
@@ -437,15 +441,23 @@ def _default_train(**kwargs: Any) -> dict[str, Any]:
     from db.schema import DbClient
     from model.store.registry import ModelRegistry
     from model.training_data import TrainingDecoderCache
-    from scripts.train_tft import TftTrainer
+    from model.training.config import TrainingExperimentConfig
+    from model.training.trainer import TftTrainer
 
     settings = Settings(data_store_dir=Path(kwargs["data_store"]), model_store_dir=Path(kwargs["model_store"]))
-    settings.train_start, settings.train_end = kwargs["split_ranges"]["train"]
-    settings.val_start, settings.val_end = kwargs["split_ranges"]["val"]
-    settings.test_start, settings.test_end = kwargs["split_ranges"]["test"]
-    settings.tft_min_epochs = int(kwargs["min_epochs"])
-    settings.tft_max_epochs = int(kwargs["max_epochs"])
-    settings.tft_batch_size = int(kwargs["batch_size"])
+    experiment = (
+        TrainingExperimentConfig.from_json(kwargs["experiment_config"])
+        if kwargs.get("experiment_config") else None
+    )
+    if experiment is not None:
+        experiment.apply_to_settings(settings)
+    else:
+        settings.train_start, settings.train_end = kwargs["split_ranges"]["train"]
+        settings.val_start, settings.val_end = kwargs["split_ranges"]["val"]
+        settings.test_start, settings.test_end = kwargs["split_ranges"]["test"]
+        settings.tft_min_epochs = int(kwargs["min_epochs"])
+        settings.tft_max_epochs = int(kwargs["max_epochs"])
+        settings.tft_batch_size = int(kwargs["batch_size"])
     forecast_store = ParquetStore(settings.forecast_store_dir)
     obs_store = ParquetStore(settings.obs_store_dir)
     data_manager = DataManager([], [], forecast_store, obs_store, settings=settings)
@@ -466,6 +478,7 @@ def _default_train(**kwargs: Any) -> dict[str, Any]:
             precision=kwargs["precision"],
             num_workers=kwargs["num_workers"],
             activate_model=False,
+            experiment_config=experiment,
         )
         return trainer.run(station_id=kwargs["station"], version=kwargs["version"])
     finally:
@@ -490,6 +503,19 @@ def _sha256_file(path: Path) -> str:
 def _parse_split(value: str) -> tuple[str, str]:
     start, end = value.split(":", 1)
     return start, end
+
+
+def _split_ranges_from_args(args: Any) -> dict[str, tuple[str, str]]:
+    experiment_config = getattr(args, "experiment_config", None)
+    if experiment_config:
+        from model.training.config import TrainingExperimentConfig
+
+        return TrainingExperimentConfig.from_json(experiment_config).splits
+    return {
+        "train": _parse_split(args.train),
+        "val": _parse_split(args.val),
+        "test": _parse_split(args.test),
+    }
 
 
 def _cli() -> None:
@@ -521,6 +547,7 @@ def _cli() -> None:
         p.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True)
         p.add_argument("--precision", default="32")
         p.add_argument("--num-workers", type=int, default=0)
+        p.add_argument("--experiment-config", default=None, dest="experiment_config")
 
     p_download = subparsers.add_parser("download", help="download and clean weather data")
     add_run_args(p_download)
@@ -585,11 +612,7 @@ def _cli() -> None:
             run_id=args.run_id,
             station=args.station,
             version=args.version,
-            split_ranges={
-                "train": _parse_split(args.train),
-                "val": _parse_split(args.val),
-                "test": _parse_split(args.test),
-            },
+            split_ranges=_split_ranges_from_args(args),
             min_epochs=args.min_epochs,
             max_epochs=args.max_epochs,
             batch_size=args.batch_size,
@@ -597,6 +620,7 @@ def _cli() -> None:
             deterministic=args.deterministic,
             precision=args.precision,
             num_workers=args.num_workers,
+            experiment_config=args.experiment_config,
         )
     elif args.command == "package":
         result = run_package_stage(
@@ -611,11 +635,7 @@ def _cli() -> None:
             run_id=args.run_id,
         )
     else:
-        split_ranges = {
-            "train": _parse_split(args.train),
-            "val": _parse_split(args.val),
-            "test": _parse_split(args.test),
-        }
+        split_ranges = _split_ranges_from_args(args)
         run_download_stage(
             run_root=args.run_root,
             run_id=args.run_id,
@@ -644,6 +664,7 @@ def _cli() -> None:
                 deterministic=args.deterministic,
                 precision=args.precision,
                 num_workers=args.num_workers,
+                experiment_config=args.experiment_config,
             )
             result = run_package_stage(
                 run_root=args.run_root,

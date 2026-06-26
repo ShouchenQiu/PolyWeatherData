@@ -9,6 +9,7 @@ import pandas as pd
 
 from config.settings import Settings
 from config.stations import STATIONS
+from model.training_config import TrainingExperimentConfig
 from scripts.train_tft import TftTrainer, _settings_from_cli_args
 
 
@@ -67,8 +68,11 @@ class FakeTimeSeriesDataSet:
 
 
 class FakeTFT:
+    kwargs = None
+
     @classmethod
     def from_dataset(cls, *args, **kwargs):
+        cls.kwargs = kwargs
         return cls()
 
 
@@ -127,6 +131,20 @@ def _install_training_fakes(monkeypatch):
     monkeypatch.setitem(sys.modules, "pytorch_forecasting.metrics", metrics_mod)
     monkeypatch.setitem(sys.modules, "pytorch_forecasting.data", data_mod)
     monkeypatch.setitem(sys.modules, "pytorch_forecasting.data.encoders", encoders_mod)
+
+
+def test_training_module_and_legacy_script_exports_match():
+    from model.training.config import TrainingExperimentConfig as NewTrainingExperimentConfig
+    from model.training.trainer import TftTrainer as NewTftTrainer
+
+    assert TftTrainer is NewTftTrainer
+    assert TrainingExperimentConfig is NewTrainingExperimentConfig
+
+
+def test_production_tft_does_not_import_training_module():
+    source = Path("model/tft.py").read_text(encoding="utf-8")
+
+    assert "model.training" not in source
 
 
 def test_tft_trainer_uses_settings_splits_and_publishes_dataset_pkl(
@@ -216,6 +234,82 @@ def test_tft_trainer_writes_training_metadata_and_result_json(tmp_path, monkeypa
     assert result_json["version"] == result["version"]
 
 
+def test_tft_trainer_uses_experiment_config_and_publishes_contract(tmp_path, monkeypatch):
+    _install_training_fakes(monkeypatch)
+    config_path = tmp_path / "experiment.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "station": "KLGA",
+                "splits": {
+                    "train": ["2026-01-01", "2026-01-01"],
+                    "val": ["2026-01-02", "2026-01-02"],
+                    "test": ["2026-01-03", "2026-01-03"],
+                },
+                "model": {
+                    "hidden_size": 64,
+                    "attention_head_size": 2,
+                    "dropout": 0.15,
+                    "hidden_continuous_size": 8,
+                    "learning_rate": 0.001,
+                    "weight_decay": 0.002,
+                    "reduce_lr_patience": 4,
+                    "quantiles": [0.05, 0.5, 0.95],
+                    "target_winsor": 6.0,
+                    "max_encoder_length": 72,
+                    "max_prediction_length": 48,
+                },
+                "trainer": {
+                    "min_epochs": 2,
+                    "max_epochs": 4,
+                    "batch_size": 24,
+                    "seed": 11,
+                    "deterministic": True,
+                    "precision": "32",
+                    "num_workers": 1,
+                    "early_stop_patience": 3,
+                    "gradient_clip_val": 0.2,
+                },
+                "runtime_profile": "john_linux_2060",
+            }
+        ),
+        encoding="ascii",
+    )
+    experiment = TrainingExperimentConfig.from_json(config_path)
+    settings = Settings(data_store_dir=tmp_path / "data")
+    experiment.apply_to_settings(settings)
+    builder = FakeBuilder()
+    registry = FakeRegistry()
+    monkeypatch.setattr(TftTrainer, "_eval_mae", lambda *args, **kwargs: 1.23)
+
+    trainer = TftTrainer(
+        store=None,
+        registry=registry,
+        output_dir=tmp_path / "checkpoints",
+        settings=settings,
+        dataset_builder=builder,
+        station_config=STATIONS["KLGA"],
+        experiment_config=experiment,
+    )
+
+    trainer.run(station_id="KLGA", version="vexp")
+
+    version_dir = tmp_path / "checkpoints" / "vexp"
+    written_config = json.loads((version_dir / "experiment_config.json").read_text())
+    contract = json.loads((version_dir / "model_contract.json").read_text())
+    assert [call[3] for call in builder.calls] == ["train", "val", "test"]
+    assert FakeTFT.kwargs["hidden_size"] == 64
+    assert FakeTFT.kwargs["learning_rate"] == 0.001
+    assert written_config["runtime_profile"] == "john_linux_2060"
+    assert contract["station_id"] == "KLGA"
+    assert contract["max_encoder_length"] == 72
+    assert contract["max_prediction_length"] == 48
+    assert contract["quantiles"] == [0.05, 0.5, 0.95]
+    artifact_names = {path.name for path in registry.publish_kwargs["extra_artifacts"]}
+    assert {"experiment_config.json", "model_contract.json"} <= artifact_names
+
+
 def test_settings_from_cli_args_applies_smoke_summary_and_paths(tmp_path):
     summary_path = tmp_path / "smoke_summary.json"
     summary_path.write_text(
@@ -257,3 +351,47 @@ def test_settings_from_cli_args_applies_smoke_summary_and_paths(tmp_path):
     assert settings.tft_min_epochs == 1
     assert settings.tft_max_epochs == 2
     assert settings.tft_batch_size == 16
+
+
+def test_settings_from_cli_args_applies_experiment_config(tmp_path):
+    config_path = tmp_path / "experiment.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "station": "KLGA",
+                "splits": {
+                    "train": ["2026-01-01", "2026-01-10"],
+                    "val": ["2026-01-11", "2026-01-12"],
+                    "test": ["2026-01-13", "2026-01-14"],
+                },
+                "model": {"hidden_size": 48, "learning_rate": 0.0003},
+                "trainer": {"min_epochs": 3, "max_epochs": 9, "batch_size": 40},
+            }
+        ),
+        encoding="ascii",
+    )
+    args = types.SimpleNamespace(
+        data_store=tmp_path / "data",
+        model_store=tmp_path / "models",
+        smoke_summary=None,
+        min_epochs=1,
+        max_epochs=2,
+        batch_size=16,
+        seed=7,
+        deterministic=True,
+        precision="32",
+        num_workers=2,
+        experiment_config=config_path,
+    )
+
+    settings = _settings_from_cli_args(args)
+
+    assert (settings.train_start, settings.train_end) == ("2026-01-01", "2026-01-10")
+    assert (settings.val_start, settings.val_end) == ("2026-01-11", "2026-01-12")
+    assert (settings.test_start, settings.test_end) == ("2026-01-13", "2026-01-14")
+    assert settings.tft_hidden_size == 48
+    assert settings.tft_learning_rate == 0.0003
+    assert settings.tft_min_epochs == 3
+    assert settings.tft_max_epochs == 9
+    assert settings.tft_batch_size == 40

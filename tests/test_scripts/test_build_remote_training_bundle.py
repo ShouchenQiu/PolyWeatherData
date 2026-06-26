@@ -22,7 +22,13 @@ def test_build_remote_training_bundle_includes_training_code_and_excludes_produc
     assert "scripts/train_tft.py" in members
     assert "config/settings.py" in members
     assert "data/storage/parquet_store.py" in members
+    assert "model/training/__init__.py" in members
+    assert "model/training/artifacts.py" in members
+    assert "model/training/config.py" in members
+    assert "model/training/trainer.py" in members
     assert "model/training_data.py" in members
+    assert "model/training_config.py" in members
+    assert "model/model_contract.py" in members
     assert "db/schema.py" in members
     assert "core/observability.py" not in members
     assert "loops/forecast_loop.py" not in members

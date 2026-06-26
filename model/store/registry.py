@@ -148,6 +148,10 @@ class ModelRegistry:
                 f"training_dataset.pkl not found at {pkl_path}. "
                 "Bundle it during publish() or provide it manually."
             )
+        contract_path = ckpt_path.parent / "model_contract.json"
+        from model.model_contract import validate_model_contract
+
+        validate_model_contract(contract_path)
         return TftModel(ckpt_path, pkl_path)
 
     # ------------------------------------------------------------------

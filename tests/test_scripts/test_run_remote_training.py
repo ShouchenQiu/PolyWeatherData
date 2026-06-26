@@ -214,6 +214,61 @@ def test_cli_package_passes_model_only_flag(tmp_path, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["status"] == "completed"
 
 
+def test_cli_train_passes_experiment_config(tmp_path, monkeypatch, capsys):
+    calls: list[dict] = []
+    config_path = tmp_path / "experiment.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "station": "KLGA",
+                "splits": {
+                    "train": ["2026-02-01", "2026-02-02"],
+                    "val": ["2026-02-03", "2026-02-03"],
+                    "test": ["2026-02-04", "2026-02-04"],
+                },
+            }
+        ),
+        encoding="ascii",
+    )
+
+    def fake_train_stage(**kwargs):
+        calls.append(kwargs)
+        return {"status": "trained"}
+
+    monkeypatch.setattr(remote_training, "run_train_stage", fake_train_stage)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_remote_training",
+            "train",
+            "--run-root",
+            str(tmp_path / "runs"),
+            "--run-id",
+            "r_train",
+            "--station",
+            "KLGA",
+            "--train",
+            "2026-01-01:2026-01-01",
+            "--val",
+            "2026-01-02:2026-01-02",
+            "--test",
+            "2026-01-03:2026-01-03",
+            "--version",
+            "candidate_v1",
+            "--experiment-config",
+            str(config_path),
+        ],
+    )
+
+    remote_training._cli()
+
+    assert calls[0]["experiment_config"] == str(config_path)
+    assert calls[0]["split_ranges"]["train"] == ("2026-02-01", "2026-02-02")
+    assert json.loads(capsys.readouterr().out)["status"] == "trained"
+
+
 def test_cli_export_lab_input_dispatches_stage(tmp_path, monkeypatch, capsys):
     calls: list[dict] = []
 
@@ -329,7 +384,14 @@ def test_package_stage_model_only_skips_production_weather_data(tmp_path):
     version = "candidate_v1"
     model_dir = run_dir / "model_store" / version
     model_dir.mkdir(parents=True)
-    for name in ("model.ckpt", "training_dataset.pkl", "meta.json", "training_metadata.json"):
+    for name in (
+        "model.ckpt",
+        "training_dataset.pkl",
+        "meta.json",
+        "training_metadata.json",
+        "experiment_config.json",
+        "model_contract.json",
+    ):
         (model_dir / name).write_text(name, encoding="ascii")
     (run_dir / "train_result.json").write_text("{}", encoding="ascii")
 
@@ -351,7 +413,14 @@ def test_package_candidate_model_excludes_decoder_cache(tmp_path):
     version = "candidate_v1"
     model_dir = run_dir / "model_store" / version
     model_dir.mkdir(parents=True)
-    for name in ("model.ckpt", "training_dataset.pkl", "meta.json", "training_metadata.json"):
+    for name in (
+        "model.ckpt",
+        "training_dataset.pkl",
+        "meta.json",
+        "training_metadata.json",
+        "experiment_config.json",
+        "model_contract.json",
+    ):
         (model_dir / name).write_text(name, encoding="ascii")
     (run_dir / "data_store" / "_decoder_cache" / "KLGA").mkdir(parents=True)
     (run_dir / "data_store" / "_decoder_cache" / "KLGA" / "2026-01.parquet").write_text(
@@ -366,6 +435,8 @@ def test_package_candidate_model_excludes_decoder_cache(tmp_path):
     assert package["sha256"]
     assert "_decoder_cache" not in package["members"]
     assert f"model_store/{version}/training_dataset.pkl" in package["members"]
+    assert f"model_store/{version}/experiment_config.json" in package["members"]
+    assert f"model_store/{version}/model_contract.json" in package["members"]
 
 
 def test_package_production_weather_data_includes_only_hrrr_and_obs(tmp_path):

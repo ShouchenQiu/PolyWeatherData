@@ -63,7 +63,14 @@ def import_candidate_model(
 
 
 def _require_candidate_files(version_dir: Path) -> None:
-    for name in ("model.ckpt", "training_dataset.pkl", "meta.json", "training_metadata.json"):
+    for name in (
+        "model.ckpt",
+        "training_dataset.pkl",
+        "meta.json",
+        "training_metadata.json",
+        "experiment_config.json",
+        "model_contract.json",
+    ):
         if not (version_dir / name).exists():
             raise FileNotFoundError(f"candidate package missing {name}")
 
