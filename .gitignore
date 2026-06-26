@@ -24,3 +24,4 @@ build/
 .coverage
 htmlcov/
 runs/
+.old_data/

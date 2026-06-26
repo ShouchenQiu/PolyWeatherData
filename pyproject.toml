@@ -28,6 +28,7 @@ dependencies = [
 [project.optional-dependencies]
 clob = ["polymarket-client"]
 herbie = ["herbie-data"]
+monitor = ["psutil", "nvidia-ml-py", "tabulate", "colorama"]
 dev = ["pytest", "pytest-cov", "black", "ruff"]
 
 [tool.setuptools.packages.find]

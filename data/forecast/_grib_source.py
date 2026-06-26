@@ -22,6 +22,7 @@ from __future__ import annotations
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from os import getenv
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -68,6 +69,10 @@ def _is_one_hour_accum(desc: str) -> bool:
 
 def _make_session() -> requests.Session:
     sess = requests.Session()
+    grib_proxy = getenv("POLYWEATHER_GRIB_PROXY", "").strip()
+    if grib_proxy:
+        sess.trust_env = False
+        sess.proxies.update({"http": grib_proxy, "https": grib_proxy})
     adapter = HTTPAdapter(
         pool_connections=_CONNECT_THREADS,
         pool_maxsize=64,

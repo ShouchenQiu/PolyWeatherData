@@ -14,7 +14,7 @@ from typing import Any
 
 import pandas as pd
 
-from data.forecast.hrrr_fill import MAJOR_HOURS, nearest_prior_major
+from data.forecast.hrrr_fill import HrrrFill, MAJOR_HOURS, nearest_prior_major
 from data.manager import InsufficientEncoderData
 from data.storage.cleaner import Cleaner
 from model.features import add_model_features
@@ -310,6 +310,17 @@ class TrainingDecoderCache:
         except Exception as primary_exc:
             if self.fallback_source is None:
                 raise
+            if init_utc.hour not in MAJOR_HOURS and self._source_has_window_cache():
+                try:
+                    df = self._fetch_hybrid_non_major_decoder(station, init_utc)
+                    return (
+                        df,
+                        "hybrid_fallback",
+                        primary_exc,
+                        time.perf_counter() - started,
+                    )
+                except Exception:
+                    pass
             try:
                 df = self._fetch_clean_validate_from_source(
                     self.fallback_source, station, init_utc
@@ -322,21 +333,47 @@ class TrainingDecoderCache:
                     f"{primary_exc}; fallback source failed: {fallback_exc}"
                 ) from fallback_exc
 
+    def _fetch_hybrid_non_major_decoder(
+        self,
+        station: Any,
+        init_utc: pd.Timestamp,
+    ) -> pd.DataFrame:
+        if self.fallback_source is None:
+            raise RuntimeError("hybrid decoder fallback requires a fallback source")
+        non_major = self._fetch_clean_from_source(
+            self.fallback_source, station, init_utc, range(0, 19)
+        )
+        nearest_major_init = nearest_prior_major(init_utc)
+        nearest_major = self._fetch_clean_from_source(
+            self.source, station, nearest_major_init, range(0, 49)
+        )
+        filled = HrrrFill().fill(non_major, nearest_major)
+        return self._validate(filled, station.station_id, init_utc)
+
     def _fetch_clean_validate_from_source(
         self,
         source: Any,
         station: Any,
         init_utc: pd.Timestamp,
     ) -> pd.DataFrame:
-        result = source.fetch(init_utc, range(0, 49), station)
+        df = self._fetch_clean_from_source(source, station, init_utc, range(0, 49))
+        return self._validate(df, station.station_id, init_utc)
+
+    @staticmethod
+    def _fetch_clean_from_source(
+        source: Any,
+        station: Any,
+        init_utc: pd.Timestamp,
+        fxx_range: range,
+    ) -> pd.DataFrame:
+        result = source.fetch(init_utc, fxx_range, station)
         df = result.get(station.station_id, pd.DataFrame())
         if df is None or df.empty:
             raise RuntimeError(
-                f"TrainingDecoderCache: no decoder rows for "
+                f"TrainingDecoderCache: no HRRR rows for "
                 f"station={station.station_id} init={init_utc}"
             )
-        df = Cleaner.process_hrrr(df)
-        return self._validate(df, station.station_id, init_utc)
+        return Cleaner.process_hrrr(df)
 
     def _append_month(
         self,

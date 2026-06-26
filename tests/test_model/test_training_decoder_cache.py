@@ -52,6 +52,50 @@ class FailingDecoderSource:
         raise RuntimeError("primary zarr missing")
 
 
+class MissingOffhourForecastSource(FakeDecoderSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self._full_window_cache = {}
+
+    def fetch(self, init_time, fxx_range, station):
+        init = pd.Timestamp(init_time).tz_convert("UTC")
+        if init.hour not in {0, 6, 12, 18}:
+            self.called_inits.append(init)
+            raise RuntimeError("zarr fcst store missing")
+        return super().fetch(init, fxx_range, station)
+
+
+class NativeOnlyFallbackSource(FakeDecoderSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self.called_ranges: list[list[int]] = []
+
+    def fetch(self, init_time, fxx_range, station):
+        self.calls += 1
+        init = pd.Timestamp(init_time).tz_convert("UTC")
+        self.called_inits.append(init)
+        requested = [int(fxx) for fxx in fxx_range]
+        self.called_ranges.append(requested)
+        rows = []
+        for fxx in requested:
+            if init.hour not in {0, 6, 12, 18} and fxx > 18:
+                continue
+            rows.append(
+                {
+                    "init_time": init,
+                    "fxx": fxx,
+                    "valid_time": init + pd.Timedelta(hours=fxx),
+                    "TMP_2m": 280.0 + fxx,
+                    "DPT_2m": 275.0 + fxx,
+                    "UGRD_10m": 1.0,
+                    "VGRD_10m": 2.0,
+                    "GUST_sfc": 0.0,
+                    "PRATE": 0.0,
+                }
+            )
+        return {station.station_id: pd.DataFrame(rows)}
+
+
 def test_decoder_cache_miss_fetches_cleans_and_persists(tmp_path):
     source = FakeDecoderSource()
     cache = TrainingDecoderCache(tmp_path, source=source)
@@ -78,6 +122,28 @@ def test_decoder_cache_miss_uses_fallback_source_when_primary_fails(tmp_path):
     assert primary.called_inits == [init]
     assert fallback.called_inits == [init]
     assert list(df["fxx"]) == list(range(1, 49))
+    stored = pd.read_parquet(cache.path_for("KLGA", init))
+    assert set(stored["fxx"].astype(int)) == set(range(1, 49))
+
+
+def test_decoder_cache_hybrid_fallback_uses_s3_native_and_primary_major(tmp_path):
+    primary = MissingOffhourForecastSource()
+    fallback = NativeOnlyFallbackSource()
+    cache = TrainingDecoderCache(tmp_path, source=primary, fallback_source=fallback)
+    station = STATIONS["KLGA"]
+    init = pd.Timestamp("2026-04-28 23:00:00", tz="UTC")
+
+    df = cache.get(station, init)
+
+    assert primary.called_inits == [
+        init,
+        pd.Timestamp("2026-04-28 18:00:00", tz="UTC"),
+    ]
+    assert fallback.called_inits == [init]
+    assert fallback.called_ranges == [list(range(0, 19))]
+    assert list(df["fxx"].astype(int)) == list(range(1, 49))
+    assert df.loc[df["fxx"] == 1, "TMP_2m"].iloc[0] == 280.0 + 1 - 273.15
+    assert df.loc[df["fxx"] == 20, "TMP_2m"].iloc[0] == 25.0
     stored = pd.read_parquet(cache.path_for("KLGA", init))
     assert set(stored["fxx"].astype(int)) == set(range(1, 49))
 

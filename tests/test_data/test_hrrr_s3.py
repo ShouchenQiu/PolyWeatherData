@@ -75,6 +75,27 @@ def test_s3_base_url_override():
     assert url.startswith("https://custom-bucket.example.com")
 
 
+def test_grib_proxy_env_configures_requests_session(monkeypatch):
+    monkeypatch.setenv("POLYWEATHER_GRIB_PROXY", "socks5://127.0.0.1:10808")
+
+    src = HrrrS3Source()
+
+    assert src._session.trust_env is False
+    assert src._session.proxies == {
+        "http": "socks5://127.0.0.1:10808",
+        "https": "socks5://127.0.0.1:10808",
+    }
+
+
+def test_grib_proxy_env_unset_leaves_requests_session_default(monkeypatch):
+    monkeypatch.delenv("POLYWEATHER_GRIB_PROXY", raising=False)
+
+    src = HrrrS3Source()
+
+    assert src._session.trust_env is True
+    assert src._session.proxies == {}
+
+
 # ---------------------------------------------------------------------------
 # Unit: .idx parsing
 # ---------------------------------------------------------------------------
