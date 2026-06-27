@@ -1,21 +1,19 @@
 # HrrrFill uses nearest-major overlap, then bounded extrapolation
 
-**Status**: accepted, implementation deferred
+**Status**: accepted, implemented
 
 ADR-0005 defines the intended non-MAJOR HRRR decoder-window behavior:
 native non-MAJOR coverage first, nearest prior MAJOR overlap second, and bounded
-linear extrapolation for the remaining tail. Current code still carries an older
-`prior_major_df` path that attempts to fetch the MAJOR run before the nearest
-prior MAJOR run.
+linear extrapolation for the remaining tail.
 
-That prior-prior MAJOR path should be removed. For a non-MAJOR init, the nearest
+The prior-prior MAJOR path is removed. For a non-MAJOR init, the nearest
 prior MAJOR run already has the latest available 48-hour forecast window that is
 valid at that init time. If the nearest MAJOR run cannot cover the final tail
 valid_times, an even earlier MAJOR run ends earlier and cannot cover those later
 valid_times either. Therefore the prior-prior fetch is redundant for normal HRRR
 time geometry and adds network work plus confusing failure modes.
 
-The target fill order is:
+The implemented fill order is:
 
 1. Use the non-MAJOR run for native fxx 0..18 coverage.
 2. Use the nearest prior MAJOR run for overlapping tail valid_times.
@@ -25,10 +23,35 @@ The target fill order is:
 The code must not fetch the following MAJOR run to fill the tail. That would use
 future model information that was not available at the non-MAJOR init time.
 
-**Consequences**: `HrrrFill.fill()` should no longer accept or consult
-`prior_major_df`. `HrrrZarrSource` and `BaseGribSource` should stop fetching
-`nearest_major_init - 6h` for tail-gap handling. Tests that assert prior-major
-tail data is used should be removed or rewritten to assert bounded extrapolation.
-Existing already-downloaded decoder cache should be audited before deciding
-whether it needs regeneration; this ADR records the desired behavior for the
-post-download cleanup slice.
+## Operational evidence
+
+The 2024-10 through 2026-05 historical download showed that prewarming and
+fetching `nearest_major_init - 6h` added remote-store requests, warm failures,
+and misleading "tail-gap fallback unavailable" warnings. It did not improve
+normal decoder coverage: a prior-prior 48-hour run ends six hours before the
+nearest 48-hour run.
+
+After implementation, the existing primary decoder cache was checked across
+20 monthly Parquet files: 14,592 init windows and 700,416 rows. For every init,
+the number of `is_extrapolated=True` rows equalled `init_hour % 6`; there were
+zero geometry mismatches. Tail lengths 0 through 5 each occurred for 2,432
+inits, confirming the expected HRRR schedule rather than prior-prior fill.
+
+When an off-hour Zarr forecast store is missing, the hybrid route remains:
+S3/GRIB supplies that init's native fxx 0..18, Zarr supplies the nearest MAJOR
+overlap, and `HrrrFill` extrapolates only the final bounded tail. If the nearest
+MAJOR dependency itself is unavailable, the caller may use its full-window
+fallback source; `HrrrFill` does not silently synthesize more than five hours.
+
+## Consequences
+
+- `HrrrFill.fill()` accepts only `non_major_df` and `nearest_major_df`.
+- `HrrrZarrSource` and `BaseGribSource` do not fetch
+  `nearest_major_init - 6h`.
+- Decoder prewarming schedules only the nearest MAJOR dependency for an
+  off-hour init.
+- Existing decoder-cache rows do not require regeneration solely for this ADR:
+  under normal HRRR 48-hour geometry, the removed run could not populate the
+  later tail. Existing completeness and NaN audits remain authoritative.
+- The following MAJOR run remains forbidden because it introduces future
+  information unavailable at the off-hour init.

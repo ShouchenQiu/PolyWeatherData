@@ -14,8 +14,9 @@ Non-MAJOR init_times (03Z, 09Z, 15Z, 21Z)
 ------------------------------------------
 Only fxx 0-18 are available from NOAA for non-MAJOR runs.  fetch() detects the
 init hour, downloads fxx 0-18, then fetches the nearest prior MAJOR-hour run
-(fxx 0-48) and splices them via HrrrFill.  A WARNING is logged when the
-prior-prior MAJOR fallback is used for tail-gap valid_times.  [ADR-0005]
+(fxx 0-48) and splices them via HrrrFill.  The final 1-5 uncovered hours are
+bounded linear extrapolations; an earlier MAJOR run cannot cover later
+valid_times and is not fetched.  [ADR-0012]
 """
 from __future__ import annotations
 
@@ -455,15 +456,15 @@ class BaseGribSource(BaseForecastSource):
         if requested_fxx and max(requested_fxx) <= 18 and min(requested_fxx) >= 0:
             return self._fetch_all_stations(init_utc, fxx_range, station_list)
 
-        # Non-MAJOR path: fetch fxx 0-18, then splice with prior MAJOR run
+        # Non-MAJOR path: fetch fxx 0-18, then splice with nearest MAJOR run.
         logger.debug(
-            "_grib_source: non-MAJOR init={}, fetching fxx 0-18 + prior MAJOR splice",
+            "_grib_source: non-MAJOR init={}, fetching fxx 0-18 + nearest "
+            "MAJOR splice + bounded tail extrapolation",
             init_utc,
         )
         non_major_dict = self._fetch_all_stations(init_utc, _NON_MAJOR_FXX, station_list)
 
         nearest_major_init = nearest_prior_major(init_utc)
-        prior_major_init   = nearest_major_init - pd.Timedelta(hours=6)
 
         try:
             nearest_major_dict = self._fetch_all_stations(
@@ -477,24 +478,11 @@ class BaseGribSource(BaseForecastSource):
             )
             return non_major_dict
 
-        try:
-            prior_major_dict = self._fetch_all_stations(
-                prior_major_init, range(0, 49), station_list
-            )
-        except Exception:
-            logger.warning(
-                "_grib_source: prior MAJOR fetch failed for init={}; "
-                "tail-gap fallback unavailable",
-                prior_major_init,
-            )
-            prior_major_dict = {}
-
         result: dict[str, pd.DataFrame] = {}
         for sid in non_major_dict:
             result[sid] = self._hrrr_fill.fill(
                 non_major_dict[sid],
                 nearest_major_dict.get(sid, pd.DataFrame()),
-                prior_major_dict.get(sid),
             )
         return result
 

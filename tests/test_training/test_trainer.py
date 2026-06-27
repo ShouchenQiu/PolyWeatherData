@@ -9,8 +9,8 @@ import pandas as pd
 
 from config.settings import Settings
 from config.stations import STATIONS
-from model.training_config import TrainingExperimentConfig
-from scripts.train_tft import TftTrainer, _settings_from_cli_args
+from training.config import TrainingExperimentConfig
+from training.trainer import TftTrainer
 
 
 class FakeBuilder:
@@ -133,12 +133,9 @@ def _install_training_fakes(monkeypatch):
     monkeypatch.setitem(sys.modules, "pytorch_forecasting.data.encoders", encoders_mod)
 
 
-def test_training_module_and_legacy_script_exports_match():
-    from model.training.config import TrainingExperimentConfig as NewTrainingExperimentConfig
-    from model.training.trainer import TftTrainer as NewTftTrainer
-
-    assert TftTrainer is NewTftTrainer
-    assert TrainingExperimentConfig is NewTrainingExperimentConfig
+def test_training_interfaces_live_in_training_factory():
+    assert TftTrainer.__module__ == "training.trainer"
+    assert TrainingExperimentConfig.__module__ == "training.config"
 
 
 def test_production_tft_does_not_import_training_module():
@@ -211,7 +208,6 @@ def test_tft_trainer_writes_training_metadata_and_result_json(tmp_path, monkeypa
         torch_deterministic=True,
         precision="32",
         num_workers=2,
-        activate_model=False,
     )
 
     result = trainer.run(station_id="KLGA", version="vmeta")
@@ -219,6 +215,7 @@ def test_tft_trainer_writes_training_metadata_and_result_json(tmp_path, monkeypa
     version_dir = tmp_path / "checkpoints" / "vmeta"
     metadata = json.loads((version_dir / "training_metadata.json").read_text())
     result_json = json.loads((version_dir / "train_result.json").read_text())
+    experiment = json.loads((version_dir / "experiment_config.json").read_text())
     assert registry.publish_kwargs["activate"] is False
     assert metadata["random_seed"] == 7
     assert metadata["torch_deterministic"] is True
@@ -232,6 +229,7 @@ def test_tft_trainer_writes_training_metadata_and_result_json(tmp_path, monkeypa
     assert metadata["target"] == "temp_error"
     assert metadata["data_order_hash"]
     assert result_json["version"] == result["version"]
+    assert experiment["runtime_profile"] == "inline_settings"
 
 
 def test_tft_trainer_uses_experiment_config_and_publishes_contract(tmp_path, monkeypatch):
@@ -308,90 +306,3 @@ def test_tft_trainer_uses_experiment_config_and_publishes_contract(tmp_path, mon
     assert contract["quantiles"] == [0.05, 0.5, 0.95]
     artifact_names = {path.name for path in registry.publish_kwargs["extra_artifacts"]}
     assert {"experiment_config.json", "model_contract.json"} <= artifact_names
-
-
-def test_settings_from_cli_args_applies_smoke_summary_and_paths(tmp_path):
-    summary_path = tmp_path / "smoke_summary.json"
-    summary_path.write_text(
-        json.dumps(
-            {
-                "data_store_dir": str(tmp_path / "summary_data"),
-                "smoke_split": {
-                    "train": ["2026-05-26", "2026-05-30"],
-                    "val": ["2026-05-31", "2026-06-01"],
-                    "test": ["2026-06-02", "2026-06-04"],
-                },
-            }
-        ),
-        encoding="ascii",
-    )
-    args = types.SimpleNamespace(
-        data_store=tmp_path / "data",
-        model_store=tmp_path / "models",
-        smoke_summary=summary_path,
-        min_epochs=1,
-        max_epochs=2,
-        batch_size=16,
-        seed=7,
-        deterministic=True,
-        precision="bf16-mixed",
-        num_workers=2,
-    )
-
-    settings = _settings_from_cli_args(args)
-
-    assert settings.data_store_dir == tmp_path / "data"
-    assert settings.forecast_store_dir == tmp_path / "data" / "hrrr"
-    assert settings.obs_store_dir == tmp_path / "data" / "obs"
-    assert settings.training_decoder_cache_dir == tmp_path / "data" / "_decoder_cache"
-    assert settings.model_store_dir == tmp_path / "models"
-    assert (settings.train_start, settings.train_end) == ("2026-05-26", "2026-05-30")
-    assert (settings.val_start, settings.val_end) == ("2026-05-31", "2026-06-01")
-    assert (settings.test_start, settings.test_end) == ("2026-06-02", "2026-06-04")
-    assert settings.tft_min_epochs == 1
-    assert settings.tft_max_epochs == 2
-    assert settings.tft_batch_size == 16
-
-
-def test_settings_from_cli_args_applies_experiment_config(tmp_path):
-    config_path = tmp_path / "experiment.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "station": "KLGA",
-                "splits": {
-                    "train": ["2026-01-01", "2026-01-10"],
-                    "val": ["2026-01-11", "2026-01-12"],
-                    "test": ["2026-01-13", "2026-01-14"],
-                },
-                "model": {"hidden_size": 48, "learning_rate": 0.0003},
-                "trainer": {"min_epochs": 3, "max_epochs": 9, "batch_size": 40},
-            }
-        ),
-        encoding="ascii",
-    )
-    args = types.SimpleNamespace(
-        data_store=tmp_path / "data",
-        model_store=tmp_path / "models",
-        smoke_summary=None,
-        min_epochs=1,
-        max_epochs=2,
-        batch_size=16,
-        seed=7,
-        deterministic=True,
-        precision="32",
-        num_workers=2,
-        experiment_config=config_path,
-    )
-
-    settings = _settings_from_cli_args(args)
-
-    assert (settings.train_start, settings.train_end) == ("2026-01-01", "2026-01-10")
-    assert (settings.val_start, settings.val_end) == ("2026-01-11", "2026-01-12")
-    assert (settings.test_start, settings.test_end) == ("2026-01-13", "2026-01-14")
-    assert settings.tft_hidden_size == 48
-    assert settings.tft_learning_rate == 0.0003
-    assert settings.tft_min_epochs == 3
-    assert settings.tft_max_epochs == 9
-    assert settings.tft_batch_size == 40

@@ -22,8 +22,11 @@ _Avoid_: first-hour forecast
 a full 48-hour forecast horizon; non-MAJOR init_times produce only 18 h.
 _Avoid_: full run, extended run
 
-**HRRR fill**: Extending a non-MAJOR init_time's 18-hour forecast to 48 hours by splicing
-in fxx values from the nearest prior MAJOR-hour run.
+**HRRR fill**: Extending a non-MAJOR init_time's 18-hour forecast to 48 hours by
+splicing valid_times from the nearest prior MAJOR-hour run, then linearly
+extrapolating only the final uncovered 1..5 hours. Earlier MAJOR runs are not
+consulted because they end earlier; following MAJOR runs are forbidden future
+information.
 _Avoid_: padding, interpolation
 
 **encoder window**: Past 72 hours of (f01, IEM obs) pairs fed to the TFT encoder,
@@ -110,6 +113,27 @@ _Avoid_: row index, step
 
 ### Ops
 
+**training factory**: The offline workflow that prepares historical weather
+data, audits readiness, trains TFT experiments, and packages candidate evidence.
+_Avoid_: remote training, training script
+
+**training workspace**: An isolated `runs/<RUN_ID>` state root containing
+prepared data, audit evidence, checkpoints, candidate artifacts, and stage
+manifests for one training run.
+_Avoid_: run folder, remote run
+
+**candidate model package**: A reviewed-but-inactive model artifact archive that
+can be imported into a production model store without changing its active model.
+_Avoid_: production model, deployed model
+
+**promotion**: The explicit production operation that selects one imported
+model version by writing the active-version state and an audit record.
+_Avoid_: import, publish
+
+**decoder cache**: Training-only persisted HRRR fxx 1..48 windows used to build
+TFT decoder samples and never read by production inference.
+_Avoid_: forecast store, production cache
+
 **ForecastLoop tick**: The 1-hour recurring cycle: fetch HRRR+IEM, run Cleaner, run
 TFT+McSampler, write bucket probabilities to shared state.
 _Avoid_: hourly loop, prediction loop
@@ -136,7 +160,7 @@ _Avoid_: probability cache, result store
 
 **DiscoveryLoop**: The hourly recurring cycle that fetches all currently-active
 Polymarket weather Events and persists any new ones to the database. Has no cutoff
-hour ！ it runs as long as the bot runs; if no new Events exist, it is a no-op.
+hour -- it runs as long as the bot runs; if no new Events exist, it is a no-op.
 _Avoid_: event loop (conflicts with asyncio term)
 
 **PaperExchange**: A paper-trading exchange backed by live CLOB order book data (not
@@ -148,6 +172,14 @@ values and IEM observations.
 _Avoid_: parquet file, storage file
 
 ## Data & Signal Flow
+
+- HRRR/IEM source -> **Cleaner** -> **ParquetStore partition** -> **training
+  workspace** -> training dataset -> **candidate model package** -> import ->
+  **promotion**.
+- Importing a **candidate model package** never changes production active state;
+  only **promotion** may select it.
+- A lower-trust training machine may produce candidate artifacts and evidence,
+  but only `john_linux` may import or promote them.
 
 - One **init_time** may cover up to 48 **fxx** offsets; only **f01** is stored per
   init_time in **ParquetStore**.
@@ -175,6 +207,13 @@ _Avoid_: parquet file, storage file
 
 ## Layer Exceptions
 
+### Training factory and CLI adapters
+
+`training/` may import `data/`, `config/`, `db/`, `model.features`, and
+`model.contract`. Production `model/`, `core/`, `loops/`, and `backtest/`
+modules must not import `training/`. Files in `scripts/` are command-line
+adapters and do not own training or model-store implementations.
+
 ### `core/bot.py` -- BotManager wiring root
 
 `BotManager` in `core/bot.py` is the top-level wiring root: it constructs and
@@ -193,7 +232,7 @@ wiring root is ever extracted to a dedicated top-level `bot.py` module alongside
 ## Flagged ambiguities
 
 - "market" used to mean both the Polymarket top-level event page and a single YES/NO
-  bucket contract ！ resolved: **Event** vs **Market**.
-- "model time" used to mean init_time ！ resolved: use **init_time** exclusively.
+  bucket contract -- resolved: **Event** vs **Market**.
+- "model time" used to mean init_time -- resolved: use **init_time** exclusively.
 - "encoder length" set to 24 in the original code (tft_step7 bug) while the design
-  requires 72 ！ resolved: **encoder window = 72 hours**.
+  requires 72 -- resolved: **encoder window = 72 hours**.

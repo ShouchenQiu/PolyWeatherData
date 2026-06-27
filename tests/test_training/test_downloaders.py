@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import inspect
+
 import pandas as pd
 
 from config.stations import STATIONS
 from data.storage.parquet_store import ParquetStore
-from scripts.batch_download_iem import BatchIemDownloader
-from scripts.batch_download_zarr import BatchZarrDownloader
+from training.downloaders.hrrr import BatchHrrrF01Downloader
+from training.downloaders.iem import BatchIemDownloader
 
 
 class FakeForecastSource:
@@ -144,11 +146,17 @@ class FakeObsSourceWithFarOnlyCandidate(FakeObsSourceWithMissing51):
         return df
 
 
+def test_batch_iem_interface_has_no_retired_compatibility_members():
+    parameters = inspect.signature(BatchIemDownloader).parameters
+    assert "retries" not in parameters
+    assert not hasattr(BatchIemDownloader, "_filter_exact_51")
+
+
 def test_batch_zarr_bootstrap_writes_canonical_f01_store(tmp_path):
     store = ParquetStore(tmp_path / "forecast")
     source = FakeForecastSource()
 
-    downloader = BatchZarrDownloader(
+    downloader = BatchHrrrF01Downloader(
         store,
         station_config=STATIONS["KLGA"],
         forecast_source=source,

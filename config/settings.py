@@ -113,9 +113,6 @@ class Settings:
     tft_max_prediction_length: int = 48
 
     # Risk
-    # max_open_per_token is retained for compatibility but is no longer read
-    # by FixedFraction.approve_signal (removed in V2F05).
-    max_open_per_token: int   = 1
     max_exit_fraction:  float = 1.0
     quote_size_usd:     float = 50.0
 

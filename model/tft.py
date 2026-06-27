@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pickle
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -26,9 +25,6 @@ try:
     _PF_AVAILABLE = True
 except ImportError:
     _PF_AVAILABLE = False
-
-if TYPE_CHECKING:
-    pass
 
 from model.features import HRRR_KNOWN_REALS, OBS_UNKNOWN_REALS  # noqa: F401
 from model.features import TARGET  # noqa: F401  (re-exported for callers)

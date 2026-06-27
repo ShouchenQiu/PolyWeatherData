@@ -106,7 +106,7 @@ def test_seed_demo_writes_demo_db_and_bootstrap_stores(tmp_path):
         seed_date="2026-06-04",
         init_hour=0,
         discovery_cls=FakeDiscovery,
-        zarr_downloader_cls=FakeZarrDownloader,
+        hrrr_downloader_cls=FakeZarrDownloader,
         iem_downloader_cls=FakeIemDownloader,
         public_client_cls=FakePublicClient,
     )
@@ -166,7 +166,7 @@ def test_seed_demo_can_request_full_day_hrrr(tmp_path):
         init_hour=None,
         skip_polymarket=True,
         skip_iem=True,
-        zarr_downloader_cls=FakeZarrDownloader,
+        hrrr_downloader_cls=FakeZarrDownloader,
     )
 
     assert FakeZarrDownloader.last_init_hours is None
@@ -184,7 +184,7 @@ def test_seed_demo_can_skip_network_sections(tmp_path):
         skip_hrrr=True,
         skip_iem=True,
         discovery_cls=ShouldNotCall,
-        zarr_downloader_cls=ShouldNotCall,
+        hrrr_downloader_cls=ShouldNotCall,
         iem_downloader_cls=ShouldNotCall,
     )
 

@@ -7,8 +7,8 @@ first chunk and is fetched in a single request (~1.7 MB per variable).
 
 Production fallback chain uses GRIB2-based sources (HrrrS3Source, HrrrNomadsSource)
 only.  HrrrZarrSource is retained for batch historical downloads via
-scripts/batch_download_zarr.py; its per-call zarr-store overhead is too
-large for real-time use.
+``training.downloaders``; its per-call zarr-store overhead is too large for
+real-time use.
 
 Architecture notes
 ------------------
@@ -346,7 +346,6 @@ class HrrrZarrSource(BaseForecastSource):
             non_major_df = pd.DataFrame(rows)
 
             nearest_major_init = nearest_prior_major(init_utc)
-            prior_major_init   = nearest_major_init - pd.Timedelta(hours=6)
 
             try:
                 nearest_dict = self.fetch(nearest_major_init, range(0, 49), station)
@@ -368,18 +367,7 @@ class HrrrZarrSource(BaseForecastSource):
                 non_major_df["is_extrapolated"] = False
                 return self._maybe_cache_result(station.station_id, cache_key, non_major_df)
 
-            try:
-                prior_dict = self.fetch(prior_major_init, range(0, 49), station)
-                prior_df   = prior_dict[station.station_id]
-            except Exception:
-                logger.warning(
-                    "HrrrZarrSource: prior MAJOR fetch failed for init={}; "
-                    "tail-gap fallback unavailable",
-                    prior_major_init,
-                )
-                prior_df = None
-
-            filled = self._hrrr_fill.fill(non_major_df, nearest_df, prior_df)
+            filled = self._hrrr_fill.fill(non_major_df, nearest_df)
             filled = filled[filled["fxx"].isin(requested_fxx)].reset_index(drop=True)
             return self._maybe_cache_result(station.station_id, cache_key, filled)
 

@@ -288,6 +288,36 @@ def test_zarr_non_major_f01_only_does_not_fetch_major_fill():
     assert open_group_call_count == 1
 
 
+def test_zarr_non_major_full_window_fetches_only_nearest_major():
+    """Off-hour tail fill must not open the earlier MAJOR stores."""
+    import data.forecast.hrrr_zarr as _mod
+
+    z_anl, z_fcst, navigate_fn = _make_zarr_mocks(n_fcst=18)
+    major_anl, major_fcst, _ = _make_zarr_mocks(n_fcst=48)
+
+    with (
+        patch.object(_mod, "_zarr", MagicMock()),
+        patch.object(_mod, "_fsspec", MagicMock()),
+        patch.object(_mod, "_navigate", navigate_fn),
+    ):
+        _mod._zarr.open_group.side_effect = [
+            z_anl,
+            z_fcst,
+            major_anl,
+            major_fcst,
+        ]
+        src = _mod.HrrrZarrSource()
+        result = src.fetch(
+            pd.Timestamp("2026-01-01 03:00", tz="UTC"),
+            range(0, 49),
+            _STATION,
+        )
+        open_group_call_count = _mod._zarr.open_group.call_count
+
+    assert len(result["KLGA"]) == 49
+    assert open_group_call_count == 4
+
+
 def test_zarr_full_window_repeat_uses_memory_cache():
     """Repeated full-window fetches reuse the source-level decoder cache."""
     import data.forecast.hrrr_zarr as _mod

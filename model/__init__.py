@@ -1,7 +1,7 @@
 """model package exports.
 
 Exports are loaded lazily so training-only imports such as
-``model.training_data`` do not pull the production inference pipeline.
+``training.dataset`` do not pull the production inference pipeline.
 """
 from __future__ import annotations
 

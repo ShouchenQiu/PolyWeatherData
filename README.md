@@ -284,7 +284,7 @@ PolyWeatherBot/
 ©¶   ©∏©§©§ analysis.py          # BacktestAnalysis °™ P&L statistics
 ©¶
 ©¿©§©§ scripts/
-©¶   ©¿©§©§ batch_download_zarr.py  # BatchZarrDownloader °™ bulk HRRR download
+©¶   ©¿©§©§ batch_download_hrrr_f01.py  # BatchHrrrF01Downloader °™ bulk HRRR download
 ©¶   ©¿©§©§ batch_download_iem.py   # BatchIemDownloader °™ bulk IEM download
 ©¶   ©∏©§©§ train_tft.py            # TftTrainer °™ TFT training pipeline
 ©¶
@@ -350,7 +350,6 @@ All configuration lives in a single `Settings` dataclass. Paths use `pathlib.Pat
 | `staleness_threshold_min` | `65` | Minutes after last ForecastLoop tick before trading halts |
 | `staleness_edge_bump` | `0.02` | Edge reduction applied to stale-data signals |
 | `cold_start_hours` | `72` | Hours of history required before any order is placed |
-| `max_open_per_token` | `1` | Maximum concurrent open orders per token |
 
 #### Feature Flags
 
@@ -1228,34 +1227,14 @@ The app provides 5 pages accessible via the sidebar:
 
 ## 15. Offline Scripts
 
-### `scripts/batch_download_zarr.py` °™ `BatchZarrDownloader`
+### `scripts/batch_download_hrrr_f01.py` / `BatchHrrrF01Downloader`
 
-Bulk-downloads historical HRRR Zarr data for all init cycles in a date range.
+Schedules historical canonical HRRR f01 acquisition through the project forecast-source interface. It owns skip/resume, bounded concurrency, progress, cleaning, and ParquetStore writes; `data/forecast/` owns network protocols.
 
-**Constructor:**
-
-| Parameter | Default | Description |
-|---|---|---|
-| `store` | required | `ParquetStore` instance |
-| `station_id` | `"KLGA"` | Key for store sub-directory |
-| `row` | 698 | HRRR grid row |
-| `col` | 1556 | HRRR grid column |
-| `max_workers` | 12 | Number of parallel HTTP threads |
-| `save_every` | 24 | Checkpoint to disk every N inits |
-
-**`run(start_date, end_date) -> int`**
-
-- Automatically resumes from the last downloaded init (reads existing store).
-- Prints progress every 10 inits with rate and ETA estimate.
-- Returns total new rows written.
-
-**CLI:**
 ```bash
-python3 -m scripts.batch_download_zarr --start 2025-12-01 --end 2026-02-25 \
-    --station KLGA --row 698 --col 1556 --workers 12
+python3 -m scripts.batch_download_hrrr_f01 --start 2025-12-01 --end 2026-02-25 \
+    --station KLGA --workers 4
 ```
-
-**Performance:** ~30®C60 minutes for a 3-month range at `max_workers=12`.
 
 ### `scripts/batch_download_iem.py` °™ `BatchIemDownloader`
 
@@ -1282,59 +1261,19 @@ python3 -m scripts.batch_download_iem --start 2025-12-01 --end 2026-02-25 \
     --station LGA --network NY_ASOS --store-id KLGA
 ```
 
-### `scripts/train_tft.py` °™ `TftTrainer`
+### `scripts/train_tft.py` / Training Factory
 
-Trains the TFT model from the downloaded ParquetStore data and publishes to `ModelRegistry`.
+Trains an inactive TFT candidate from one audited training workspace. Training requires `audit_summary.json` with `ready=true`; model activation is not available from this command.
 
-**Constructor:**
-
-| Parameter | Type | Description |
-|---|---|---|
-| `store` | `ParquetStore` | Source of 72-step merged dataset |
-| `registry` | `ModelRegistry` | Target for checkpoint publication |
-| `output_dir` | `Path` (optional) | Directory for Lightning checkpoints |
-
-**`run(station_id, version, start, end) -> dict`**
-
-Full training workflow:
-1. Load data from ParquetStore for the given time range.
-2. Apply feature engineering (`_prepare_df()`): K°˙C, wind merging, log1p, residual target.
-3. Split into train/val/test by `split` column.
-4. Winsorise training target (`|temp_error| > 8°„C` clipped).
-5. Build `TimeSeriesDataSet` and `DataLoader` objects.
-6. Instantiate `TemporalFusionTransformer` (32 hidden units, 4 attention heads).
-7. Train with `EarlyStopping` (patience=2, min_delta=5e-4) + `ModelCheckpoint`.
-8. Evaluate test MAE on median quantile.
-9. Publish best checkpoint to registry.
-10. Return results dict.
-
-**Result dict keys:** `version`, `best_val_loss`, `epochs_run`, `checkpoint_path`, `train_mae`, `test_mae`.
-
-**CLI:**
 ```bash
 python3 -m scripts.train_tft \
-    --station KLGA --version v20260325 \
-    --start 2025-09-01 --end 2026-02-28
+    --run-dir runs/klga_run01 \
+    --station KLGA \
+    --version tft_klga_try01 \
+    --experiment-config experiments/tft_klga_try01.json
 ```
 
-**Training hyperparameters (reference Run-21):**
-
-| Parameter | Value |
-|---|---|
-| `hidden_size` | 32 |
-| `attention_head_size` | 4 |
-| `dropout` | 0.20 |
-| `hidden_continuous_size` | 16 |
-| `learning_rate` | 5e-4 |
-| `weight_decay` | 1e-3 |
-| `quantiles` | [0.10, 0.50, 0.90] |
-| `max_epochs` | 20 |
-| `early_stop_patience` | 2 |
-| `target_winsor` | 8.0°„C |
-| `encoder_length` | 72 |
-| `prediction_length` | 48 |
-
----
+See `docs/training-factory-runbook.md` for prepare, audit, package, import, and promotion commands.
 
 ## 16. Module I/O Reference
 
@@ -1354,7 +1293,7 @@ python3 -m scripts.train_tft \
 | `EventLifecycle.advance()` | `event_dict`, `now_utc` | `str` (new status) |
 | `BacktestEngine.run()` | `start_date`, `end_date`, `station` | `pd.DataFrame` (19-column results) |
 | `BacktestAnalysis.summary()` | `threshold` | `dict` (P&L metrics, Brier scores) |
-| `BatchZarrDownloader.run()` | `start_date`, `end_date` | `int` (rows written) |
+| `BatchHrrrF01Downloader.run()` | `start_date`, `end_date` | `int` (rows written) |
 | `BatchIemDownloader.run()` | `start_date`, `end_date`, `station`, `network` | `int` (rows written) |
 | `TftTrainer.run()` | `station_id`, `version` | `dict` (training results) |
 
@@ -1388,7 +1327,7 @@ POLYWEATHER_DB=/var/data/polyweather.db streamlit run ui/app.py
 
 ```bash
 # HRRR Zarr (3-month range, 12 workers)
-python3 -m scripts.batch_download_zarr \
+python3 -m scripts.batch_download_hrrr_f01 \
     --start 2025-12-01 --end 2026-02-28 \
     --station KLGA --workers 12
 
@@ -1402,9 +1341,12 @@ python3 -m scripts.batch_download_iem \
 
 ```bash
 python3 -m scripts.train_tft \
+    --run-dir runs/klga_run01 \
     --station KLGA \
     --version v20260325_run01 \
-    --start 2025-09-01 --end 2026-02-28
+    --train 2025-09-07:2026-01-31 \
+    --val 2026-02-01:2026-02-14 \
+    --test 2026-02-15:2026-02-28
 ```
 
 ### Verify installation

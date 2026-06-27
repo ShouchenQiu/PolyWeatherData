@@ -15,14 +15,9 @@ Threshold: min_edge = 0.04 (configurable via Settings.min_edge)
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from core.pricing.quote import compute_quote
 from core.strategy.base import BaseStrategy
 from core.types import DirectionalSignal
-
-if TYPE_CHECKING:
-    pass
 
 
 class EdgeStrategy(BaseStrategy):

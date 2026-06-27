@@ -29,8 +29,8 @@ from data.clob.orderbook import OrderbookFetcher
 from data.storage.parquet_store import ParquetStore
 from db.schema import DbClient
 from events.discovery import EventDiscovery
-from scripts.batch_download_iem import BatchIemDownloader
-from scripts.batch_download_zarr import BatchZarrDownloader
+from training.downloaders.hrrr import BatchHrrrF01Downloader
+from training.downloaders.iem import BatchIemDownloader
 
 _TABLES = (
     "stations",
@@ -57,7 +57,7 @@ def seed_demo(
     skip_hrrr: bool = False,
     skip_iem: bool = False,
     discovery_cls: Any = EventDiscovery,
-    zarr_downloader_cls: Any = BatchZarrDownloader,
+    hrrr_downloader_cls: Any = BatchHrrrF01Downloader,
     iem_downloader_cls: Any = BatchIemDownloader,
     public_client_cls: Any | None = None,
 ) -> dict:
@@ -129,13 +129,17 @@ def seed_demo(
             timings["hrrr"] = _timing(0.0, 0, 0)
         else:
             t0 = time.perf_counter()
-            zarr = zarr_downloader_cls(
+            hrrr_downloader = hrrr_downloader_cls(
                 hrrr_store,
                 station_config=station,
                 max_workers=1,
             )
             hrrr_init_hours = None if init_hour is None else [init_hour]
-            hrrr_written = zarr.run(day, day, init_hours=hrrr_init_hours)
+            hrrr_written = hrrr_downloader.run(
+                day,
+                day,
+                init_hours=hrrr_init_hours,
+            )
             timings["hrrr"] = _timing(time.perf_counter() - t0, hrrr_written, 0)
 
         if skip_iem:

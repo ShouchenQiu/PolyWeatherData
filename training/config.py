@@ -1,4 +1,4 @@
-"""Training experiment configuration for reproducible TFT runs."""
+"""Experiment configuration for reproducible training-factory runs."""
 from __future__ import annotations
 
 import hashlib

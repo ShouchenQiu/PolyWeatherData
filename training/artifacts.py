@@ -11,7 +11,7 @@ from typing import Any
 import pandas as pd
 
 from model.features import TARGET
-from model.training.config import TrainingExperimentConfig
+from training.config import TrainingExperimentConfig
 
 
 def write_training_artifacts(

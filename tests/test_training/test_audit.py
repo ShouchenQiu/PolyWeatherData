@@ -4,10 +4,10 @@ import pandas as pd
 
 from data.storage.parquet_store import ParquetStore
 from model.features import TFT_KNOWN_REALS
-from scripts.audit_training_data import audit_training_readiness
-from scripts.audit_training_data import audit_weather_backfill
-from scripts.audit_weather_backfill import (
-    audit_training_readiness as compat_audit_training_readiness,
+from training.audit import (
+    audit_training_readiness,
+    audit_weather_backfill,
+    audit_workspace,
 )
 
 
@@ -123,5 +123,21 @@ def test_audit_training_readiness_reports_hash_samples_and_feature_order(tmp_pat
     assert summary["feature_list_and_order"]["target"] == "temp_error"
 
 
-def test_legacy_audit_weather_backfill_module_reexports_training_readiness():
-    assert compat_audit_training_readiness is audit_training_readiness
+def test_audit_workspace_writes_failed_evidence(tmp_path):
+    run_dir = tmp_path / "run"
+    (run_dir / "data_store").mkdir(parents=True)
+
+    result = audit_workspace(
+        run_dir,
+        "KLGA",
+        {
+            "train": ("2026-01-01", "2026-01-01"),
+            "val": ("2026-01-02", "2026-01-02"),
+            "test": ("2026-01-03", "2026-01-03"),
+        },
+        audit_fn=lambda **_kwargs: {"ready": False, "failures": ["missing"]},
+    )
+
+    assert result["status"] == "audit_failed"
+    assert (run_dir / "audit_summary.json").exists()
+    assert (run_dir / "failed_audit_summary.json").exists()

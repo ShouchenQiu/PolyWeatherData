@@ -154,13 +154,13 @@ def test_tft_unknown_reals_matches_model_tft_unknown_reals() -> None:
 
 def test_train_tft_known_reals_matches_tft_contract() -> None:
     from model.features import TFT_KNOWN_REALS
-    from scripts.train_tft import _KNOWN_REALS
+    from training.trainer import _KNOWN_REALS
     assert _KNOWN_REALS == TFT_KNOWN_REALS
 
 
 def test_train_tft_unknown_reals_matches_tft_contract() -> None:
     from model.features import TFT_UNKNOWN_REALS
-    from scripts.train_tft import _UNKNOWN_REALS
+    from training.trainer import _UNKNOWN_REALS
     assert _UNKNOWN_REALS == TFT_UNKNOWN_REALS
 
 

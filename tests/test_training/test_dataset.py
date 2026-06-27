@@ -6,7 +6,7 @@ from config.stations import STATIONS
 from config.settings import Settings
 from data.manager import DataManager
 from data.storage.parquet_store import ParquetStore
-from model.training_data import TrainingDatasetBuilder, TrainingDecoderCache
+from training.dataset import TrainingDatasetBuilder, TrainingDecoderCache
 
 
 class FakeDecoderSource:
@@ -202,6 +202,29 @@ def test_decoder_cache_hit_does_not_fetch(tmp_path):
     pd.testing.assert_frame_equal(first, second)
 
 
+def test_decoder_cache_hit_does_not_initialize_download_sources(tmp_path):
+    cache = TrainingDecoderCache(tmp_path)
+    station = STATIONS["KLGA"]
+    init = pd.Timestamp("2026-01-01 00:00:00", tz="UTC")
+    rows = []
+    for fxx in range(1, 49):
+        rows.append(
+            {
+                "init_time": init,
+                "fxx": fxx,
+                "valid_time": init + pd.Timedelta(hours=fxx),
+                "TMP_2m": float(fxx),
+            }
+        )
+    pd.DataFrame(rows).to_parquet(cache.path_for("KLGA", init), index=False)
+
+    result = cache.get(station, init)
+
+    assert len(result) == 48
+    assert cache.source is None
+    assert cache.fallback_source is None
+
+
 def test_decoder_cache_monthly_file_holds_multiple_inits(tmp_path):
     source = FakeDecoderSource()
     cache = TrainingDecoderCache(tmp_path, source=source)
@@ -296,10 +319,10 @@ def test_decoder_cache_prewarm_warms_major_dependencies_for_offhour(tmp_path):
     summary = cache.prewarm(station, [offhour], workers=1)
 
     assert source.called_inits == [
-        pd.Timestamp("2025-12-31 18:00:00", tz="UTC"),
         pd.Timestamp("2026-01-01 00:00:00", tz="UTC"),
         offhour,
     ]
+    assert summary["warm_requested_inits"] == 1
     assert summary["fetched_inits"] == 1
     assert summary["rows_written"] == 48
 

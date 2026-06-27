@@ -428,6 +428,36 @@ def test_non_major_native_fxx_range_does_not_trigger_splice():
     assert list(args[1]) == [1]
 
 
+def test_non_major_full_window_fetches_only_native_and_nearest_major():
+    """The prior-prior MAJOR run cannot extend the decoder tail."""
+    src = HrrrS3Source()
+    init = pd.Timestamp("2026-01-01 03:00", tz="UTC")
+    calls: list[pd.Timestamp] = []
+
+    def fake_fetch(init_time, fxx_range, stations):
+        init_utc = pd.Timestamp(init_time).tz_convert("UTC")
+        calls.append(init_utc)
+        rows = [
+            {
+                "init_time": init_utc,
+                "fxx": fxx,
+                "valid_time": init_utc + pd.Timedelta(hours=fxx),
+                "TMP_2m": 273.15 + fxx,
+            }
+            for fxx in fxx_range
+        ]
+        return {"KLGA": pd.DataFrame(rows)}
+
+    with patch.object(src, "_fetch_all_stations", side_effect=fake_fetch):
+        result = src.fetch(init, range(0, 49), _STATION)
+
+    assert len(result["KLGA"]) == 49
+    assert calls == [
+        init,
+        pd.Timestamp("2026-01-01 00:00", tz="UTC"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Unit: HRRR_SEARCHES covers all 36 data columns
 # ---------------------------------------------------------------------------

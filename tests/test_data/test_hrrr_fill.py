@@ -1,4 +1,4 @@
-"""Tests for HrrrFill -- valid_time splice and tail-gap fallback."""
+"""Tests for HrrrFill valid-time splicing and bounded tail extrapolation."""
 from __future__ import annotations
 
 import pandas as pd
@@ -60,6 +60,17 @@ def test_fill_returns_48_fxx_rows():
     assert list(result["fxx"]) == list(range(49))
 
 
+def test_fill_rejects_prior_prior_major_input():
+    """Only the nearest prior MAJOR run belongs to the fill contract."""
+    fill = HrrrFill()
+    non_major = _make_df("2026-01-01 03:00", range(0, 19))
+    nearest = _make_df("2026-01-01 00:00", range(0, 49))
+    prior_prior = _make_df("2025-12-31 18:00", range(0, 49))
+
+    with pytest.raises(TypeError):
+        fill.fill(non_major, nearest, prior_prior)
+
+
 def test_fill_prefers_non_major_for_overlap():
     """valid_times in both sources: non_major data is used."""
     fill = HrrrFill()
@@ -106,40 +117,8 @@ def test_fill_valid_time_continuous():
 
 
 # ---------------------------------------------------------------------------
-# HrrrFill: tail-gap fallback
+# HrrrFill: bounded tail extrapolation
 # ---------------------------------------------------------------------------
-
-def test_fill_uses_prior_major_for_uncovered_tail(caplog):
-    """When nearest_major does not cover a tail valid_time, prior_major is used."""
-    fill = HrrrFill()
-    init = pd.Timestamp("2026-01-01 03:00", tz="UTC")
-    non_major = _make_df("2026-01-01 03:00", range(0, 19), col_val=100.0)
-    # nearest major only covers fxx 0-43 (missing fxx 44-48 from 00Z POV)
-    nearest   = _make_df("2026-01-01 00:00", range(0, 44), col_val=2.0)
-    # prior major (2025-12-31 18Z) covers all needed valid_times
-    prior     = _make_df("2025-12-31 18:00", range(0, 55), col_val=3.0)
-    result = fill.fill(non_major, nearest, prior)
-    # fxx 48 of 03Z init = valid_time 03Z+48h = 2026-01-03 03Z
-    # Not in nearest (which only goes to 2026-01-02 19Z from 00Z+43h)
-    # Should come from prior_major
-    assert len(result) == 49
-
-
-def test_fill_tail_gap_logs_warning():
-    """WARNING is logged when prior_major is used for tail gap."""
-    from loguru import logger
-    messages: list[str] = []
-    sink_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
-    try:
-        fill = HrrrFill()
-        non_major = _make_df("2026-01-01 03:00", range(0, 19))
-        nearest   = _make_df("2026-01-01 00:00", range(0, 10))   # very short -> gaps guaranteed
-        prior     = _make_df("2025-12-31 18:00", range(0, 55), col_val=3.0)
-        fill.fill(non_major, nearest, prior)
-    finally:
-        logger.remove(sink_id)
-    assert any("tail gap" in m.lower() for m in messages)
-
 
 def test_fill_no_warning_when_nearest_major_covers_all():
     """No WARNING when nearest_major has all required valid_times."""
@@ -161,21 +140,6 @@ def test_fill_empty_non_major_returns_empty():
     fill = HrrrFill()
     result = fill.fill(pd.DataFrame(), _make_df("2026-01-01 00:00", range(0, 49)))
     assert result.empty
-
-
-def test_fill_prior_major_data_appears_in_tail():
-    """Values for tail valid_times genuinely come from prior_major (not NaN)."""
-    fill = HrrrFill()
-    # nearest only covers 00Z fxx 0-3; prior covers much more with col_val=99.0
-    non_major = _make_df("2026-01-01 03:00", range(0, 19), col_val=1.0)
-    nearest   = _make_df("2026-01-01 00:00", range(0, 4),  col_val=2.0)
-    prior     = _make_df("2025-12-31 18:00", range(0, 55), col_val=99.0)
-    result = fill.fill(non_major, nearest, prior)
-    # fxx 19 of 03Z init = valid_time 2026-01-01 22Z
-    # Not in non_major (ends at fxx 18 = 21Z), not in nearest (ends at 03Z).
-    # prior (18Z + 28h = 22Z) should fill it with 99.0 + 28*0.01
-    fxx19_row = result[result["fxx"] == 19].iloc[0]
-    assert fxx19_row["TMP_2m"] == pytest.approx(99.0 + 28 * 0.01, abs=0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -325,24 +289,3 @@ def test_fill_column_union_includes_major_only_cols():
     # Tail row fxx=25 should have non-NaN DPT_2m (filled from nearest_major)
     fxx25_dpt = result[result["fxx"] == 25].iloc[0]["DPT_2m"]
     assert not pd.isna(fxx25_dpt)
-
-
-def test_fill_warning_fires_when_prior_used_not_absent():
-    """WARNING fires because prior fills a valid_time, not because nothing fills it."""
-    from loguru import logger
-    messages: list[str] = []
-    sink_id = logger.add(lambda msg: messages.append(msg), level="WARNING")
-    try:
-        fill = HrrrFill()
-        # nearest only covers 00Z fxx 0-3; prior covers the tail with real values
-        non_major = _make_df("2026-01-01 03:00", range(0, 19), col_val=1.0)
-        nearest   = _make_df("2026-01-01 00:00", range(0, 4),  col_val=2.0)
-        prior     = _make_df("2025-12-31 18:00", range(0, 55), col_val=99.0)
-        result = fill.fill(non_major, nearest, prior)
-    finally:
-        logger.remove(sink_id)
-    # prior DID fill some tail rows, so warning must fire
-    assert any("tail gap" in m.lower() for m in messages)
-    # and those rows have actual values (not NaN)
-    fxx19_val = result[result["fxx"] == 19].iloc[0]["TMP_2m"]
-    assert not pd.isna(fxx19_val)

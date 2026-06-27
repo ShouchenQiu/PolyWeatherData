@@ -5,8 +5,7 @@ import tarfile
 from pathlib import Path
 
 from db.schema import DbClient
-from scripts.import_candidate_model import import_candidate_model
-from scripts.promote_model_version import promote_model_version
+from model.store.operations import import_candidate_model, promote_model_version
 
 
 def _make_candidate_package(tmp_path: Path, version: str = "candidate_v1") -> Path:

@@ -1,18 +1,15 @@
-"""HrrrFill: splice non-MAJOR 18h HRRR runs to 48h using a prior MAJOR-hour run.
+"""Splice non-MAJOR 18h HRRR runs to 48h using the nearest MAJOR run.
 
 Non-MAJOR init_times (03Z, 09Z, 15Z, 21Z) only produce 18h of forecast.
 HrrrFill extends these to 48h by aligning on valid_time against the nearest
 prior MAJOR-hour run (00Z, 06Z, 12Z, 18Z) which covers 0-48 fxx.
 
 For valid_times in the tail that are not covered by the nearest MAJOR run
-(up to a 6h gap in the worst case), HrrrFill falls back to the MAJOR-hour
-before that and logs a WARNING.  [ADR-0005]
-
-For valid_times not covered by any MAJOR run, HrrrFill linearly extrapolates
-from the last aligned value.  Extrapolation is capped at 5 hours, matching the
-worst-case HRRR off-hour tail needed to reach f48; beyond that a RuntimeError
-is raised.  Extrapolated rows are flagged with
-is_extrapolated=True.
+(up to 5h in the worst case), HrrrFill linearly extrapolates from the last two
+aligned values.  An earlier MAJOR run ends earlier and cannot cover this tail,
+so it is deliberately not consulted.  Extrapolation beyond 5h raises
+RuntimeError.  Extrapolated rows are flagged with ``is_extrapolated=True``.
+[ADR-0012]
 """
 from __future__ import annotations
 
@@ -61,21 +58,19 @@ def _vt_index(df: pd.DataFrame, source_name: str = "source") -> dict:
 
 
 class HrrrFill:
-    """Splice a non-MAJOR HRRR run to 48h using prior MAJOR-hour runs.
+    """Splice a non-MAJOR HRRR run to 48h using its nearest prior MAJOR run.
 
     Usage
     -----
     fill = HrrrFill()
-    full_df = fill.fill(non_major_df, nearest_major_df, prior_major_df)
+    full_df = fill.fill(non_major_df, nearest_major_df)
 
     The returned DataFrame has fxx 0..48 rows for the non-major init_time,
     using:
         1. non_major_df  for any matching valid_time (highest priority)
         2. nearest_major_df for tail valid_times not in non_major_df
-        3. prior_major_df for tail valid_times not in nearest_major_df
-           (logs WARNING when this fallback is used)
-        4. Linear extrapolation for any remaining uncovered valid_times
-           (capped at 3 hours; beyond that raises RuntimeError)
+        3. Linear extrapolation for the final uncovered valid_times
+           (capped at 5 hours; beyond that raises RuntimeError)
 
     All DataFrames must have a ``valid_time`` column (UTC-aware timestamps).
     The ``init_time`` and ``fxx`` columns in the output are recomputed to
@@ -86,7 +81,6 @@ class HrrrFill:
         self,
         non_major_df: pd.DataFrame,
         nearest_major_df: pd.DataFrame,
-        prior_major_df: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
         """Fill a non-MAJOR run to 48h and return the spliced DataFrame.
 
@@ -97,9 +91,6 @@ class HrrrFill:
             ``init_time`` and ``valid_time`` columns.
         nearest_major_df:
             DataFrame for the nearest prior MAJOR-hour run (fxx 0..48).
-        prior_major_df:
-            DataFrame for the MAJOR-hour before the nearest one.  Used when
-            nearest_major_df does not cover all tail valid_times.
 
         Returns
         -------
@@ -129,11 +120,6 @@ class HrrrFill:
 
         nm_idx  = _vt_index(non_major_df,    "non_major")
         maj_idx = _vt_index(nearest_major_df, "nearest_major")
-        pri_idx = (
-            _vt_index(prior_major_df, "prior_major")
-            if prior_major_df is not None and not prior_major_df.empty
-            else {}
-        )
 
         # Output column set: union of non_major and nearest_major columns,
         # excluding metadata columns that are recomputed per row.
@@ -141,7 +127,6 @@ class HrrrFill:
         data_cols = [c for c in all_source_cols if c not in _META_COLS]
 
         rows: list[dict] = []
-        used_prior = False
 
         # State for linear extrapolation
         last_aligned: dict | None = None
@@ -164,13 +149,6 @@ class HrrrFill:
                 prev_aligned = last_aligned
                 last_aligned = src_row
                 extrap_steps = 0
-            elif pri_idx.get(vt) is not None:
-                src_row = pri_idx[vt]
-                is_extrap = False
-                used_prior = True
-                prev_aligned = last_aligned
-                last_aligned = src_row
-                extrap_steps = 0
             else:
                 # No source covers this valid_time -- linear extrapolation
                 extrap_steps += 1
@@ -178,7 +156,7 @@ class HrrrFill:
                     raise RuntimeError(
                         f"HrrrFill: tail gap exceeds {_MAX_EXTRAP_HOURS}-hour cap "
                         f"for init={init_utc}; "
-                        f"fxx={fxx} has no coverage from any MAJOR run"
+                        f"fxx={fxx} has no coverage from the nearest MAJOR run"
                     )
                 src_row = None
                 is_extrap = True
@@ -212,11 +190,5 @@ class HrrrFill:
                     row[col] = float("nan")
 
             rows.append(row)
-
-        if used_prior:
-            logger.warning(
-                "HrrrFill: tail gap for init={} filled using prior MAJOR-hour run",
-                init_utc,
-            )
 
         return pd.DataFrame(rows)

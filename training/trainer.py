@@ -9,55 +9,35 @@ or torch-lightning is not installed, so that the module can always be
 imported even in lightweight environments.
 
 Usage (CLI):
-    python3 -m scripts.train_tft --data-store data_store --model-store model_store
+    python3 -m scripts.train_tft --run-dir runs/example --version candidate-v1
 
 Usage (API):
-    from model.training.trainer import TftTrainer
+    from training.trainer import TftTrainer
     trainer = TftTrainer(store, registry)
     trainer.run(station_id="KLGA", version="v1")
 """
 from __future__ import annotations
 
-import argparse
-import json
 import logging
 import pickle
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import pandas as pd
 
 from config.settings import Settings
 from config.stations import STATIONS
 from model.features import TARGET, TFT_KNOWN_REALS, TFT_UNKNOWN_REALS
-from model.training.artifacts import write_training_artifacts
-from model.training.config import ModelConfig, TrainerConfig, TrainingExperimentConfig
+from training.artifacts import write_training_artifacts
+from training.config import ModelConfig, TrainerConfig, TrainingExperimentConfig
+from training.workspace import TrainingWorkspace
 
 if TYPE_CHECKING:
     from data.storage.parquet_store import ParquetStore
     from model.store.registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# TFT hyper-parameters (matching the reference run_21 configuration)
-# ---------------------------------------------------------------------------
-_HIDDEN_SIZE            = 32
-_ATTENTION_HEAD_SIZE    = 4
-_DROPOUT                = 0.20
-_HIDDEN_CONTINUOUS_SIZE = 16
-_LEARNING_RATE          = 5e-4
-_REDUCE_LR_PATIENCE     = 3
-_WEIGHT_DECAY           = 1e-3
-_QUANTILES              = [0.1, 0.5, 0.9]
-_BATCH_SIZE             = 32
-_MAX_EPOCHS             = 20
-_EARLY_STOP_PATIENCE    = 2
-_MIN_EPOCHS             = 5
-_TARGET_WINSOR          = 8.0
-_MAX_ENCODER_LENGTH     = 72
-_MAX_PREDICTION_LENGTH  = 48
 
 _TARGET      = TARGET
 _GROUP_IDS   = ["init_time_str"]
@@ -66,6 +46,115 @@ _STATIC_CATS = ["Node_ID"]
 _KNOWN_REALS: list[str] = TFT_KNOWN_REALS
 
 _UNKNOWN_REALS: list[str] = TFT_UNKNOWN_REALS
+
+
+def train_workspace(
+    run_dir: Path | str,
+    station_id: str,
+    version: str,
+    split_ranges: dict[str, tuple[str, str] | list[str]] | None = None,
+    experiment_config: Path | str | None = None,
+    min_epochs: int = 1,
+    max_epochs: int = 1,
+    batch_size: int = 16,
+    seed: int = 42,
+    deterministic: bool = True,
+    precision: str = "32",
+    num_workers: int = 0,
+    train_fn: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Train one audited workspace and publish a non-active candidate."""
+    workspace = TrainingWorkspace(run_dir)
+    workspace.require_ready_audit()
+    workspace.ensure()
+    started_at = datetime.now(timezone.utc).isoformat()
+    train = train_fn or _train_candidate
+    train_result = train(
+        workspace=workspace,
+        station_id=station_id,
+        version=version,
+        split_ranges=split_ranges,
+        experiment_config=experiment_config,
+        min_epochs=min_epochs,
+        max_epochs=max_epochs,
+        batch_size=batch_size,
+        seed=seed,
+        deterministic=deterministic,
+        precision=precision,
+        num_workers=num_workers,
+    )
+    workspace.write_json(workspace.run_dir / "train_result.json", train_result)
+    result = {
+        "status": "trained",
+        "station": station_id,
+        "version": version,
+        "split_ranges": split_ranges,
+        "train_result": train_result,
+        "started_at": started_at,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+    }
+    workspace.record_stage("train", result)
+    return result
+
+
+def _train_candidate(**kwargs: Any) -> dict[str, Any]:
+    from data.manager import DataManager
+    from data.storage.parquet_store import ParquetStore
+    from db.schema import DbClient
+    from model.store.registry import ModelRegistry
+    from training.dataset import TrainingDecoderCache
+
+    workspace: TrainingWorkspace = kwargs["workspace"]
+    settings = Settings(
+        data_store_dir=workspace.data_store_dir,
+        model_store_dir=workspace.model_store_dir,
+    )
+    experiment = (
+        TrainingExperimentConfig.from_json(kwargs["experiment_config"])
+        if kwargs.get("experiment_config")
+        else None
+    )
+    if experiment is not None:
+        experiment.apply_to_settings(settings)
+    else:
+        split_ranges = kwargs.get("split_ranges")
+        if not split_ranges:
+            raise ValueError(
+                "training requires --experiment-config or train/val/test ranges"
+            )
+        settings.train_start, settings.train_end = split_ranges["train"]
+        settings.val_start, settings.val_end = split_ranges["val"]
+        settings.test_start, settings.test_end = split_ranges["test"]
+        settings.tft_min_epochs = int(kwargs["min_epochs"])
+        settings.tft_max_epochs = int(kwargs["max_epochs"])
+        settings.tft_batch_size = int(kwargs["batch_size"])
+
+    forecast_store = ParquetStore(settings.forecast_store_dir)
+    obs_store = ParquetStore(settings.obs_store_dir)
+    data_manager = DataManager([], [], forecast_store, obs_store, settings=settings)
+    decoder_cache = TrainingDecoderCache(settings.training_decoder_cache_dir)
+    db = DbClient(str(workspace.db_path))
+    try:
+        trainer = TftTrainer(
+            forecast_store,
+            ModelRegistry(settings.model_store_dir, db),
+            output_dir=workspace.checkpoints_dir,
+            settings=settings,
+            data_manager=data_manager,
+            decoder_cache=decoder_cache,
+            station_config=STATIONS[kwargs["station_id"]],
+            random_seed=kwargs["seed"],
+            torch_deterministic=kwargs["deterministic"],
+            precision=kwargs["precision"],
+            num_workers=kwargs["num_workers"],
+            experiment_config=experiment,
+        )
+        return trainer.run(
+            station_id=kwargs["station_id"],
+            version=kwargs["version"],
+        )
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +188,6 @@ class TftTrainer:
         torch_deterministic: bool = True,
         precision: str | int = 32,
         num_workers: int = 0,
-        activate_model: bool = True,
         experiment_config: TrainingExperimentConfig | None = None,
         gradient_clip_val: float = 0.1,
     ) -> None:
@@ -128,14 +216,13 @@ class TftTrainer:
             experiment_config.trainer.num_workers
             if experiment_config is not None else num_workers
         )
-        self._activate_model = bool(activate_model)
         self._gradient_clip_val = float(
             experiment_config.trainer.gradient_clip_val
             if experiment_config is not None else gradient_clip_val
         )
         self._experiment_config = experiment_config or self._config_from_current_settings(
             station_id=getattr(self._station_config, "station_id", "KLGA"),
-            runtime_profile="legacy_cli",
+            runtime_profile="inline_settings",
         )
         self._out_dir   = Path(output_dir) if output_dir else Path("checkpoints")
         self._out_dir.mkdir(parents=True, exist_ok=True)
@@ -349,7 +436,7 @@ class TftTrainer:
             ckpt_path    = best_ckpt,
             metrics      = metrics,
             training_dataset_pkl = training_dataset_pkl,
-            activate=self._activate_model,
+            activate=False,
             extra_artifacts=extra_artifacts,
         )
         logger.info("TftTrainer finished: %s", result)
@@ -371,7 +458,7 @@ class TftTrainer:
         if df.empty:
             raise ValueError(
                 f"No data found for station {station_id!r} in range {start}..{end}. "
-                "Run scripts.run_remote_training download/audit first."
+                "Run the prepare and audit stages first."
             )
         return df
 
@@ -383,7 +470,7 @@ class TftTrainer:
                     "data_manager and decoder_cache. Legacy split-column "
                     "training data is no longer supported."
                 )
-            from model.training_data import TrainingDatasetBuilder
+            from training.dataset import TrainingDatasetBuilder
             self._dataset_builder = TrainingDatasetBuilder(
                 self._data_mgr,
                 self._decoder_cache,
@@ -484,132 +571,3 @@ class TftTrainer:
             ),
             runtime_profile=runtime_profile,
         )
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
-def _settings_from_cli_args(args: Any) -> Settings:
-    """Build Settings from CLI overrides while preserving production defaults."""
-    smoke_summary_path = getattr(args, "smoke_summary", None)
-    smoke_summary: dict[str, Any] = {}
-    if smoke_summary_path:
-        with open(smoke_summary_path, encoding="utf-8") as fh:
-            smoke_summary = json.load(fh)
-
-    data_store = getattr(args, "data_store", None)
-    if data_store is None and smoke_summary.get("data_store_dir"):
-        data_store = smoke_summary["data_store_dir"]
-
-    settings_kwargs: dict[str, Any] = {}
-    if data_store is not None:
-        settings_kwargs["data_store_dir"] = Path(data_store)
-
-    model_store = getattr(args, "model_store", None)
-    if model_store is not None:
-        settings_kwargs["model_store_dir"] = Path(model_store)
-
-    settings = Settings(**settings_kwargs)
-    experiment_path = getattr(args, "experiment_config", None)
-    experiment = (
-        TrainingExperimentConfig.from_json(experiment_path)
-        if experiment_path else None
-    )
-
-    smoke_split = smoke_summary.get("smoke_split")
-    if smoke_split and experiment is None:
-        for split_name in ("train", "val", "test"):
-            bounds = smoke_split[split_name]
-            if isinstance(bounds, dict):
-                start = bounds["start"]
-                end = bounds["end"]
-            else:
-                start, end = bounds
-            setattr(settings, f"{split_name}_start", start)
-            setattr(settings, f"{split_name}_end", end)
-
-    if experiment is not None:
-        experiment.apply_to_settings(settings)
-    else:
-        min_epochs = getattr(args, "min_epochs", None)
-        if min_epochs is not None:
-            settings.tft_min_epochs = int(min_epochs)
-        max_epochs = getattr(args, "max_epochs", None)
-        if max_epochs is not None:
-            settings.tft_max_epochs = int(max_epochs)
-        batch_size = getattr(args, "batch_size", None)
-        if batch_size is not None:
-            settings.tft_batch_size = int(batch_size)
-
-    return settings
-
-
-def _cli() -> None:
-    parser = argparse.ArgumentParser(description="Train TFT model from ParquetStore data")
-    parser.add_argument("--station",    default="KLGA",   help="Station key in ParquetStore")
-    parser.add_argument("--version",    default=None,     help="Model version string")
-    parser.add_argument("--start",      default="2000-01-01")
-    parser.add_argument("--end",        default="2100-01-01")
-    parser.add_argument("--output-dir", default="checkpoints", dest="output_dir")
-    parser.add_argument("--data-store", default=None, dest="data_store")
-    parser.add_argument("--db", default=None, dest="db")
-    parser.add_argument("--model-store", default=None, dest="model_store")
-    parser.add_argument("--smoke-summary", default=None, dest="smoke_summary")
-    parser.add_argument("--min-epochs", type=int, default=None, dest="min_epochs")
-    parser.add_argument("--max-epochs", type=int, default=None, dest="max_epochs")
-    parser.add_argument("--batch-size", type=int, default=None, dest="batch_size")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--precision", default="32")
-    parser.add_argument("--num-workers", type=int, default=0, dest="num_workers")
-    parser.add_argument("--experiment-config", default=None, dest="experiment_config")
-    parser.add_argument("--candidate-only", action="store_true", dest="candidate_only")
-    args = parser.parse_args()
-
-    from data.storage.parquet_store import ParquetStore
-    from data.manager import DataManager
-    from model.training_data import TrainingDecoderCache
-    from model.store.registry import ModelRegistry
-    from db.schema import DbClient
-
-    settings  = _settings_from_cli_args(args)
-    experiment = (
-        TrainingExperimentConfig.from_json(args.experiment_config)
-        if args.experiment_config else None
-    )
-    forecast_store = ParquetStore(settings.forecast_store_dir)
-    obs_store = ParquetStore(settings.obs_store_dir)
-    data_mgr = DataManager([], [], forecast_store, obs_store, settings=settings)
-    decoder_cache = TrainingDecoderCache(settings.training_decoder_cache_dir)
-    db_path   = Path(args.db) if args.db else settings.project_root / "polyweather.db"
-    db        = DbClient(str(db_path))
-    registry  = ModelRegistry(settings.model_store_dir, db)
-
-    trainer = TftTrainer(
-        forecast_store,
-        registry,
-        output_dir=Path(args.output_dir),
-        settings=settings,
-        data_manager=data_mgr,
-        decoder_cache=decoder_cache,
-        station_config=STATIONS[args.station],
-        random_seed=args.seed,
-        torch_deterministic=args.deterministic,
-        precision=args.precision,
-        num_workers=args.num_workers,
-        activate_model=not args.candidate_only,
-        experiment_config=experiment,
-    )
-    result  = trainer.run(
-        station_id = args.station,
-        version    = args.version,
-        start      = args.start,
-        end        = args.end,
-    )
-    print(json.dumps(result, indent=2))
-    db.close()
-
-
-if __name__ == "__main__":
-    _cli()

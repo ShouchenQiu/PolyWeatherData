@@ -17,6 +17,7 @@ from config.settings import Settings
     "min_hours_before_cutoff",
     "forecast_interval_min",
     "clob_window_min",
+    "max_open_per_token",
 ])
 def test_removed_field_absent(field):
     s = Settings()
@@ -49,10 +50,6 @@ def test_staleness_edge_bump():
 
 def test_hrrr_source_priority():
     assert Settings().hrrr_source_priority == ["s3", "nomads"]
-
-
-def test_max_open_per_token():
-    assert Settings().max_open_per_token == 1
 
 
 def test_max_exit_fraction_default():

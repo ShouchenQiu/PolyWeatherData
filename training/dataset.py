@@ -1,4 +1,4 @@
-"""Training data helpers shared by offline scripts and TFT training.
+"""Training dataset helpers shared by offline preparation and TFT training.
 
 The canonical HRRR ParquetStore remains f01-only.  This module owns
 training-only artifacts that are useful offline but must not be read by
@@ -33,6 +33,8 @@ class TrainingDecoderCache:
     def __post_init__(self) -> None:
         self.root_dir = Path(self.root_dir)
         self.root_dir.mkdir(parents=True, exist_ok=True)
+
+    def _ensure_sources(self) -> None:
         if self.source is None:
             from data.forecast.hrrr_zarr import HrrrZarrSource
 
@@ -101,6 +103,8 @@ class TrainingDecoderCache:
             "warm_completed_inits": 0,
             "warm_errors": 0,
         }
+        if pending:
+            self._ensure_sources()
         if pending and self._source_has_window_cache():
             warm_summary = self._warm_fill_dependencies(
                 station, pending, worker_count, progress
@@ -270,7 +274,6 @@ class TrainingDecoderCache:
                 continue
             nearest = nearest_prior_major(init_utc)
             major_inits.add(nearest)
-            major_inits.add(nearest - pd.Timedelta(hours=6))
 
         ordered = sorted(major_inits)
         if progress:
@@ -349,6 +352,7 @@ class TrainingDecoderCache:
         station: Any,
         init_utc: pd.Timestamp,
     ) -> tuple[pd.DataFrame, str, Exception | None, float]:
+        self._ensure_sources()
         started = time.perf_counter()
         try:
             df = self._fetch_clean_validate_from_source(
