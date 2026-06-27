@@ -285,13 +285,16 @@ workflow; prefer the training-input tarball from `john_linux`.
 Use this when the data range is new, or when a previous download had gaps:
 
 ```bash
-python -m scripts.run_remote_training download \
+env -u http_proxy -u https_proxy -u all_proxy \
+    -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+    POLYWEATHER_GRIB_PROXY=socks5://127.0.0.1:10808 \
+  python -m scripts.run_remote_training download \
   --run-root runs \
   --run-id "$RUN_ID" \
   --station "$STATION" \
   --start 2026-04-01 \
   --end 2026-06-04 \
-  --workers 12
+  --workers 4
 ```
 
 This writes:
@@ -306,6 +309,35 @@ runs/<RUN_ID>/stage_state.json
 
 This stage is safe to rerun. Existing parquet/cache files are reused where the
 underlying stores support it.
+
+On `john_linux`, keep Zarr and IEM on the host's direct network path. Route only
+GRIB index/range requests through the host-local V2Ray SOCKS endpoint by setting
+`POLYWEATHER_GRIB_PROXY`. Do not export a global proxy for this command:
+`s3fs`/`aiobotocore` Zarr access failed when the inherited SOCKS proxy was
+applied globally. Do not use the `John_Surface` address
+`192.168.31.14:10818`; downloads must remain independent of that workstation.
+
+Use `--workers 4`. Decoder and f01 preparation currently cap effective
+concurrency at four, so larger values do not increase concurrency. Prefer
+one-month ranges for new downloads. Two-month ranges are acceptable after the
+route is stable, but month-sized jobs make interruption, repair, and quality
+review easier while retaining the same skip/resume behavior.
+
+Decoder progress reports cumulative route counts:
+
+```text
+[decoder 420/796] ... errors=0 routes=zarr:416 hybrid:4 full_fallback:0
+```
+
+- `zarr`: the complete decoder window came from the direct Zarr primary.
+- `hybrid`: the current non-major init used GRIB/S3 `fxx=0..18`, then used the
+  direct Zarr nearest-major window for the tail.
+- `full_fallback`: the complete `fxx=0..48` window used the GRIB/S3 fallback.
+
+Each fallback also prints one `FALLBACK decoder` line with the init, mode,
+source classes, nearest major when applicable, compact primary error, and
+elapsed time. A fallback line is diagnostic information, not a failed init;
+`errors` and `fallback_failed_inits` determine whether repair is required.
 
 ### 3.3 Audit Only
 

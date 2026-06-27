@@ -110,6 +110,8 @@ class TrainingDecoderCache:
         fetch_started = time.perf_counter()
         zarr_success = 0
         fallback_success = 0
+        hybrid_fallback_success = 0
+        full_fallback_success = 0
         fallback_failed = 0
         zarr_timeout_count = 0
         slow_init_samples: list[dict[str, Any]] = []
@@ -128,8 +130,22 @@ class TrainingDecoderCache:
                         zarr_success += 1
                     else:
                         fallback_success += 1
+                        if source_name == "hybrid_fallback":
+                            hybrid_fallback_success += 1
+                        else:
+                            full_fallback_success += 1
                         if primary_exc is not None and _looks_like_timeout(primary_exc):
                             zarr_timeout_count += 1
+                        if progress:
+                            print(
+                                self._fallback_progress_line(
+                                    init_utc,
+                                    source_name,
+                                    primary_exc,
+                                    fetch_elapsed,
+                                ),
+                                flush=True,
+                            )
                     if fetch_elapsed >= self.slow_init_threshold_s:
                         slow_init_samples.append(
                             {
@@ -167,7 +183,10 @@ class TrainingDecoderCache:
                     print(
                         f"[decoder {completed}/{len(pending)}] "
                         f"rate={rate:.2f} init/s ETA={eta_min:.1f}m "
-                        f"errors={len(errors)}",
+                        f"errors={len(errors)} "
+                        f"routes=zarr:{zarr_success} "
+                        f"hybrid:{hybrid_fallback_success} "
+                        f"full_fallback:{full_fallback_success}",
                         flush=True,
                     )
         except BaseException:
@@ -197,6 +216,8 @@ class TrainingDecoderCache:
             "fetch_init_per_second": fetched / fetch_elapsed if fetch_elapsed > 0 else 0.0,
             "zarr_success_inits": zarr_success,
             "fallback_success_inits": fallback_success,
+            "hybrid_fallback_success_inits": hybrid_fallback_success,
+            "full_fallback_success_inits": full_fallback_success,
             "fallback_failed_inits": fallback_failed,
             "zarr_timeout_count": zarr_timeout_count,
             "slow_init_samples": slow_init_samples[:10],
@@ -204,6 +225,33 @@ class TrainingDecoderCache:
             "major_inits": sum(1 for ts in init_utcs if ts.hour in {0, 6, 12, 18}),
             "offhour_inits": sum(1 for ts in init_utcs if ts.hour not in {0, 6, 12, 18}),
         }
+
+    def _fallback_progress_line(
+        self,
+        init_utc: pd.Timestamp,
+        source_name: str,
+        primary_exc: Exception | None,
+        elapsed_seconds: float,
+    ) -> str:
+        primary_name = type(self.source).__name__
+        fallback_name = type(self.fallback_source).__name__
+        error = _compact_exception(primary_exc)
+        if source_name == "hybrid_fallback":
+            nearest_major_init = nearest_prior_major(init_utc)
+            route = (
+                f"mode=hybrid "
+                f"current={fallback_name}[fxx=0..18] "
+                f"tail={primary_name}[nearest_major={nearest_major_init}]"
+            )
+        else:
+            route = (
+                f"mode=full_fallback "
+                f"source={fallback_name}[fxx=0..48]"
+            )
+        return (
+            f"  FALLBACK decoder init={init_utc} {route} "
+            f"primary_error={error} elapsed={elapsed_seconds:.1f}s"
+        )
 
     def _source_has_window_cache(self) -> bool:
         return hasattr(self.source, "_full_window_cache")
@@ -553,3 +601,13 @@ def _to_utc(ts: pd.Timestamp) -> pd.Timestamp:
 def _looks_like_timeout(exc: BaseException) -> bool:
     text = str(exc).lower()
     return "timeout" in text or "timed out" in text
+
+
+def _compact_exception(exc: BaseException | None, limit: int = 180) -> str:
+    if exc is None:
+        return "unknown"
+    text = " ".join(str(exc).split())
+    rendered = f"{type(exc).__name__}: {text}"
+    if len(rendered) <= limit:
+        return rendered
+    return f"{rendered[:limit - 3]}..."

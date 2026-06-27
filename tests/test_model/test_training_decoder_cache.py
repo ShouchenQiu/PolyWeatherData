@@ -148,6 +148,48 @@ def test_decoder_cache_hybrid_fallback_uses_s3_native_and_primary_major(tmp_path
     assert set(stored["fxx"].astype(int)) == set(range(1, 49))
 
 
+def test_decoder_cache_progress_reports_hybrid_route(tmp_path, capsys):
+    primary = MissingOffhourForecastSource()
+    fallback = NativeOnlyFallbackSource()
+    cache = TrainingDecoderCache(tmp_path, source=primary, fallback_source=fallback)
+    init = pd.Timestamp("2026-04-28 23:00:00", tz="UTC")
+
+    summary = cache.prewarm(
+        STATIONS["KLGA"], [init], workers=1, progress=True, print_every=1
+    )
+
+    output = capsys.readouterr().out
+    assert "mode=hybrid" in output
+    assert "current=NativeOnlyFallbackSource[fxx=0..18]" in output
+    assert (
+        "tail=MissingOffhourForecastSource"
+        "[nearest_major=2026-04-28 18:00:00+00:00]"
+    ) in output
+    assert "primary_error=RuntimeError: zarr fcst store missing" in output
+    assert "routes=zarr:0 hybrid:1 full_fallback:0" in output
+    assert summary["hybrid_fallback_success_inits"] == 1
+    assert summary["full_fallback_success_inits"] == 0
+
+
+def test_decoder_cache_progress_reports_full_fallback_route(tmp_path, capsys):
+    primary = FailingDecoderSource()
+    fallback = FakeDecoderSource()
+    cache = TrainingDecoderCache(tmp_path, source=primary, fallback_source=fallback)
+    init = pd.Timestamp("2026-04-28 18:00:00", tz="UTC")
+
+    summary = cache.prewarm(
+        STATIONS["KLGA"], [init], workers=1, progress=True, print_every=1
+    )
+
+    output = capsys.readouterr().out
+    assert "mode=full_fallback" in output
+    assert "source=FakeDecoderSource[fxx=0..48]" in output
+    assert "primary_error=RuntimeError: primary zarr missing" in output
+    assert "routes=zarr:0 hybrid:0 full_fallback:1" in output
+    assert summary["hybrid_fallback_success_inits"] == 0
+    assert summary["full_fallback_success_inits"] == 1
+
+
 def test_decoder_cache_hit_does_not_fetch(tmp_path):
     source = FakeDecoderSource()
     cache = TrainingDecoderCache(tmp_path, source=source)
