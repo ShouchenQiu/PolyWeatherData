@@ -134,6 +134,13 @@ _Avoid_: import, publish
 TFT decoder samples and never read by production inference.
 _Avoid_: forecast store, production cache
 
+**decoder baseline report**: Training-workspace evidence that aligns cached HRRR
+decoder cells with canonical IEM observations and records raw-HRRR error metrics
+per cell, init, forecast hour, and UTC init month. Performance outliers are
+diagnostic and do not invalidate otherwise complete training data. Production
+inference never reads this report.
+_Avoid_: model evaluation, decoder cache, production metric
+
 **ForecastLoop tick**: The 1-hour recurring cycle: fetch HRRR+IEM, run Cleaner, run
 TFT+McSampler, write bucket probabilities to shared state.
 _Avoid_: hourly loop, prediction loop

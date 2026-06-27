@@ -96,6 +96,21 @@ class WeatherComTruthClient:
             return self._empty_frame()
         return pd.concat(parts, ignore_index=True)
 
+    def read_cached_date(
+        self,
+        station_id: str,
+        local_date: str | pd.Timestamp,
+    ) -> pd.DataFrame | None:
+        """Read one current cached local date without performing network IO."""
+        day = pd.Timestamp(local_date).date().isoformat()
+        path = self._cache_path(station_id, day)
+        if not path.exists():
+            return None
+        cached = self._read_cache(path)
+        if not self._cache_is_current(cached):
+            return None
+        return self._public_columns(cached)
+
     @classmethod
     def location_code(cls, station_id: str) -> str:
         return cls._LOCATION_CODES.get(station_id, f"{station_id}:9:US")

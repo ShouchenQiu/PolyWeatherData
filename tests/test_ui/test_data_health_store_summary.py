@@ -18,7 +18,7 @@ class _EmptyTruthClient:
     def __init__(self, *_args, **_kwargs) -> None:
         return None
 
-    def fetch_date(self, *_args, **_kwargs) -> pd.DataFrame:
+    def read_cached_date(self, *_args, **_kwargs) -> pd.DataFrame:
         return pd.DataFrame(
             columns=[
                 "station_id",
@@ -29,119 +29,8 @@ class _EmptyTruthClient:
             ]
         )
 
-
-def test_data_health_renders_parquet_store_summary(tmp_path):
-    hrrr_store = ParquetStore(tmp_path / "data_store" / "hrrr")
-    obs_store = ParquetStore(tmp_path / "data_store" / "obs")
-    hrrr_store.append(
-        "KLGA",
-        pd.DataFrame(
-            [
-                {
-                    "init_time": pd.Timestamp("2026-06-04 00:00:00", tz="UTC"),
-                    "fxx": 1,
-                    "valid_time": pd.Timestamp("2026-06-04 01:00:00", tz="UTC"),
-                    "TMP_2m": 20.0,
-                }
-            ]
-        ),
-    )
-    obs_store.append(
-        "KLGA",
-        pd.DataFrame(
-            [
-                {
-                    "valid_time": pd.Timestamp("2026-06-04 01:00:00", tz="UTC"),
-                    "raw_tmpc_tenths": 21.0,
-                }
-            ]
-        ),
-    )
-    db = DbClient(":memory:")
-
-    with ExitStack() as stack:
-        stack.enter_context(patch("streamlit.header"))
-        stack.enter_context(patch("streamlit.subheader"))
-        stack.enter_context(patch("streamlit.info"))
-        stack.enter_context(patch("ui.pages.data_health.WeatherComTruthClient", _EmptyTruthClient))
-        dataframe = stack.enter_context(patch("streamlit.dataframe"))
-        stack.enter_context(patch("streamlit.plotly_chart"))
-
-        data_health.render(db, data_store_dir=tmp_path / "data_store")
-
-    rendered_tables = [call.args[0] for call in dataframe.call_args_list]
-    rendered = next(table for table in rendered_tables if "store" in table.columns)
-    assert set(rendered["store"]) == {"hrrr", "obs"}
-    assert rendered["rows"].tolist() == [1, 1]
-
-
-def test_data_health_renders_daily_coverage_cleaning_and_seed_timing(tmp_path):
-    root = tmp_path / "data_store"
-    hrrr_store = ParquetStore(root / "hrrr")
-    obs_store = ParquetStore(root / "obs")
-    day = pd.Timestamp("2026-06-04", tz="UTC")
-    hrrr_store.append(
-        "KLGA",
-        pd.DataFrame(
-            [
-                {
-                    "init_time": day + pd.Timedelta(hours=i),
-                    "fxx": 1,
-                    "valid_time": day + pd.Timedelta(hours=i + 1),
-                    "TMP_2m": 20.0 + i,
-                    "DPT_2m": 10.0,
-                }
-                for i in range(24)
-            ]
-        ),
-    )
-    obs_store.append(
-        "KLGA",
-        pd.DataFrame(
-            [
-                {
-                    "valid_time": day + pd.Timedelta(hours=i),
-                    "raw_tmpc_tenths": 20.0,
-                    "raw_dwpc_tenths": 10.0,
-                }
-                for i in range(25)
-            ]
-        ),
-    )
-    (tmp_path / "seed_summary.json").write_text(
-        """
-        {
-          "seed_date": "2026-06-04",
-          "timings": {
-            "hrrr": {"elapsed_seconds": 10, "rows_written": 24, "errors": 0, "rows_per_second": 2.4},
-            "iem": {"elapsed_seconds": 2, "rows_written": 24, "errors": 0, "rows_per_second": 12},
-            "clob": {"elapsed_seconds": 1, "rows_written": 22, "errors": 0, "rows_per_second": 22}
-          }
-        }
-        """,
-        encoding="ascii",
-    )
-    db = DbClient(":memory:")
-
-    with ExitStack() as stack:
-        stack.enter_context(patch("streamlit.header"))
-        stack.enter_context(patch("streamlit.subheader"))
-        stack.enter_context(patch("streamlit.info"))
-        stack.enter_context(patch("ui.pages.data_health.WeatherComTruthClient", _EmptyTruthClient))
-        dataframe = stack.enter_context(patch("streamlit.dataframe"))
-        stack.enter_context(patch("streamlit.plotly_chart"))
-
-        data_health.render(db, data_store_dir=root)
-
-    rendered_tables = [call.args[0] for call in dataframe.call_args_list]
-    coverage = next(table for table in rendered_tables if "expected_rows" in table.columns)
-    assert coverage.loc[coverage["store"] == "hrrr", "expected_rows"].iloc[0] == 24
-    assert coverage.loc[coverage["store"] == "hrrr", "missing_rows"].iloc[0] == 0
-    assert coverage.loc[coverage["store"] == "obs", "actual_rows"].iloc[0] == 24
-    checks = next(table for table in rendered_tables if "check" in table.columns)
-    assert "hrrr_fxx_all_one" in checks["check"].tolist()
-    timings = next(table for table in rendered_tables if "rows_per_second" in table.columns)
-    assert timings.loc[timings["stage"] == "clob", "rows_written"].iloc[0] == 22
+    def fetch_date(self, *_args, **_kwargs) -> pd.DataFrame:
+        raise AssertionError("Data Health must not fetch Weather.com over HTTP")
 
 
 def test_temperature_comparison_frame_aligns_hrrr_f01_and_iem_obs(tmp_path):
@@ -201,6 +90,142 @@ def test_temperature_comparison_frame_empty_store_has_fixed_columns(tmp_path):
         "has_hrrr",
         "has_obs",
     ]
+
+
+def test_f01_iem_range_quality_reports_coverage_duplicates_and_null_fields(tmp_path):
+    root = tmp_path / "data_store"
+    hour = pd.Timestamp("2026-06-01 00:00", tz="UTC")
+    hrrr = pd.DataFrame(
+        [
+            {
+                "init_time": hour - pd.Timedelta(hours=1),
+                "fxx": 1,
+                "valid_time": hour,
+                "TMP_2m": value,
+            }
+            for value in (20.0, None)
+        ]
+    )
+    obs = pd.DataFrame(
+        [{
+            "valid_time": hour,
+            "raw_tmpc_tenths": 20.0,
+        }]
+    )
+    ParquetStore(root / "hrrr").append("KLGA", hrrr)
+    # Write the duplicate directly because ParquetStore correctly deduplicates it.
+    hrrr.to_parquet(root / "hrrr" / "KLGA" / "2026-Q2.parquet", index=False)
+    ParquetStore(root / "obs").append("KLGA", obs)
+
+    summary, issues = data_health._f01_iem_range_quality(
+        root,
+        "KLGA",
+        hour,
+        hour,
+    )
+
+    hrrr_summary = summary[summary["source"] == "HRRR f01"].iloc[0]
+    assert hrrr_summary["expected_hours"] == 24
+    assert hrrr_summary["actual_hours"] == 1
+    assert hrrr_summary["missing_hours"] == 23
+    assert hrrr_summary["duplicate_hours"] == 1
+    tmp_issue = issues[
+        (issues["source"] == "HRRR f01") & (issues["field"] == "TMP_2m")
+    ].iloc[0]
+    assert tmp_issue["issue"] == "null_values"
+    assert tmp_issue["null_count"] == 1
+    assert (
+        issues[
+            (issues["source"] == "IEM") & (issues["field"] == "raw_dwpc_tenths")
+        ]["issue"].iloc[0]
+        == "missing_column"
+    )
+
+
+def test_store_read_cache_reuses_unchanged_file_and_invalidates_on_change(
+    tmp_path,
+):
+    root = tmp_path / "data_store"
+    station_dir = root / "obs" / "KLGA"
+    station_dir.mkdir(parents=True)
+    path = station_dir / "2026-Q2.parquet"
+    first = pd.DataFrame(
+        [{
+            "valid_time": pd.Timestamp("2026-06-01 00:00", tz="UTC"),
+            "raw_tmpc_tenths": 20.0,
+        }]
+    )
+    first.to_parquet(path, index=False)
+
+    with patch(
+        "ui.pages.data_health.pd.read_parquet",
+        wraps=pd.read_parquet,
+    ) as read_parquet:
+        assert len(data_health._read_store(root, "obs", "KLGA")) == 1
+        assert len(data_health._read_store(root, "obs", "KLGA")) == 1
+        assert read_parquet.call_count == 1
+
+        pd.concat(
+            [
+                first,
+                pd.DataFrame(
+                    [{
+                        "valid_time": pd.Timestamp("2026-06-01 01:00", tz="UTC"),
+                        "raw_tmpc_tenths": 21.0,
+                    }]
+                ),
+            ],
+            ignore_index=True,
+        ).to_parquet(path, index=False)
+
+        assert len(data_health._read_store(root, "obs", "KLGA")) == 2
+        assert read_parquet.call_count == 2
+
+
+def test_temperature_comparison_defaults_to_last_7_days(tmp_path):
+    end = pd.Timestamp("2026-06-10", tz="UTC")
+    frame = pd.DataFrame(
+        [
+            {
+                "station_id": "KLGA",
+                "valid_hour": end - pd.Timedelta(days=i),
+                "hrrr_f01_c": 20.0,
+                "iem_obs_c": 20.0,
+                "temp_error_c": 0.0,
+                "has_hrrr": True,
+                "has_obs": True,
+            }
+            for i in range(10)
+        ]
+    )
+
+    with ExitStack() as stack:
+        selectbox = stack.enter_context(patch("streamlit.selectbox", return_value="KLGA"))
+        date_input = stack.enter_context(
+            patch("streamlit.date_input", side_effect=lambda *_args, **kwargs: kwargs["value"])
+        )
+        stack.enter_context(patch("streamlit.info"))
+        stack.enter_context(patch("streamlit.subheader"))
+        stack.enter_context(patch("streamlit.columns", return_value=[_MetricCol()] * 4))
+        stack.enter_context(patch("streamlit.plotly_chart"))
+        stack.enter_context(patch("ui.pages.data_health._render_iem_weather_truth"))
+        stack.enter_context(
+            patch(
+                "ui.pages.data_health._temperature_comparison_frame",
+                return_value=frame,
+            )
+        )
+
+        result = data_health._render_temperature_comparison(tmp_path)
+
+    assert [call.args[0] for call in selectbox.call_args_list] == ["Station"]
+    assert date_input.call_args.args[0] == "Valid dates"
+    assert date_input.call_args.kwargs["value"] == (
+        pd.Timestamp("2026-06-04").date(),
+        pd.Timestamp("2026-06-10").date(),
+    )
+    assert result.start == pd.Timestamp("2026-06-04", tz="UTC")
+    assert result.end == pd.Timestamp("2026-06-10", tz="UTC")
 
 
 def test_data_health_renders_temperature_comparison_chart(tmp_path):
@@ -346,62 +371,6 @@ def test_iem_weather_truth_figures_share_layout_and_error_colors():
     assert comparison.layout.legend.orientation == "h"
     assert "UTC; NYC local" in comparison.layout.xaxis.title.text
     assert set(error.data[0].marker.color) == {"#d62728", "#1f77b4"}
-
-
-def test_seed_timing_summary_includes_smoke_bootstrap_timing(tmp_path):
-    root = tmp_path / "data_store"
-    (tmp_path / "smoke_summary.json").write_text(
-        """
-        {
-          "timings": {
-            "iem": {"elapsed_seconds": 10, "rows_written": 100, "errors": 0, "rows_per_second": 10},
-            "hrrr_f01": {"elapsed_seconds": 20, "rows_written": 40, "errors": 1, "rows_per_second": 2}
-          }
-        }
-        """,
-        encoding="ascii",
-    )
-    (tmp_path / "seed_summary.json").write_text(
-        """
-        {
-          "timings": {
-            "hrrr": {"elapsed_seconds": 0, "rows_written": 0, "errors": 0, "rows_per_second": 0}
-          }
-        }
-        """,
-        encoding="ascii",
-    )
-
-    summary = data_health._seed_timing_summary(root)
-
-    assert set(summary["summary"]) == {"smoke_summary"}
-    smoke_iem = summary[
-        (summary["summary"] == "smoke_summary") & (summary["stage"] == "iem")
-    ].iloc[0]
-    assert smoke_iem["rows_written"] == 100
-    assert smoke_iem["rows_per_second"] == 10.0
-
-
-def test_seed_timing_summary_hides_empty_rows_and_rounds_float_columns(tmp_path):
-    root = tmp_path / "data_store"
-    (tmp_path / "seed_summary.json").write_text(
-        """
-        {
-          "seed_date": "2026-06-04",
-          "timings": {
-            "hrrr": {"elapsed_seconds": 0, "rows_written": 0, "errors": 0, "rows_per_second": 0},
-            "iem": {"elapsed_seconds": 12.3456, "rows_written": 384, "errors": 0, "rows_per_second": 31.1049}
-          }
-        }
-        """,
-        encoding="ascii",
-    )
-
-    summary = data_health._seed_timing_summary(root)
-
-    assert summary["stage"].tolist() == ["iem"]
-    assert summary["elapsed_seconds"].tolist() == [12.35]
-    assert summary["rows_per_second"].tolist() == [31.1]
 
 
 def test_data_health_renders_weather_truth_location_caption(tmp_path):
@@ -755,6 +724,45 @@ def test_iem_weather_truth_frame_joins_hourly_obs_and_computes_f_error(tmp_path)
     assert metrics["max_abs_error_f"] == 1.0
 
 
+def test_iem_weather_truth_frame_uses_independent_truth_store(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "new_run" / "data_store"
+    truth_root = tmp_path / "old_demo" / "_truth_weather_com"
+    valid_hour = pd.Timestamp("2026-06-04 01:00:00", tz="UTC")
+    temp_frame = pd.DataFrame(
+        [{
+            "station_id": "KLGA",
+            "valid_hour": valid_hour,
+            "iem_obs_c": 20.0,
+            "has_obs": True,
+        }]
+    )
+    cache_dir = truth_root / "KLGA"
+    cache_dir.mkdir(parents=True)
+    pd.DataFrame(
+        [{
+            "station_id": "KLGA",
+            "valid_time": valid_hour,
+            "valid_hour": valid_hour,
+            "weather_com_temp_f": 68.0,
+            "weather_com_temp_c": 20.0,
+            "_weather_com_alignment_version": "iem_representative_hour_v2",
+        }]
+    ).to_parquet(cache_dir / "2026-06-03.parquet", index=False)
+    monkeypatch.setenv("POLYWEATHER_TRUTH_STORE", str(truth_root))
+
+    frame, message = data_health._iem_weather_truth_frame(
+        root,
+        "KLGA",
+        temp_frame,
+    )
+
+    assert message is None
+    assert frame["weather_com_temp_f"].tolist() == [68.0]
+
+
 def test_iem_weather_truth_frame_prefers_iem_representative_weather_candidate(tmp_path):
     root = tmp_path / "data_store"
     valid_hour = pd.Timestamp("2026-05-24 12:00:00", tz="UTC")
@@ -826,6 +834,33 @@ def test_iem_weather_truth_frame_keeps_iem_rows_when_truth_fetch_empty(tmp_path,
     assert message is None
 
 
+def test_iem_weather_truth_missing_cache_is_reported_without_fetch(tmp_path, monkeypatch):
+    class CacheOnlyClient(_EmptyTruthClient):
+        def read_cached_date(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(data_health, "WeatherComTruthClient", CacheOnlyClient)
+    valid_hour = pd.Timestamp("2026-06-04 01:00", tz="UTC")
+    temp_frame = pd.DataFrame(
+        [{
+            "station_id": "KLGA",
+            "valid_hour": valid_hour,
+            "iem_obs_c": 20.0,
+            "has_obs": True,
+        }]
+    )
+
+    frame, message = data_health._iem_weather_truth_frame(
+        tmp_path / "data_store",
+        "KLGA",
+        temp_frame,
+    )
+
+    assert frame["has_weather_com"].tolist() == [False]
+    assert frame.attrs["truth_cache_dates"] == {"cached": 0, "requested": 1}
+    assert "prefetch_weather_com_truth" in message
+
+
 def test_hrrr_48h_verification_frame_defaults_to_latest_48_inits(tmp_path):
     root = tmp_path / "data_store"
     cache_dir = root / "_decoder_cache" / "KLGA"
@@ -851,6 +886,317 @@ def test_hrrr_48h_verification_frame_defaults_to_latest_48_inits(tmp_path):
     assert len(inits) == 48
     assert min(inits) == base + pd.Timedelta(hours=2)
     assert max(inits) == base + pd.Timedelta(hours=49)
+
+
+def test_hrrr_48h_latest_inits_read_only_needed_month_partitions(tmp_path):
+    root = tmp_path / "data_store"
+    cache_dir = root / "_decoder_cache" / "KLGA"
+    cache_dir.mkdir(parents=True)
+
+    def rows(first: pd.Timestamp, count: int) -> list[dict]:
+        return [
+            {
+                "init_time": first + pd.Timedelta(hours=i),
+                "fxx": fxx,
+                "valid_time": first + pd.Timedelta(hours=i + fxx),
+                "TMP_2m": 20.0,
+            }
+            for i in range(count)
+            for fxx in range(1, 49)
+        ]
+
+    pd.DataFrame(rows(pd.Timestamp("2026-01-29 00:00", tz="UTC"), 72)).to_parquet(
+        cache_dir / "2026-01.parquet",
+        index=False,
+    )
+    pd.DataFrame(rows(pd.Timestamp("2026-02-01 00:00", tz="UTC"), 24)).to_parquet(
+        cache_dir / "2026-02.parquet",
+        index=False,
+    )
+    (cache_dir / "2025-12.parquet").write_text("must not be read", encoding="ascii")
+
+    for init_limit in (48, 96):
+        frame = data_health._hrrr_48h_verification_frame(
+            root,
+            "KLGA",
+            init_limit=init_limit,
+        )
+        assert frame["init_time"].nunique() == init_limit
+        assert frame.groupby("init_time")["fxx"].count().eq(48).all()
+
+
+def test_hrrr_48h_custom_range_reads_and_filters_selected_dates(tmp_path):
+    root = tmp_path / "data_store"
+    cache_dir = root / "_decoder_cache" / "KLGA"
+    cache_dir.mkdir(parents=True)
+    base = pd.Timestamp("2026-02-01 00:00", tz="UTC")
+    rows = [
+        {
+            "init_time": base + pd.Timedelta(hours=i),
+            "fxx": fxx,
+            "valid_time": base + pd.Timedelta(hours=i + fxx),
+            "TMP_2m": 20.0,
+        }
+        for i in range(24 * 4)
+        for fxx in range(1, 49)
+    ]
+    pd.DataFrame(rows).to_parquet(cache_dir / "2026-02.parquet", index=False)
+    (cache_dir / "2026-01.parquet").write_text("must not be read", encoding="ascii")
+
+    frame = data_health._hrrr_48h_verification_frame(
+        root,
+        "KLGA",
+        init_limit=None,
+        init_start=pd.Timestamp("2026-02-02", tz="UTC"),
+        init_end=pd.Timestamp("2026-02-03", tz="UTC"),
+    )
+
+    assert frame["init_time"].nunique() == 48
+    assert frame["init_time"].min() == pd.Timestamp("2026-02-02 00:00", tz="UTC")
+    assert frame["init_time"].max() == pd.Timestamp("2026-02-03 23:00", tz="UTC")
+
+
+def test_hrrr_48h_range_quality_reports_missing_steps_duplicates_and_nulls(tmp_path):
+    root = tmp_path / "data_store"
+    cache_dir = root / "_decoder_cache" / "KLGA"
+    cache_dir.mkdir(parents=True)
+    init = pd.Timestamp("2026-06-01 00:00", tz="UTC")
+    decoder = pd.DataFrame(
+        [
+            {
+                "init_time": init,
+                "fxx": fxx,
+                "valid_time": init + pd.Timedelta(hours=fxx),
+                "TMP_2m": value,
+            }
+            for fxx, value in ((1, 20.0), (1, None), (2, 21.0))
+        ]
+    )
+    decoder.to_parquet(cache_dir / "2026-06.parquet", index=False)
+    verification = pd.DataFrame(
+        [
+            {"has_obs": True},
+            {"has_obs": False},
+            {"has_obs": False},
+        ]
+    )
+
+    summary, issues = data_health._hrrr_48h_range_quality(
+        root,
+        "KLGA",
+        init,
+        init,
+        verification,
+    )
+
+    row = summary.iloc[0]
+    assert row["expected_inits"] == 24
+    assert row["actual_inits"] == 1
+    assert row["missing_inits"] == 23
+    assert row["expected_cells"] == 24 * 48
+    assert row["missing_forecast_steps"] == 24 * 48 - 2
+    assert row["duplicate_cells"] == 1
+    assert row["missing_iem_cells"] == 2
+    assert issues[
+        (issues["field"] == "TMP_2m") & (issues["issue"] == "null_values")
+    ]["null_count"].iloc[0] == 1
+
+
+def test_monthly_decoder_baseline_missing_artifacts_shows_generation_command(
+    tmp_path,
+):
+    with ExitStack() as stack:
+        stack.enter_context(patch("streamlit.subheader"))
+        info = stack.enter_context(patch("streamlit.info"))
+        read_parquet = stack.enter_context(
+            patch("ui.pages.data_health.pd.read_parquet")
+        )
+
+        data_health._render_monthly_decoder_baseline(
+            tmp_path / "run" / "data_store",
+            "KLGA",
+        )
+
+    assert "scripts.verify_decoder_baseline" in info.call_args.args[0]
+    read_parquet.assert_not_called()
+
+
+def test_monthly_decoder_baseline_renders_month_fxx_and_init_views(tmp_path):
+    run_dir = tmp_path / "run"
+    baseline_dir = run_dir / "artifacts" / "decoder_baseline" / "KLGA"
+    for subdir in ("cells", "per_init", "by_fxx"):
+        (baseline_dir / subdir).mkdir(parents=True)
+    init = pd.Timestamp("2026-01-01 00:00", tz="UTC")
+    pd.DataFrame(
+        [{
+            "month": "2026-01",
+            "complete_init_count": 1,
+            "incomplete_observation_init_count": 0,
+            "invalid_decoder_init_count": 0,
+            "performance_outlier_count": 0,
+            "mae_c": 1.0,
+            "bias_c": -0.5,
+            "rmse_c": 1.2,
+        }]
+    ).to_parquet(baseline_dir / "monthly_summary.parquet", index=False)
+    pd.DataFrame(
+        [{
+            "init_time": init,
+            "mae_c": 1.0,
+            "bias_c": -0.5,
+            "error_std_c": 0.8,
+            "data_status": "complete",
+            "performance_outlier": False,
+        }]
+    ).to_parquet(baseline_dir / "per_init" / "2026-01.parquet", index=False)
+    pd.DataFrame(
+        [{"fxx": fxx, "mae_c": 1.0, "sample_count": 1} for fxx in range(1, 49)]
+    ).to_parquet(baseline_dir / "by_fxx" / "2026-01.parquet", index=False)
+    pd.DataFrame(
+        [
+            {
+                "init_time": init,
+                "fxx": fxx,
+                "forecast_error_c": 1.0,
+                "absolute_error_c": 1.0,
+                "forecast_c": 11.0,
+                "observed_c": 10.0,
+                "source_kind": "native",
+            }
+            for fxx in range(1, 49)
+        ]
+    ).to_parquet(baseline_dir / "cells" / "2026-01.parquet", index=False)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("streamlit.subheader"))
+        stack.enter_context(
+            patch("streamlit.selectbox", side_effect=["2026-01", str(init)])
+        )
+        stack.enter_context(patch("streamlit.columns", return_value=[_MetricCol()] * 6))
+        stack.enter_context(patch("streamlit.success"))
+        dataframe = stack.enter_context(patch("streamlit.dataframe"))
+        chart = stack.enter_context(patch("streamlit.plotly_chart"))
+
+        data_health._render_monthly_decoder_baseline(
+            run_dir / "data_store",
+            "KLGA",
+        )
+
+    assert chart.call_count == 3
+    rendered = [call.args[0] for call in dataframe.call_args_list]
+    assert any("forecast_error_c" in frame.columns for frame in rendered)
+
+
+def test_hrrr_48h_custom_range_is_limited_to_31_days():
+    assert data_health._custom_date_range_error(
+        pd.Timestamp("2026-01-01", tz="UTC"),
+        pd.Timestamp("2026-01-31", tz="UTC"),
+    ) is None
+    assert "31 days" in data_health._custom_date_range_error(
+        pd.Timestamp("2026-01-01", tz="UTC"),
+        pd.Timestamp("2026-02-01", tz="UTC"),
+    )
+
+
+def test_hrrr_48h_custom_range_rejects_oversized_ui_selection(tmp_path):
+    root = tmp_path / "data_store"
+    cache_dir = root / "_decoder_cache" / "KLGA"
+    cache_dir.mkdir(parents=True)
+    pd.DataFrame(
+        [{
+            "init_time": pd.Timestamp("2026-01-01", tz="UTC"),
+            "fxx": 1,
+            "valid_time": pd.Timestamp("2026-01-01 01:00", tz="UTC"),
+            "TMP_2m": 20.0,
+        }, {
+            "init_time": pd.Timestamp("2026-02-01", tz="UTC"),
+            "fxx": 1,
+            "valid_time": pd.Timestamp("2026-02-01 01:00", tz="UTC"),
+            "TMP_2m": 20.0,
+        }]
+    ).to_parquet(cache_dir / "2026-01.parquet", index=False)
+
+    with ExitStack() as stack:
+        selectbox = stack.enter_context(
+            patch("streamlit.selectbox", return_value="KLGA")
+        )
+        stack.enter_context(
+            patch(
+                "streamlit.date_input",
+                return_value=(
+                    pd.Timestamp("2026-01-01").date(),
+                    pd.Timestamp("2026-02-01").date(),
+                ),
+            )
+        )
+        warning = stack.enter_context(patch("streamlit.warning"))
+        stack.enter_context(patch("streamlit.subheader"))
+        frame = stack.enter_context(
+            patch("ui.pages.data_health._hrrr_48h_verification_frame")
+        )
+
+        data_health._render_hrrr_48h_verification(root)
+
+    warning.assert_called_once_with("Custom date range is limited to 31 days.")
+    frame.assert_not_called()
+    assert [call.args[0] for call in selectbox.call_args_list] == ["48h Station"]
+
+
+def test_hrrr_48h_init_time_defaults_to_range_front(tmp_path):
+    root = tmp_path / "data_store"
+    cache_dir = root / "_decoder_cache" / "KLGA"
+    cache_dir.mkdir(parents=True)
+    first = pd.Timestamp("2026-06-01 00:00", tz="UTC")
+    rows = [
+        {
+            "init_time": init,
+            "fxx": fxx,
+            "valid_time": init + pd.Timedelta(hours=fxx),
+            "TMP_2m": 20.0,
+        }
+        for init in (first, first + pd.Timedelta(hours=1))
+        for fxx in range(1, 49)
+    ]
+    pd.DataFrame(rows).to_parquet(cache_dir / "2026-06.parquet", index=False)
+
+    state: dict = {}
+    with ExitStack() as stack:
+        selectbox = stack.enter_context(
+            patch(
+                "streamlit.selectbox",
+                side_effect=lambda label, options, **_kwargs: (
+                    "KLGA" if label == "48h Station" else options[0]
+                ),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "streamlit.date_input",
+                return_value=(first.date(), first.date()),
+            )
+        )
+        stack.enter_context(patch("streamlit.session_state", state))
+        stack.enter_context(patch("streamlit.subheader"))
+        stack.enter_context(patch("streamlit.info"))
+        stack.enter_context(patch("streamlit.dataframe"))
+        stack.enter_context(patch("streamlit.plotly_chart"))
+        stack.enter_context(
+            patch(
+                "streamlit.columns",
+                side_effect=[
+                    [_MetricCol()] * 4,
+                    [_MetricCol(), _MetricCol(), _MetricCol()],
+                ],
+            )
+        )
+
+        data_health._render_hrrr_48h_verification(root)
+
+    init_call = next(
+        call for call in selectbox.call_args_list if call.args[0] == "Init Time"
+    )
+    selected_key = init_call.kwargs["key"]
+    assert state[selected_key] == str(first)
 
 
 def test_data_health_renders_hrrr_48h_verification_chart(tmp_path):
@@ -882,19 +1228,21 @@ def test_data_health_renders_hrrr_48h_verification_chart(tmp_path):
             ]
         ),
     )
-    db = DbClient(":memory:")
-
     with ExitStack() as stack:
-        stack.enter_context(patch("streamlit.header"))
         stack.enter_context(patch("streamlit.subheader"))
         stack.enter_context(patch("streamlit.info"))
         dataframe = stack.enter_context(patch("streamlit.dataframe"))
-        stack.enter_context(patch("streamlit.selectbox", side_effect=["KLGA", "All", "KLGA", "Last 48", str(init)]))
-        stack.enter_context(patch("ui.pages.data_health.WeatherComTruthClient", _EmptyTruthClient))
+        stack.enter_context(
+            patch("streamlit.selectbox", side_effect=["KLGA", str(init)])
+        )
+        stack.enter_context(
+            patch("streamlit.date_input", return_value=(init.date(), init.date()))
+        )
+        stack.enter_context(patch("streamlit.session_state", {}))
         stack.enter_context(patch("streamlit.columns", return_value=[_MetricCol(), _MetricCol(), _MetricCol(), _MetricCol(), _MetricCol()]))
         plotly_chart = stack.enter_context(patch("streamlit.plotly_chart"))
 
-        data_health.render(db, data_store_dir=root)
+        data_health._render_hrrr_48h_verification(root)
 
     assert plotly_chart.call_count >= 2
     selected_call = next(

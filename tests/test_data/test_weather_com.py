@@ -90,6 +90,20 @@ def test_weather_com_fetch_without_key_and_cache_raises(tmp_path):
         client.fetch_date("KLGA", "2026-06-04")
 
 
+def test_weather_com_read_cached_date_never_fetches_missing_day(tmp_path):
+    session = _Session({"observations": [{"valid_time_gmt": 1_780_000_000, "temp": 50}]})
+    client = WeatherComTruthClient(
+        tmp_path / "truth",
+        api_key="secret",
+        session=session,
+    )
+
+    frame = client.read_cached_date("KLGA", "2026-06-04")
+
+    assert frame is None
+    assert session.calls == []
+
+
 def test_weather_com_client_uses_reference_default_key_when_env_missing(tmp_path, monkeypatch):
     payload = {"observations": [{"valid_time_gmt": 1_780_000_000, "temp": 50}]}
     session = _Session(payload)

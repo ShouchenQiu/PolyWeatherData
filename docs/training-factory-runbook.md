@@ -39,6 +39,7 @@ runs/<RUN_ID>/
   checkpoints/
   model_store/
   artifacts/
+    decoder_baseline/     # offline raw-HRRR verification evidence
   logs/
   prepare_data_summary.json
   audit_summary.json
@@ -108,8 +109,24 @@ Coverage-only audit:
   --data-store "$RUN_DIR/data_store" \
   --station "$STATION" \
   --start 2026-04-01 \
-  --end 2026-05-31
+    --end 2026-05-31
 ```
+
+Generate the monthly decoder baseline after decoder and IEM coverage are
+available:
+
+```bash
+./.venv/bin/python -m scripts.verify_decoder_baseline \
+  --run-dir "$RUN_DIR" \
+  --station "$STATION"
+```
+
+Use `--month YYYY-MM` to regenerate one UTC init month. The report aligns each
+cached f01..f48 cell with canonical IEM observations and writes artifacts below
+`artifacts/decoder_baseline/<station>/`. Structural decoder failures and
+incomplete observations are reported separately from month-relative performance
+outliers. High MAE or error variance is diagnostic evidence and does not block
+training. Production inference must not read decoder-baseline artifacts.
 
 Training-readiness audit:
 

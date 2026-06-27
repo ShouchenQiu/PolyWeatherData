@@ -1,8 +1,9 @@
 """Data Health page: ingestion and forecast freshness observability."""
 from __future__ import annotations
 
-import json
 import os
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -15,12 +16,9 @@ import streamlit as st
 from config.settings import Settings
 from config.stations import STATIONS
 from data.forecast.hrrr_fill import MAJOR_HOURS
-from data.obs.weather_com import (
-    WeatherComApiKeyMissing,
-    WeatherComFetchError,
-    WeatherComTruthClient,
-)
+from data.obs.weather_com import WeatherComTruthClient
 from data.storage.parquet_store import ParquetStore
+from model.features import HRRR_KNOWN_REALS, OBS_UNKNOWN_REALS
 from ui import queries
 
 if TYPE_CHECKING:
@@ -61,39 +59,36 @@ _HRRR_48H_COLUMNS = [
 ]
 
 
-def render(db: "DbClient", data_store_dir: Path | str | None = None) -> None:
+@dataclass(frozen=True)
+class _RangeSelection:
+    station_id: str
+    start: pd.Timestamp
+    end: pd.Timestamp
+
+
+@dataclass(frozen=True)
+class _Hrrr48Selection(_RangeSelection):
+    frame: pd.DataFrame
+
+
+def render(
+    db: "DbClient",
+    data_store_dir: Path | str | None = None,
+    truth_store_dir: Path | str | None = None,
+) -> None:
     st.header("Data Health")
 
-    _render_temperature_comparison(data_store_dir)
-    _render_hrrr_48h_verification(data_store_dir)
+    temperature_range = _render_temperature_comparison(data_store_dir, truth_store_dir)
+    if temperature_range is not None:
+        _render_f01_iem_range_quality(data_store_dir, temperature_range)
 
-    store_summary = _parquet_store_summary(data_store_dir)
-    st.subheader("Bootstrap Stores")
-    st.dataframe(store_summary, use_container_width=True)
-
-    st.subheader("Daily Coverage")
-    st.dataframe(_daily_coverage_summary(data_store_dir), use_container_width=True)
-
-    st.subheader("Cleaning Checks")
-    st.dataframe(_cleaning_check_summary(data_store_dir), use_container_width=True)
-
-    timing = _seed_timing_summary(data_store_dir)
-    st.subheader("Seed Timing")
-    if timing.empty:
-        st.info("No seed timing summary.")
-    else:
-        st.caption(
-            "Elapsed seconds are wall-clock timings captured by each summary file; "
-            "seed_summary usually covers its seed_date, while smoke_summary covers the smoke bootstrap run."
-        )
-        st.dataframe(
-            timing,
-            use_container_width=True,
-            column_config={
-                "elapsed_seconds": st.column_config.NumberColumn(format="%.2f"),
-                "rows_per_second": st.column_config.NumberColumn(format="%.2f"),
-            },
-        )
+    hrrr_48h_range = _render_hrrr_48h_verification(data_store_dir)
+    if hrrr_48h_range is not None:
+        _render_hrrr_48h_range_quality(data_store_dir, hrrr_48h_range)
+    _render_monthly_decoder_baseline(
+        data_store_dir,
+        hrrr_48h_range.station_id if hrrr_48h_range is not None else "KLGA",
+    )
 
     ticks = queries.loop_ticks(db, loop_name="ForecastLoop")
     if ticks.empty:
@@ -117,7 +112,10 @@ def render(db: "DbClient", data_store_dir: Path | str | None = None) -> None:
         )
 
 
-def _render_temperature_comparison(data_store_dir: Path | str | None = None) -> None:
+def _render_temperature_comparison(
+    data_store_dir: Path | str | None = None,
+    truth_store_dir: Path | str | None = None,
+) -> _RangeSelection | None:
     root = _resolve_data_store_dir(data_store_dir)
     st.subheader("Temperature Comparison")
     station_id = st.selectbox(
@@ -125,12 +123,34 @@ def _render_temperature_comparison(data_store_dir: Path | str | None = None) -> 
         _stations_with_temperature_data(root),
         index=0,
     )
-    range_label = st.selectbox("Range", ["All", "Last 7d", "Last 24h"], index=0)
     frame = _temperature_comparison_frame(root, station_id)
-    frame = _filter_temperature_range(frame, range_label)
     if frame.empty:
         st.info("No HRRR f01 / IEM temperature comparison data.")
-        return
+        return None
+
+    valid_hours = pd.to_datetime(frame["valid_hour"], utc=True)
+    min_day = valid_hours.min().floor("D")
+    max_day = valid_hours.max().floor("D")
+    default_start = max(min_day, max_day - pd.Timedelta(days=6))
+    selected_dates = st.date_input(
+        "Valid dates",
+        value=(default_start.date(), max_day.date()),
+        min_value=min_day.date(),
+        max_value=max_day.date(),
+    )
+    if not isinstance(selected_dates, (tuple, list)) or len(selected_dates) != 2:
+        st.info("Select a start and end date.")
+        return None
+    range_start = _as_utc_day(selected_dates[0])
+    range_end = _as_utc_day(selected_dates[1])
+    range_error = _custom_date_range_error(range_start, range_end)
+    if range_error:
+        st.warning(range_error)
+        return None
+    frame = _filter_utc_date_range(frame, "valid_hour", range_start, range_end)
+    if frame.empty:
+        st.info("No HRRR f01 / IEM temperature comparison data in this range.")
+        return _RangeSelection(station_id, range_start, range_end)
 
     matched = frame[frame["has_hrrr"] & frame["has_obs"]].copy()
     if matched.empty:
@@ -153,10 +173,13 @@ def _render_temperature_comparison(data_store_dir: Path | str | None = None) -> 
             use_container_width=True,
         )
 
-    _render_iem_weather_truth(root, station_id, frame)
+    _render_iem_weather_truth(root, station_id, frame, truth_store_dir)
+    return _RangeSelection(station_id, range_start, range_end)
 
 
-def _render_hrrr_48h_verification(data_store_dir: Path | str | None = None) -> None:
+def _render_hrrr_48h_verification(
+    data_store_dir: Path | str | None = None,
+) -> _Hrrr48Selection | None:
     root = _resolve_data_store_dir(data_store_dir)
     st.subheader("HRRR 48h Forecast Verification")
     stations = _stations_with_decoder_cache(root)
@@ -168,12 +191,38 @@ def _render_hrrr_48h_verification(data_store_dir: Path | str | None = None) -> N
         stations,
         index=0,
     )
-    range_label = st.selectbox("Init Range", ["Last 48", "Last 96", "All"], index=0)
-    init_limit = {"Last 48": 48, "Last 96": 96, "All": None}[range_label]
-    frame = _hrrr_48h_verification_frame(root, station_id, init_limit=init_limit)
+    bounds = _decoder_init_bounds(root, station_id)
+    if bounds is None:
+        st.info("No HRRR 48h decoder cache data.")
+        return None
+    min_day, max_day = bounds
+    default_start = max(min_day, max_day - pd.Timedelta(days=6))
+    selected_dates = st.date_input(
+        "Init dates",
+        value=(default_start.date(), max_day.date()),
+        min_value=min_day.date(),
+        max_value=max_day.date(),
+    )
+    if not isinstance(selected_dates, (tuple, list)) or len(selected_dates) != 2:
+        st.info("Select a start and end date.")
+        return None
+    init_start = _as_utc_day(selected_dates[0])
+    init_end = _as_utc_day(selected_dates[1])
+    range_error = _custom_date_range_error(init_start, init_end)
+    if range_error:
+        st.warning(range_error)
+        return None
+
+    frame = _hrrr_48h_verification_frame(
+        root,
+        station_id,
+        init_limit=None,
+        init_start=init_start,
+        init_end=init_end,
+    )
     if frame.empty:
         st.info("No HRRR 48h decoder cache data.")
-        return
+        return _Hrrr48Selection(station_id, init_start, init_end, frame)
 
     metrics = _hrrr_48h_metrics(frame)
     cols = st.columns(4)
@@ -189,10 +238,13 @@ def _render_hrrr_48h_verification(data_store_dir: Path | str | None = None) -> N
 
     init_times = sorted(pd.to_datetime(frame["init_time"], utc=True).unique())
     init_options = [str(ts) for ts in init_times]
-    nav_key = f"data_health_48h_init_index_{station_id}_{range_label}"
+    nav_key = (
+        f"data_health_48h_init_index_{station_id}_"
+        f"{init_start.date()}_{init_end.date()}"
+    )
     selected_key = f"{nav_key}_selected"
     if st.session_state.get(selected_key) not in init_options:
-        st.session_state[selected_key] = init_options[-1]
+        st.session_state[selected_key] = init_options[0]
     current_index = init_options.index(st.session_state[selected_key])
     nav_cols = st.columns([8, 1, 1])
     with nav_cols[0]:
@@ -214,7 +266,7 @@ def _render_hrrr_48h_verification(data_store_dir: Path | str | None = None) -> N
     selected_ts = pd.Timestamp(selected_init)
     selected = frame[pd.to_datetime(frame["init_time"], utc=True) == selected_ts].copy()
     if selected.empty:
-        return
+        return _Hrrr48Selection(station_id, init_start, init_end, frame)
     st.plotly_chart(
         _selected_init_forecast_figure(selected),
         use_container_width=True,
@@ -224,6 +276,7 @@ def _render_hrrr_48h_verification(data_store_dir: Path | str | None = None) -> N
         use_container_width=True,
         column_config={"abs_error_c": None},
     )
+    return _Hrrr48Selection(station_id, init_start, init_end, frame)
 
 
 def _stations_with_temperature_data(root: Path) -> list[str]:
@@ -243,15 +296,16 @@ def _stations_with_decoder_cache(root: Path) -> list[str]:
     ]
 
 
-def _filter_temperature_range(df: pd.DataFrame, range_label: str) -> pd.DataFrame:
-    if df.empty or range_label == "All":
-        return df
-    max_hour = pd.to_datetime(df["valid_hour"], utc=True).max()
-    if pd.isna(max_hour):
-        return df.iloc[0:0].copy()
-    hours = 24 if range_label == "Last 24h" else 24 * 7
-    start = max_hour - pd.Timedelta(hours=hours - 1)
-    return df[pd.to_datetime(df["valid_hour"], utc=True) >= start].reset_index(drop=True)
+def _filter_utc_date_range(
+    frame: pd.DataFrame,
+    time_col: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.DataFrame:
+    times = pd.to_datetime(frame[time_col], utc=True)
+    end_exclusive = _as_utc_day(end).floor("D") + pd.Timedelta(days=1)
+    mask = (times >= _as_utc_day(start).floor("D")) & (times < end_exclusive)
+    return frame[mask].reset_index(drop=True)
 
 
 def _temperature_comparison_metrics(df: pd.DataFrame) -> dict[str, float | int]:
@@ -425,10 +479,22 @@ def _render_iem_weather_truth(
     root: Path,
     station_id: str,
     frame: pd.DataFrame,
+    truth_store_dir: Path | str | None = None,
 ) -> None:
     st.subheader("IEM vs Weather.com Truth")
     st.caption(f"Truth location: {WeatherComTruthClient.location_code(station_id)}")
-    truth, message = _iem_weather_truth_frame(root, station_id, frame)
+    truth, message = _iem_weather_truth_frame(
+        root,
+        station_id,
+        frame,
+        truth_store_dir=truth_store_dir,
+    )
+    cache_dates = truth.attrs.get("truth_cache_dates")
+    if cache_dates:
+        st.caption(
+            "Truth cache local dates: "
+            f"{cache_dates['cached']} / {cache_dates['requested']}"
+        )
     if message:
         st.info(message)
     if truth.empty:
@@ -461,6 +527,7 @@ def _iem_weather_truth_frame(
     root: Path,
     station_id: str,
     temp_frame: pd.DataFrame,
+    truth_store_dir: Path | str | None = None,
 ) -> tuple[pd.DataFrame, str | None]:
     if temp_frame.empty or "iem_obs_c" not in temp_frame.columns:
         return _empty_iem_weather_truth_frame(), None
@@ -489,17 +556,13 @@ def _iem_weather_truth_frame(
         .sort_values()
         .tolist()
     )
-    client = WeatherComTruthClient(root / "_truth_weather_com")
+    client = WeatherComTruthClient(_resolve_truth_store_dir(root, truth_store_dir))
     parts: list[pd.DataFrame] = []
-    messages: list[str] = []
+    missing_dates: list[str] = []
     for day in local_dates:
-        try:
-            part = client.fetch_date(station_id, day)
-        except WeatherComApiKeyMissing as exc:
-            messages.append(str(exc))
-            continue
-        except WeatherComFetchError as exc:
-            messages.append(str(exc))
+        part = client.read_cached_date(station_id, day)
+        if part is None:
+            missing_dates.append(day)
             continue
         if not part.empty:
             parts.append(part)
@@ -534,8 +597,19 @@ def _iem_weather_truth_frame(
     merged["has_weather_com"] = merged["weather_com_temp_f"].notna()
     merged["truth_error_f"] = merged["iem_obs_f"] - merged["weather_com_temp_f"]
     merged = merged.sort_values("valid_hour").reset_index(drop=True)
-    message = messages[0] if messages else None
-    return merged[_IEM_WEATHER_TRUTH_COLUMNS], message
+    result = merged[_IEM_WEATHER_TRUTH_COLUMNS]
+    result.attrs["truth_cache_dates"] = {
+        "cached": len(local_dates) - len(missing_dates),
+        "requested": len(local_dates),
+    }
+    message = (
+        f"{len(missing_dates)} Weather.com local dates are not cached. "
+        "Run `python -m scripts.prefetch_weather_com_truth` before reviewing "
+        "this range."
+        if missing_dates
+        else None
+    )
+    return result, message
 
 
 _IEM_WEATHER_TRUTH_COLUMNS = [
@@ -573,35 +647,6 @@ def _c_to_f(values: pd.Series) -> pd.Series:
     return values.astype(float) * 9.0 / 5.0 + 32.0
 
 
-def _parquet_store_summary(data_store_dir: Path | str | None = None) -> pd.DataFrame:
-    root = _resolve_data_store_dir(data_store_dir)
-    rows = []
-    for label, subdir in (("hrrr", "hrrr"), ("obs", "obs")):
-        store = ParquetStore(root / subdir)
-        total = 0
-        latest = None
-        for station_id in STATIONS:
-            df = store.read(
-                station_id,
-                start=pd.Timestamp("2000-01-01", tz="UTC"),
-                end=pd.Timestamp("2100-01-01", tz="UTC"),
-            )
-            total += len(df)
-            if not df.empty:
-                time_col = "valid_time" if "valid_time" in df.columns else "init_time"
-                station_latest = pd.to_datetime(df[time_col], utc=True).max()
-                latest = station_latest if latest is None else max(latest, station_latest)
-        rows.append(
-            {
-                "store": label,
-                "path": str(root / subdir),
-                "rows": int(total),
-                "latest_time": str(latest) if latest is not None else None,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
 def _temperature_comparison_frame(
     data_store_dir: Path | str | None,
     station_id: str,
@@ -633,6 +678,120 @@ def _temperature_comparison_frame(
     return frame[_TEMP_COMPARISON_COLUMNS]
 
 
+def _f01_iem_range_quality(
+    data_store_dir: Path | str,
+    station_id: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    root = _resolve_data_store_dir(data_store_dir)
+    sources = (
+        (
+            "HRRR f01",
+            _filter_source_range(_read_store(root, "hrrr", station_id), "valid_time", start, end),
+            ["init_time", "fxx", "valid_time", *HRRR_KNOWN_REALS],
+        ),
+        (
+            "IEM",
+            _filter_source_range(_read_store(root, "obs", station_id), "valid_time", start, end),
+            ["valid_time", *OBS_UNKNOWN_REALS],
+        ),
+    )
+    expected_hours = _inclusive_day_count(start, end) * 24
+    summary_rows = []
+    issue_parts = []
+    for source, frame, required_fields in sources:
+        if "valid_time" in frame.columns:
+            hours = pd.to_datetime(frame["valid_time"], utc=True).dt.floor("h")
+            actual_hours = int(hours.nunique())
+            duplicate_hours = int(len(hours) - actual_hours)
+        else:
+            actual_hours = 0
+            duplicate_hours = 0
+        summary_rows.append(
+            {
+                "source": source,
+                "expected_hours": expected_hours,
+                "actual_hours": actual_hours,
+                "missing_hours": max(expected_hours - actual_hours, 0),
+                "duplicate_hours": duplicate_hours,
+            }
+        )
+        issue_parts.append(_field_issue_rows(source, frame, required_fields))
+    issues = pd.concat(issue_parts, ignore_index=True)
+    return pd.DataFrame(summary_rows), issues
+
+
+def _render_f01_iem_range_quality(
+    data_store_dir: Path | str,
+    selection: _RangeSelection,
+) -> None:
+    st.subheader("F01 / IEM Range Quality")
+    summary, issues = _f01_iem_range_quality(
+        data_store_dir,
+        selection.station_id,
+        selection.start,
+        selection.end,
+    )
+    st.dataframe(summary, use_container_width=True)
+    if issues.empty:
+        st.success("No missing model fields or null values in this range.")
+    else:
+        st.dataframe(issues, use_container_width=True)
+
+
+def _filter_source_range(
+    frame: pd.DataFrame,
+    time_col: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.DataFrame:
+    if frame.empty or time_col not in frame.columns:
+        return frame.iloc[0:0].copy()
+    return _filter_utc_date_range(frame, time_col, start, end)
+
+
+def _inclusive_day_count(start: pd.Timestamp, end: pd.Timestamp) -> int:
+    start_day = _as_utc_day(start).floor("D")
+    end_day = _as_utc_day(end).floor("D")
+    return max((end_day - start_day).days + 1, 0)
+
+
+def _field_issue_rows(
+    source: str,
+    frame: pd.DataFrame,
+    required_fields: list[str],
+) -> pd.DataFrame:
+    rows = []
+    for field in required_fields:
+        if field not in frame.columns:
+            rows.append(
+                {
+                    "source": source,
+                    "field": field,
+                    "issue": "missing_column",
+                    "null_count": None,
+                    "null_pct": None,
+                }
+            )
+            continue
+        null_count = int(frame[field].isna().sum())
+        if null_count:
+            rows.append(
+                {
+                    "source": source,
+                    "field": field,
+                    "issue": "null_values",
+                    "null_count": null_count,
+                    "null_pct": null_count / len(frame) if len(frame) else 0.0,
+                }
+            )
+    return pd.DataFrame(
+        rows,
+        columns=["source", "field", "issue", "null_count", "null_pct"],
+    )
+
+
 def _hourly_temperature_frame(
     df: pd.DataFrame,
     station_id: str,
@@ -662,9 +821,17 @@ def _hrrr_48h_verification_frame(
     data_store_dir: Path | str | None,
     station_id: str,
     init_limit: int | None = 48,
+    init_start: pd.Timestamp | None = None,
+    init_end: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     root = _resolve_data_store_dir(data_store_dir)
-    decoder = _read_decoder_cache(root, station_id)
+    decoder = _read_decoder_cache(
+        root,
+        station_id,
+        init_limit=init_limit,
+        init_start=init_start,
+        init_end=init_end,
+    )
     required = {"init_time", "fxx", "valid_time", "TMP_2m"}
     if decoder.empty or not required.issubset(decoder.columns):
         return _empty_hrrr_48h_frame()
@@ -676,6 +843,13 @@ def _hrrr_48h_verification_frame(
     frame["station_id"] = station_id
     frame["init_time"] = pd.to_datetime(frame["init_time"], utc=True)
     frame["valid_time"] = pd.to_datetime(frame["valid_time"], utc=True)
+    if init_start is not None and init_end is not None:
+        start = pd.Timestamp(init_start)
+        end_exclusive = pd.Timestamp(init_end).floor("D") + pd.Timedelta(days=1)
+        frame = frame[
+            (frame["init_time"] >= start.floor("D"))
+            & (frame["init_time"] < end_exclusive)
+        ].copy()
     frame["fxx"] = pd.to_numeric(frame["fxx"], errors="coerce")
     frame = frame[frame["fxx"].between(1, 48)].copy()
     frame["fxx"] = frame["fxx"].astype(int)
@@ -712,6 +886,266 @@ def _hrrr_48h_verification_frame(
     frame["abs_error_c"] = frame["error_c"].abs()
     frame = frame.sort_values(["init_time", "fxx"]).reset_index(drop=True)
     return frame[_HRRR_48H_COLUMNS]
+
+
+def _hrrr_48h_range_quality(
+    data_store_dir: Path | str,
+    station_id: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    verification_frame: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    root = _resolve_data_store_dir(data_store_dir)
+    decoder = _read_decoder_cache(
+        root,
+        station_id,
+        init_limit=None,
+        init_start=start,
+        init_end=end,
+    )
+    decoder = _filter_source_range(decoder, "init_time", start, end)
+    expected_inits = _inclusive_day_count(start, end) * 24
+    expected_cells = expected_inits * 48
+    if decoder.empty or not {"init_time", "fxx"}.issubset(decoder.columns):
+        actual_inits = 0
+        actual_cells = 0
+        duplicate_cells = 0
+    else:
+        inits = pd.to_datetime(decoder["init_time"], utc=True)
+        fxx = pd.to_numeric(decoder["fxx"], errors="coerce")
+        valid = decoder[fxx.between(1, 48)].copy()
+        valid["init_time"] = inits[fxx.between(1, 48)]
+        valid["fxx"] = fxx[fxx.between(1, 48)].astype(int)
+        actual_inits = int(valid["init_time"].nunique())
+        actual_cells = int(valid[["init_time", "fxx"]].drop_duplicates().shape[0])
+        duplicate_cells = int(len(valid) - actual_cells)
+    missing_iem_cells = (
+        int((~verification_frame["has_obs"].astype(bool)).sum())
+        if "has_obs" in verification_frame.columns
+        else len(verification_frame)
+    )
+    summary = pd.DataFrame(
+        [{
+            "expected_inits": expected_inits,
+            "actual_inits": actual_inits,
+            "missing_inits": max(expected_inits - actual_inits, 0),
+            "expected_cells": expected_cells,
+            "missing_forecast_steps": max(expected_cells - actual_cells, 0),
+            "duplicate_cells": duplicate_cells,
+            "missing_iem_cells": missing_iem_cells,
+        }]
+    )
+    issues = _field_issue_rows(
+        "HRRR 48h",
+        decoder,
+        ["init_time", "valid_time", "fxx", *HRRR_KNOWN_REALS],
+    )
+    return summary, issues
+
+
+def _render_hrrr_48h_range_quality(
+    data_store_dir: Path | str,
+    selection: _Hrrr48Selection,
+) -> None:
+    st.subheader("HRRR 48h Range Quality")
+    summary, issues = _hrrr_48h_range_quality(
+        data_store_dir,
+        selection.station_id,
+        selection.start,
+        selection.end,
+        selection.frame,
+    )
+    st.dataframe(summary, use_container_width=True)
+    if issues.empty:
+        st.success("No missing decoder fields or null values in this range.")
+    else:
+        st.dataframe(issues, use_container_width=True)
+
+
+def _render_monthly_decoder_baseline(
+    data_store_dir: Path | str,
+    station_id: str,
+) -> None:
+    st.subheader("Monthly Decoder Baseline")
+    data_root = _resolve_data_store_dir(data_store_dir)
+    run_dir = data_root.parent
+    baseline_dir = run_dir / "artifacts" / "decoder_baseline" / station_id
+    summary_path = baseline_dir / "monthly_summary.parquet"
+    if not summary_path.exists():
+        st.info(
+            "No decoder baseline artifacts. Run "
+            f"`python -m scripts.verify_decoder_baseline --run-dir {run_dir} "
+            f"--station {station_id}`."
+        )
+        return
+
+    summary = _read_parquet_paths([summary_path])
+    if summary.empty or "month" not in summary.columns:
+        st.info("Decoder baseline summary is empty.")
+        return
+    months = sorted(summary["month"].astype(str).unique().tolist())
+    selected_month = st.selectbox(
+        "Baseline Month",
+        months,
+        index=len(months) - 1,
+    )
+    month_summary = summary[summary["month"].astype(str) == selected_month].iloc[-1]
+    metric_cols = st.columns(6)
+    metric_cols[0].metric("Complete Inits", int(month_summary["complete_init_count"]))
+    metric_cols[1].metric(
+        "Incomplete Obs",
+        int(month_summary["incomplete_observation_init_count"]),
+    )
+    metric_cols[2].metric(
+        "Invalid Decoder",
+        int(month_summary["invalid_decoder_init_count"]),
+    )
+    metric_cols[3].metric(
+        "Outlier Inits",
+        int(month_summary["performance_outlier_count"]),
+    )
+    metric_cols[4].metric(
+        "MAE / Bias C",
+        f"{month_summary['mae_c']:.2f} / {month_summary['bias_c']:.2f}",
+    )
+    metric_cols[5].metric("RMSE C", f"{month_summary['rmse_c']:.2f}")
+
+    per_init_path = baseline_dir / "per_init" / f"{selected_month}.parquet"
+    by_fxx_path = baseline_dir / "by_fxx" / f"{selected_month}.parquet"
+    cells_path = baseline_dir / "cells" / f"{selected_month}.parquet"
+    if not all(path.exists() for path in (per_init_path, by_fxx_path, cells_path)):
+        st.info(f"Decoder baseline artifacts are incomplete for {selected_month}.")
+        return
+    per_init = _read_parquet_paths([per_init_path])
+    by_fxx = _read_parquet_paths([by_fxx_path])
+    cells = _read_parquet_paths([cells_path])
+    per_init["init_time"] = pd.to_datetime(per_init["init_time"], utc=True)
+    cells["init_time"] = pd.to_datetime(cells["init_time"], utc=True)
+
+    st.plotly_chart(
+        _decoder_baseline_per_init_figure(per_init, selected_month),
+        use_container_width=True,
+    )
+    st.plotly_chart(
+        _decoder_baseline_by_fxx_figure(by_fxx, selected_month),
+        use_container_width=True,
+    )
+
+    issues = per_init[
+        (per_init["data_status"] != "complete")
+        | per_init["performance_outlier"].astype(bool)
+    ].copy()
+    if issues.empty:
+        st.success("No structural or performance outlier init times this month.")
+    else:
+        st.dataframe(issues, use_container_width=True)
+
+    init_options = [str(ts) for ts in sorted(per_init["init_time"].unique())]
+    outlier_options = [
+        str(ts)
+        for ts in per_init.loc[
+            per_init["performance_outlier"].astype(bool),
+            "init_time",
+        ].sort_values()
+    ]
+    default_init = outlier_options[0] if outlier_options else init_options[0]
+    selected_init = st.selectbox(
+        "Baseline Init Time",
+        init_options,
+        index=init_options.index(default_init),
+        key=f"decoder_baseline_init_{station_id}_{selected_month}",
+    )
+    selected_cells = cells[cells["init_time"] == pd.Timestamp(selected_init)].copy()
+    st.plotly_chart(
+        _decoder_baseline_init_figure(selected_cells),
+        use_container_width=True,
+    )
+    st.dataframe(selected_cells, use_container_width=True)
+
+
+def _decoder_baseline_per_init_figure(
+    per_init: pd.DataFrame,
+    month: str,
+) -> go.Figure:
+    colors = [
+        _POSITIVE_COLOR if bool(value) else _HRRR_COLOR
+        for value in per_init["performance_outlier"]
+    ]
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=tuple(per_init["init_time"]),
+            y=tuple(per_init["mae_c"]),
+            mode="lines+markers",
+            name="MAE C",
+            marker={"color": colors},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=tuple(per_init["init_time"]),
+            y=tuple(per_init["error_std_c"]),
+            mode="lines",
+            name="Error std C",
+            line={"color": _HRRR_EXTRAPOLATED_COLOR},
+        )
+    )
+    fig.update_layout(
+        title=f"{month} Per-init HRRR Baseline",
+        xaxis_title="init_time UTC",
+        yaxis_title="error C",
+        margin=_CHART_MARGIN,
+    )
+    return fig
+
+
+def _decoder_baseline_by_fxx_figure(
+    by_fxx: pd.DataFrame,
+    month: str,
+) -> go.Figure:
+    fig = go.Figure(
+        data=[
+            go.Scatter(
+                x=tuple(by_fxx["fxx"]),
+                y=tuple(by_fxx["mae_c"]),
+                mode="lines+markers",
+                name="MAE C",
+                line={"color": _HRRR_COLOR},
+            )
+        ]
+    )
+    fig.update_layout(
+        title=f"{month} HRRR Baseline MAE by Forecast Hour",
+        xaxis_title="fxx",
+        yaxis_title="MAE C",
+        margin=_CHART_MARGIN,
+    )
+    return fig
+
+
+def _decoder_baseline_init_figure(cells: pd.DataFrame) -> go.Figure:
+    colors = [
+        _POSITIVE_COLOR if value >= 0 else _NEGATIVE_COLOR
+        for value in cells["forecast_error_c"]
+    ]
+    fig = go.Figure(
+        data=[
+            go.Bar(
+                x=tuple(cells["fxx"]),
+                y=tuple(cells["forecast_error_c"]),
+                marker={"color": colors},
+                name="HRRR - IEM C",
+            )
+        ]
+    )
+    fig.add_hline(y=0, line_color=_ZERO_LINE_COLOR, line_width=1)
+    fig.update_layout(
+        title="Selected Init Forecast Error",
+        xaxis_title="fxx",
+        yaxis_title="forecast error C",
+        margin=_CHART_MARGIN,
+    )
+    return fig
 
 
 def _hrrr_source_kind(row: pd.Series) -> str:
@@ -895,14 +1329,111 @@ def _move_init_selection(
     state[selected_key] = options[_shift_init_index(current_index, step, len(options))]
 
 
-def _read_decoder_cache(root: Path, station_id: str) -> pd.DataFrame:
+def _read_decoder_cache(
+    root: Path,
+    station_id: str,
+    init_limit: int | None = None,
+    init_start: pd.Timestamp | None = None,
+    init_end: pd.Timestamp | None = None,
+) -> pd.DataFrame:
     station_dir = root / "_decoder_cache" / station_id
     if not station_dir.exists():
         return pd.DataFrame()
-    parts = [pd.read_parquet(path) for path in sorted(station_dir.glob("*.parquet"))]
-    if not parts:
+    paths = sorted(station_dir.glob("*.parquet"))
+    if not paths:
         return pd.DataFrame()
-    return pd.concat(parts, ignore_index=True)
+
+    if init_start is not None and init_end is not None:
+        paths = [
+            path for path in paths
+            if _month_overlaps(path.stem, init_start, init_end)
+        ]
+        return _read_parquet_paths(paths)
+
+    if init_limit is None:
+        return _read_parquet_paths(paths)
+
+    selected_parts: list[pd.DataFrame] = []
+    unique_inits: set[pd.Timestamp] = set()
+    for path in reversed(paths):
+        part = _read_parquet_paths([path])
+        selected_parts.append(part)
+        if "init_time" in part.columns:
+            unique_inits.update(pd.to_datetime(part["init_time"], utc=True).unique())
+        if len(unique_inits) >= init_limit:
+            break
+    return pd.concat(reversed(selected_parts), ignore_index=True)
+
+
+def _decoder_init_bounds(
+    root: Path,
+    station_id: str,
+) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    station_dir = root / "_decoder_cache" / station_id
+    paths = sorted(station_dir.glob("*.parquet"))
+    if not paths:
+        return None
+    boundary_paths = [paths[0]] if len(paths) == 1 else [paths[0], paths[-1]]
+    boundary = _read_parquet_paths(boundary_paths)
+    if boundary.empty or "init_time" not in boundary.columns:
+        return None
+    inits = pd.to_datetime(boundary["init_time"], utc=True).dropna()
+    if inits.empty:
+        return None
+    return inits.min().floor("D"), inits.max().floor("D")
+
+
+def _as_utc_day(value: object) -> pd.Timestamp:
+    ts = pd.Timestamp(value)
+    return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+
+
+def _custom_date_range_error(
+    init_start: pd.Timestamp,
+    init_end: pd.Timestamp,
+) -> str | None:
+    start = _as_utc_day(init_start).floor("D")
+    end = _as_utc_day(init_end).floor("D")
+    if end < start:
+        return "End date must be on or after start date."
+    if (end - start).days + 1 > 31:
+        return "Custom date range is limited to 31 days."
+    return None
+
+
+def _month_overlaps(
+    month: str,
+    init_start: pd.Timestamp,
+    init_end: pd.Timestamp,
+) -> bool:
+    try:
+        month_start = pd.Timestamp(f"{month}-01", tz="UTC")
+    except ValueError:
+        return False
+    month_end = month_start + pd.offsets.MonthBegin(1)
+    return month_start <= init_end and month_end > init_start
+
+
+def _read_parquet_paths(paths: list[Path]) -> pd.DataFrame:
+    if not paths:
+        return pd.DataFrame()
+    return _cached_read_parquet_paths(_file_signature(paths)).copy()
+
+
+def _file_signature(paths: list[Path]) -> tuple[tuple[str, int, int], ...]:
+    return tuple(
+        (str(path), stat.st_size, stat.st_mtime_ns)
+        for path in paths
+        for stat in [path.stat()]
+    )
+
+
+@lru_cache(maxsize=128)
+def _cached_read_parquet_paths(
+    signature: tuple[tuple[str, int, int], ...],
+) -> pd.DataFrame:
+    parts = [pd.read_parquet(path) for path, _size, _mtime in signature]
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
 def _empty_hrrr_48h_frame() -> pd.DataFrame:
@@ -929,145 +1460,35 @@ def _resolve_data_store_dir(data_store_dir: Path | str | None = None) -> Path:
     return Path(data_store_dir)
 
 
-def _latest_day(df: pd.DataFrame, time_col: str) -> pd.Timestamp | None:
-    if df.empty or time_col not in df.columns:
-        return None
-    ts = pd.to_datetime(df[time_col], utc=True)
-    return ts.max().floor("D")
+def _resolve_truth_store_dir(
+    data_store_dir: Path,
+    truth_store_dir: Path | str | None = None,
+) -> Path:
+    if truth_store_dir is None:
+        truth_store_dir = os.environ.get("POLYWEATHER_TRUTH_STORE")
+    return Path(truth_store_dir) if truth_store_dir else data_store_dir / "_truth_weather_com"
 
 
 def _read_store(root: Path, subdir: str, station_id: str) -> pd.DataFrame:
-    return ParquetStore(root / subdir).read(
+    paths = sorted((root / subdir / station_id).glob("*.parquet"))
+    signature = _file_signature(paths)
+    return _cached_read_store(
+        str(root),
+        subdir,
+        station_id,
+        signature,
+    ).copy()
+
+
+@lru_cache(maxsize=64)
+def _cached_read_store(
+    root: str,
+    subdir: str,
+    station_id: str,
+    _signature: tuple[tuple[str, int, int], ...],
+) -> pd.DataFrame:
+    return ParquetStore(Path(root) / subdir).read(
         station_id,
         start=pd.Timestamp("2000-01-01", tz="UTC"),
         end=pd.Timestamp("2100-01-01", tz="UTC"),
     )
-
-
-def _daily_coverage_summary(data_store_dir: Path | str | None = None) -> pd.DataFrame:
-    root = _resolve_data_store_dir(data_store_dir)
-    seed_day = _seed_summary_day(root)
-    rows = []
-    for station_id in STATIONS:
-        hrrr = _read_store(root, "hrrr", station_id)
-        obs = _read_store(root, "obs", station_id)
-        hrrr_day = seed_day or _latest_day(hrrr, "init_time")
-        obs_day = seed_day or _latest_day(obs, "valid_time")
-        rows.append(_coverage_row("hrrr", station_id, hrrr, "init_time", hrrr_day, 24))
-        rows.append(_coverage_row("obs", station_id, obs, "valid_time", obs_day, 24))
-    return pd.DataFrame(rows)
-
-
-def _coverage_row(
-    store: str,
-    station_id: str,
-    df: pd.DataFrame,
-    time_col: str,
-    day: pd.Timestamp | None,
-    expected_rows: int,
-) -> dict:
-    if day is None or df.empty or time_col not in df.columns:
-        return {
-            "store": store,
-            "station_id": station_id,
-            "day": None,
-            "expected_rows": expected_rows,
-            "actual_rows": 0,
-            "missing_rows": expected_rows,
-            "start_time": None,
-            "end_time": None,
-        }
-    ts = pd.to_datetime(df[time_col], utc=True)
-    mask = (ts >= day) & (ts < day + pd.Timedelta(days=1))
-    day_df = df[mask]
-    day_ts = ts[mask]
-    actual = int(len(day_df))
-    return {
-        "store": store,
-        "station_id": station_id,
-        "day": str(day.date()),
-        "expected_rows": expected_rows,
-        "actual_rows": actual,
-        "missing_rows": max(expected_rows - actual, 0),
-        "start_time": str(day_ts.min()) if actual else None,
-        "end_time": str(day_ts.max()) if actual else None,
-    }
-
-
-def _cleaning_check_summary(data_store_dir: Path | str | None = None) -> pd.DataFrame:
-    root = _resolve_data_store_dir(data_store_dir)
-    rows = []
-    for station_id in STATIONS:
-        hrrr = _read_store(root, "hrrr", station_id)
-        obs = _read_store(root, "obs", station_id)
-        rows.extend([
-            _check_row("hrrr_required_columns", station_id, {"init_time", "fxx", "valid_time", "TMP_2m"}.issubset(hrrr.columns), hrrr),
-            _check_row("hrrr_fxx_all_one", station_id, bool(not hrrr.empty and "fxx" in hrrr.columns and (hrrr["fxx"] == 1).all()), hrrr),
-            _check_row("obs_required_columns", station_id, {"valid_time", "raw_tmpc_tenths"}.issubset(obs.columns), obs),
-        ])
-    return pd.DataFrame(rows)
-
-
-def _check_row(check: str, station_id: str, passed: bool, df: pd.DataFrame) -> dict:
-    return {
-        "check": check,
-        "station_id": station_id,
-        "passed": bool(passed),
-        "rows": int(len(df)),
-        "nan_fraction": float(df.isna().mean().mean()) if not df.empty else 0.0,
-    }
-
-
-def _seed_timing_summary(data_store_dir: Path | str | None = None) -> pd.DataFrame:
-    root = _resolve_data_store_dir(data_store_dir)
-    rows = []
-    for label, summary in _load_timing_summaries(root):
-        for stage, values in (summary.get("timings") or {}).items():
-            elapsed_seconds = float(values.get("elapsed_seconds", 0.0))
-            rows_written = int(values.get("rows_written", 0))
-            errors = int(values.get("errors", 0))
-            rows_per_second = float(values.get("rows_per_second", 0.0))
-            if elapsed_seconds == 0.0 and rows_written == 0 and errors == 0:
-                continue
-            rows.append(
-                {
-                    "summary": label,
-                    "stage": stage,
-                    "elapsed_seconds": round(elapsed_seconds, 2),
-                    "rows_written": rows_written,
-                    "errors": errors,
-                    "rows_per_second": round(rows_per_second, 2),
-                }
-            )
-    return pd.DataFrame(rows)
-
-
-def _seed_summary_day(root: Path) -> pd.Timestamp | None:
-    summary = _load_seed_summary(root)
-    seed_date = summary.get("seed_date") if summary else None
-    if not seed_date:
-        return None
-    return pd.Timestamp(seed_date, tz="UTC")
-
-
-def _load_seed_summary(root: Path) -> dict:
-    return _load_summary_file(root.parent / "seed_summary.json")
-
-
-def _load_timing_summaries(root: Path) -> list[tuple[str, dict]]:
-    rows = []
-    for label, filename in (
-        ("smoke_summary", "smoke_summary.json"),
-        ("seed_summary", "seed_summary.json"),
-    ):
-        summary = _load_summary_file(root.parent / filename)
-        if summary:
-            rows.append((label, summary))
-    return rows
-
-
-def _load_summary_file(summary_path: Path) -> dict:
-    try:
-        return json.loads(summary_path.read_text(encoding="ascii"))
-    except (json.JSONDecodeError, OSError, FileNotFoundError):
-        return {}
