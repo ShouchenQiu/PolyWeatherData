@@ -13,7 +13,7 @@ from data.forecast.hrrr_fill import MAJOR_HOURS
 from data.storage.parquet_store import ParquetStore
 from training.workspace import TrainingWorkspace
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 OUTLIER_ROBUST_Z_THRESHOLD = 3.5
 
 _CELL_COLUMNS = [
@@ -313,7 +313,41 @@ def _by_fxx_metrics(
                 **_error_metrics(errors),
             }
         )
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return pd.DataFrame(
+            columns=[
+                "forecast_kind",
+                "station_id",
+                "month",
+                "fxx",
+                "sample_count",
+                "bias_c",
+                "mae_c",
+                "rmse_c",
+                "error_variance_c2",
+                "error_std_c",
+                "max_absolute_error_c",
+                "mae_robust_z",
+                "error_std_robust_z",
+                "performance_outlier",
+            ]
+        )
+    for metric, output in (
+        ("mae_c", "mae_robust_z"),
+        ("error_std_c", "error_std_robust_z"),
+    ):
+        values = result[metric]
+        median = values.median()
+        mad = (values - median).abs().median()
+        result[output] = np.nan
+        if pd.notna(mad) and mad > 0:
+            result[output] = 0.6745 * (values - median) / mad
+    result["performance_outlier"] = (
+        (result["mae_robust_z"] > OUTLIER_ROBUST_Z_THRESHOLD)
+        | (result["error_std_robust_z"] > OUTLIER_ROBUST_Z_THRESHOLD)
+    )
+    return result
 
 
 def _monthly_summary(

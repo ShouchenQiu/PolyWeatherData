@@ -178,6 +178,31 @@ def test_month_baseline_marks_missing_temperature_column_as_invalid_decoder():
     assert result.summary["invalid_decoder_init_count"] == 1
 
 
+def test_month_baseline_marks_month_relative_outlier_forecast_hours():
+    base = pd.Timestamp("2026-01-01", tz="UTC")
+    errors = [0.1 * fxx for fxx in range(1, 49)]
+    errors[-1] = 20.0
+    decoder = pd.concat(
+        [
+            _decoder_rows(base + pd.Timedelta(hours=i), errors)
+            for i in range(10)
+        ],
+        ignore_index=True,
+    )
+
+    result = build_month_baseline(
+        decoder,
+        _obs_for_decoder(decoder).drop_duplicates("valid_time"),
+        station_id="KLGA",
+        month="2026-01",
+    )
+    by_fxx = result.by_fxx.set_index("fxx")
+
+    assert by_fxx.loc[48, "mae_robust_z"] > 3.5
+    assert by_fxx.loc[48, "performance_outlier"]
+    assert not by_fxx.loc[1:47, "performance_outlier"].any()
+
+
 def test_verify_decoder_baseline_writes_month_artifacts_and_is_rerunnable(tmp_path):
     run_dir = tmp_path / "run"
     decoder_dir = run_dir / "data_store" / "_decoder_cache" / "KLGA"
@@ -206,7 +231,7 @@ def test_verify_decoder_baseline_writes_month_artifacts_and_is_rerunnable(tmp_pa
     assert monthly["month"].tolist() == ["2026-01"]
     assert monthly["complete_init_count"].tolist() == [1]
     manifest = pd.read_json(baseline_dir / "manifest.json", typ="series")
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["error_definition"] == "forecast_c - observed_c"
     assert "2026-01" in manifest["input_fingerprints"]
     assert first["processed_months"] == ["2026-01"]

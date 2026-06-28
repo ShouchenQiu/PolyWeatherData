@@ -1021,6 +1021,61 @@ def test_monthly_decoder_baseline_missing_artifacts_shows_generation_command(
     read_parquet.assert_not_called()
 
 
+def test_monthly_decoder_baseline_old_by_fxx_schema_shows_regeneration_command(
+    tmp_path,
+):
+    run_dir = tmp_path / "run"
+    baseline_dir = run_dir / "artifacts" / "decoder_baseline" / "KLGA"
+    for subdir in ("cells", "per_init", "by_fxx"):
+        (baseline_dir / subdir).mkdir(parents=True)
+    init = pd.Timestamp("2026-01-01 00:00", tz="UTC")
+    pd.DataFrame(
+        [{
+            "month": "2026-01",
+            "complete_init_count": 1,
+            "incomplete_observation_init_count": 0,
+            "invalid_decoder_init_count": 0,
+            "performance_outlier_count": 0,
+            "mae_c": 1.0,
+            "bias_c": 0.0,
+            "rmse_c": 1.0,
+        }]
+    ).to_parquet(baseline_dir / "monthly_summary.parquet", index=False)
+    pd.DataFrame(
+        [{
+            "init_time": init,
+            "mae_c": 1.0,
+            "error_std_c": 0.5,
+            "data_status": "complete",
+            "performance_outlier": False,
+        }]
+    ).to_parquet(baseline_dir / "per_init" / "2026-01.parquet", index=False)
+    pd.DataFrame([{"fxx": 1, "mae_c": 1.0}]).to_parquet(
+        baseline_dir / "by_fxx" / "2026-01.parquet",
+        index=False,
+    )
+    pd.DataFrame(
+        [{"init_time": init, "fxx": 1, "forecast_error_c": 1.0}]
+    ).to_parquet(baseline_dir / "cells" / "2026-01.parquet", index=False)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("streamlit.subheader"))
+        stack.enter_context(patch("streamlit.selectbox", return_value="2026-01"))
+        stack.enter_context(patch("streamlit.columns", return_value=[_MetricCol()] * 6))
+        stack.enter_context(patch("streamlit.caption"))
+        info = stack.enter_context(patch("streamlit.info"))
+        plotly_chart = stack.enter_context(patch("streamlit.plotly_chart"))
+
+        data_health._render_monthly_decoder_baseline(
+            run_dir / "data_store",
+            "KLGA",
+        )
+
+    assert "older schema" in info.call_args.args[0]
+    assert "scripts.verify_decoder_baseline" in info.call_args.args[0]
+    plotly_chart.assert_not_called()
+
+
 def test_monthly_decoder_baseline_renders_month_fxx_and_init_views(tmp_path):
     run_dir = tmp_path / "run"
     baseline_dir = run_dir / "artifacts" / "decoder_baseline" / "KLGA"
@@ -1050,7 +1105,16 @@ def test_monthly_decoder_baseline_renders_month_fxx_and_init_views(tmp_path):
         }]
     ).to_parquet(baseline_dir / "per_init" / "2026-01.parquet", index=False)
     pd.DataFrame(
-        [{"fxx": fxx, "mae_c": 1.0, "sample_count": 1} for fxx in range(1, 49)]
+        [
+            {
+                "fxx": fxx,
+                "mae_c": 1.0,
+                "error_std_c": 0.5,
+                "performance_outlier": False,
+                "sample_count": 1,
+            }
+            for fxx in range(1, 49)
+        ]
     ).to_parquet(baseline_dir / "by_fxx" / "2026-01.parquet", index=False)
     pd.DataFrame(
         [
@@ -1074,6 +1138,7 @@ def test_monthly_decoder_baseline_renders_month_fxx_and_init_views(tmp_path):
         )
         stack.enter_context(patch("streamlit.columns", return_value=[_MetricCol()] * 6))
         stack.enter_context(patch("streamlit.success"))
+        caption = stack.enter_context(patch("streamlit.caption"))
         dataframe = stack.enter_context(patch("streamlit.dataframe"))
         chart = stack.enter_context(patch("streamlit.plotly_chart"))
 
@@ -1083,8 +1148,82 @@ def test_monthly_decoder_baseline_renders_month_fxx_and_init_views(tmp_path):
         )
 
     assert chart.call_count == 3
+    assert "0.6745" in caption.call_args.args[0]
+    assert "3.5" in caption.call_args.args[0]
+    assert "red" in caption.call_args.args[0].lower()
     rendered = [call.args[0] for call in dataframe.call_args_list]
     assert any("forecast_error_c" in frame.columns for frame in rendered)
+
+
+def test_decoder_baseline_per_init_figure_uses_error_band_and_top_legend():
+    first = pd.Timestamp("2026-01-01", tz="UTC")
+    frame = pd.DataFrame(
+        [
+            {
+                "init_time": first,
+                "mae_c": 2.0,
+                "error_std_c": 0.5,
+                "performance_outlier": False,
+            },
+            {
+                "init_time": first + pd.Timedelta(hours=1),
+                "mae_c": 4.0,
+                "error_std_c": 1.0,
+                "performance_outlier": True,
+            },
+        ]
+    )
+
+    fig = data_health._decoder_baseline_per_init_figure(frame, "2026-01")
+
+    traces = {trace.name: trace for trace in fig.data if trace.name}
+    assert traces["MAE ± error std"].fill == "tonexty"
+    assert traces["MAE C"].y == (2.0, 4.0)
+    assert traces["Outlier init"].x == (first + pd.Timedelta(hours=1),)
+    assert traces["Outlier init"].marker.color == "#d62728"
+    assert fig.layout.legend.orientation == "h"
+    assert fig.layout.legend.y > 1.0
+
+
+def test_decoder_baseline_by_fxx_figure_uses_error_band_and_outlier_marker():
+    frame = pd.DataFrame(
+        [
+            {
+                "fxx": fxx,
+                "mae_c": float(fxx),
+                "error_std_c": 0.5,
+                "performance_outlier": fxx == 2,
+            }
+            for fxx in (1, 2, 3)
+        ]
+    )
+
+    fig = data_health._decoder_baseline_by_fxx_figure(frame, "2026-01")
+
+    traces = {trace.name: trace for trace in fig.data if trace.name}
+    assert traces["MAE ± error std"].fill == "tonexty"
+    assert traces["Outlier fxx"].x == (2,)
+    assert traces["Outlier fxx"].marker.color == "#d62728"
+    assert fig.layout.legend.orientation == "h"
+    assert fig.layout.legend.y > 1.0
+
+
+def test_decoder_baseline_selected_init_figure_adds_mae_band_and_bias_line():
+    frame = pd.DataFrame(
+        {
+            "fxx": [1, 2, 3, 4],
+            "forecast_error_c": [-1.0, 1.0, -1.0, 1.0],
+        }
+    )
+
+    fig = data_health._decoder_baseline_init_figure(frame)
+
+    traces = {trace.name: trace for trace in fig.data if trace.name}
+    assert traces["MAE ± error std"].fill == "tonexty"
+    assert traces["Bias C"].y == (0.0, 0.0, 0.0, 0.0)
+    assert traces["HRRR - IEM C"].y == (-1.0, 1.0, -1.0, 1.0)
+    assert fig.layout.legend.orientation == "h"
+    assert fig.layout.legend.y > 1.0
 
 
 def test_hrrr_48h_custom_range_is_limited_to_31_days():

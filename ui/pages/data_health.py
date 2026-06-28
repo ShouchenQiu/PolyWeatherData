@@ -1009,6 +1009,12 @@ def _render_monthly_decoder_baseline(
         f"{month_summary['mae_c']:.2f} / {month_summary['bias_c']:.2f}",
     )
     metric_cols[5].metric("RMSE C", f"{month_summary['rmse_c']:.2f}")
+    st.caption(
+        "Outlier rule: complete init times only; robust z = "
+        "0.6745 × (value − monthly median) / MAD for MAE and error std. "
+        "Either score > 3.5 is marked red as a diagnostic performance "
+        "outlier, not corrupt data."
+    )
 
     per_init_path = baseline_dir / "per_init" / f"{selected_month}.parquet"
     by_fxx_path = baseline_dir / "by_fxx" / f"{selected_month}.parquet"
@@ -1019,6 +1025,15 @@ def _render_monthly_decoder_baseline(
     per_init = _read_parquet_paths([per_init_path])
     by_fxx = _read_parquet_paths([by_fxx_path])
     cells = _read_parquet_paths([cells_path])
+    required_by_fxx = {"error_std_c", "performance_outlier"}
+    if missing := required_by_fxx.difference(by_fxx.columns):
+        st.info(
+            "Decoder baseline artifacts use an older schema "
+            f"(missing: {', '.join(sorted(missing))}). Re-run "
+            f"`python -m scripts.verify_decoder_baseline --run-dir {run_dir} "
+            f"--station {station_id}`."
+        )
+        return
     per_init["init_time"] = pd.to_datetime(per_init["init_time"], utc=True)
     cells["init_time"] = pd.to_datetime(cells["init_time"], utc=True)
 
@@ -1067,76 +1082,169 @@ def _decoder_baseline_per_init_figure(
     per_init: pd.DataFrame,
     month: str,
 ) -> go.Figure:
-    colors = [
-        _POSITIVE_COLOR if bool(value) else _HRRR_COLOR
-        for value in per_init["performance_outlier"]
-    ]
     fig = go.Figure()
+    _add_mae_error_band(
+        fig,
+        per_init["init_time"],
+        per_init["mae_c"],
+        per_init["error_std_c"],
+    )
     fig.add_trace(
         go.Scatter(
             x=tuple(per_init["init_time"]),
             y=tuple(per_init["mae_c"]),
             mode="lines+markers",
             name="MAE C",
-            marker={"color": colors},
+            line={"color": _HRRR_COLOR},
         )
     )
-    fig.add_trace(
-        go.Scatter(
-            x=tuple(per_init["init_time"]),
-            y=tuple(per_init["error_std_c"]),
-            mode="lines",
-            name="Error std C",
-            line={"color": _HRRR_EXTRAPOLATED_COLOR},
+    outliers = per_init[per_init["performance_outlier"].astype(bool)]
+    if not outliers.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=tuple(outliers["init_time"]),
+                y=tuple(outliers["mae_c"]),
+                mode="markers",
+                name="Outlier init",
+                marker={
+                    "color": _POSITIVE_COLOR,
+                    "size": 9,
+                    "symbol": "diamond",
+                },
+            )
         )
-    )
     fig.update_layout(
         title=f"{month} Per-init HRRR Baseline",
         xaxis_title="init_time UTC",
         yaxis_title="error C",
         margin=_CHART_MARGIN,
+        legend=_top_legend(),
     )
     return fig
+
+
+def _add_mae_error_band(
+    fig: go.Figure,
+    x: pd.Series,
+    mae: pd.Series,
+    error_std: pd.Series,
+) -> None:
+    lower = pd.to_numeric(mae, errors="coerce") - pd.to_numeric(
+        error_std,
+        errors="coerce",
+    )
+    upper = pd.to_numeric(mae, errors="coerce") + pd.to_numeric(
+        error_std,
+        errors="coerce",
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=tuple(x),
+            y=tuple(lower),
+            mode="lines",
+            line={"width": 0},
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=tuple(x),
+            y=tuple(upper),
+            mode="lines",
+            line={"width": 0},
+            fill="tonexty",
+            fillcolor="rgba(31, 119, 180, 0.18)",
+            name="MAE ± error std",
+            hoverinfo="skip",
+        )
+    )
+
+
+def _top_legend() -> dict:
+    return {
+        "orientation": "h",
+        "yanchor": "bottom",
+        "y": 1.02,
+        "xanchor": "left",
+        "x": 0.0,
+    }
 
 
 def _decoder_baseline_by_fxx_figure(
     by_fxx: pd.DataFrame,
     month: str,
 ) -> go.Figure:
-    fig = go.Figure(
-        data=[
-            go.Scatter(
-                x=tuple(by_fxx["fxx"]),
-                y=tuple(by_fxx["mae_c"]),
-                mode="lines+markers",
-                name="MAE C",
-                line={"color": _HRRR_COLOR},
-            )
-        ]
+    fig = go.Figure()
+    _add_mae_error_band(
+        fig,
+        by_fxx["fxx"],
+        by_fxx["mae_c"],
+        by_fxx["error_std_c"],
     )
+    fig.add_trace(
+        go.Scatter(
+            x=tuple(by_fxx["fxx"]),
+            y=tuple(by_fxx["mae_c"]),
+            mode="lines+markers",
+            name="MAE C",
+            line={"color": _HRRR_COLOR},
+        )
+    )
+    outliers = by_fxx[by_fxx["performance_outlier"].astype(bool)]
+    if not outliers.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=tuple(outliers["fxx"]),
+                y=tuple(outliers["mae_c"]),
+                mode="markers",
+                name="Outlier fxx",
+                marker={
+                    "color": _POSITIVE_COLOR,
+                    "size": 10,
+                    "symbol": "diamond",
+                },
+            )
+        )
     fig.update_layout(
         title=f"{month} HRRR Baseline MAE by Forecast Hour",
         xaxis_title="fxx",
         yaxis_title="MAE C",
         margin=_CHART_MARGIN,
+        legend=_top_legend(),
     )
     return fig
 
 
 def _decoder_baseline_init_figure(cells: pd.DataFrame) -> go.Figure:
+    errors = pd.to_numeric(cells["forecast_error_c"], errors="coerce")
+    mae = float(errors.abs().mean())
+    error_std = float(errors.std(ddof=0))
+    bias = float(errors.mean())
+    center = pd.Series(mae, index=cells.index, dtype=float)
+    spread = pd.Series(error_std, index=cells.index, dtype=float)
+    fig = go.Figure()
+    _add_mae_error_band(fig, cells["fxx"], center, spread)
     colors = [
         _POSITIVE_COLOR if value >= 0 else _NEGATIVE_COLOR
-        for value in cells["forecast_error_c"]
+        for value in errors
     ]
-    fig = go.Figure(
-        data=[
-            go.Bar(
-                x=tuple(cells["fxx"]),
-                y=tuple(cells["forecast_error_c"]),
-                marker={"color": colors},
-                name="HRRR - IEM C",
-            )
-        ]
+    fig.add_trace(
+        go.Bar(
+            x=tuple(cells["fxx"]),
+            y=tuple(errors),
+            marker={"color": colors},
+            name="HRRR - IEM C",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=tuple(cells["fxx"]),
+            y=tuple([bias] * len(cells)),
+            mode="lines",
+            name="Bias C",
+            line={"color": _HRRR_SPLICE_COLOR, "dash": "dash"},
+        )
     )
     fig.add_hline(y=0, line_color=_ZERO_LINE_COLOR, line_width=1)
     fig.update_layout(
@@ -1144,6 +1252,7 @@ def _decoder_baseline_init_figure(cells: pd.DataFrame) -> go.Figure:
         xaxis_title="fxx",
         yaxis_title="forecast error C",
         margin=_CHART_MARGIN,
+        legend=_top_legend(),
     )
     return fig
 
