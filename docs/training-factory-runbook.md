@@ -148,8 +148,15 @@ Training-readiness audit:
 
 Readiness audit streams each split's processed, built, and skipped init counts
 with elapsed time. Lower `--progress-every` for more frequent updates.
+Each completed split is atomically persisted below
+`artifacts/audit_frames/` with a fingerprint of the HRRR, observation, and
+decoder rows that can affect that split. A repeated audit reuses source-valid
+split frames and rebuilds only stale splits. The first audit after upgrading
+from a workspace without these artifacts must still build all three splits.
+
 Training must not start unless `audit_summary.json` contains `"ready": true`.
 An unsuccessful readiness audit also writes `failed_audit_summary.json`.
+Successful re-audit removes stale failed evidence.
 
 ## 3. Train Candidate
 
@@ -181,7 +188,9 @@ Inline split ranges are also supported:
 ```
 
 Training always publishes an inactive candidate. It cannot write production
-active state.
+active state. Before fitting, training validates and reuses the persisted
+audited split frames; it fails closed if their station, ranges, or source
+fingerprints no longer match the requested experiment.
 
 ## 4. Package Candidate
 

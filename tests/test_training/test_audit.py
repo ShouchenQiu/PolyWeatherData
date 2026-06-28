@@ -124,6 +124,102 @@ def test_audit_training_readiness_reports_hash_samples_and_feature_order(tmp_pat
     assert summary["feature_list_and_order"]["target"] == "temp_error"
 
 
+def test_audit_training_readiness_reuses_cached_split_frames(tmp_path):
+    class CountingBuilder(FakeBuilder):
+        def __init__(self):
+            self.calls = []
+
+        def build_frame(self, station, init_times, split):
+            self.calls.append(split)
+            return super().build_frame(station, init_times, split)
+
+    data_store = tmp_path / "data_store"
+    cache_dir = tmp_path / "audit_frames"
+    split_ranges = {
+        "train": ("2026-01-01", "2026-01-01"),
+        "val": ("2026-01-02", "2026-01-02"),
+        "test": ("2026-01-03", "2026-01-03"),
+    }
+    first_builder = CountingBuilder()
+
+    first = audit_training_readiness(
+        data_store=data_store,
+        station_id="KLGA",
+        split_ranges=split_ranges,
+        dataset_builder=first_builder,
+        frame_cache_dir=cache_dir,
+    )
+    second_builder = CountingBuilder()
+    second = audit_training_readiness(
+        data_store=data_store,
+        station_id="KLGA",
+        split_ranges=split_ranges,
+        dataset_builder=second_builder,
+        frame_cache_dir=cache_dir,
+    )
+
+    assert first_builder.calls == ["train", "val", "test"]
+    assert second_builder.calls == []
+    assert all(not split["reused"] for split in first["splits"].values())
+    assert all(split["reused"] for split in second["splits"].values())
+    assert second["data_order_hash"] == first["data_order_hash"]
+    assert sorted(path.name for path in cache_dir.glob("*.parquet")) == [
+        "test.parquet",
+        "train.parquet",
+        "val.parquet",
+    ]
+
+
+def test_audit_cache_rebuilds_only_split_affected_by_source_change(tmp_path):
+    class CountingBuilder(FakeBuilder):
+        def __init__(self):
+            self.calls = []
+
+        def build_frame(self, station, init_times, split):
+            self.calls.append(split)
+            return super().build_frame(station, init_times, split)
+
+    data_store = tmp_path / "data_store"
+    cache_dir = tmp_path / "audit_frames"
+    split_ranges = {
+        "train": ("2026-01-01", "2026-01-01"),
+        "val": ("2026-04-01", "2026-04-01"),
+        "test": ("2026-07-01", "2026-07-01"),
+    }
+    audit_training_readiness(
+        data_store=data_store,
+        station_id="KLGA",
+        split_ranges=split_ranges,
+        dataset_builder=CountingBuilder(),
+        frame_cache_dir=cache_dir,
+    )
+    ParquetStore(data_store / "obs").append(
+        "KLGA",
+        pd.DataFrame(
+            [
+                {
+                    "valid_time": pd.Timestamp("2026-07-02 00:00:00", tz="UTC"),
+                    "raw_tmpc_tenths": 1.0,
+                }
+            ]
+        ),
+    )
+    builder = CountingBuilder()
+
+    summary = audit_training_readiness(
+        data_store=data_store,
+        station_id="KLGA",
+        split_ranges=split_ranges,
+        dataset_builder=builder,
+        frame_cache_dir=cache_dir,
+    )
+
+    assert builder.calls == ["test"]
+    assert summary["splits"]["train"]["reused"] is True
+    assert summary["splits"]["val"]["reused"] is True
+    assert summary["splits"]["test"]["reused"] is False
+
+
 def test_audit_training_readiness_streams_split_progress(tmp_path, capsys):
     class ProgressBuilder(FakeBuilder):
         def build_frame(
@@ -210,3 +306,28 @@ def test_audit_workspace_writes_failed_evidence(tmp_path):
     assert result["status"] == "audit_failed"
     assert (run_dir / "audit_summary.json").exists()
     assert (run_dir / "failed_audit_summary.json").exists()
+
+
+def test_successful_audit_removes_stale_failed_evidence(tmp_path):
+    run_dir = tmp_path / "run"
+    (run_dir / "data_store").mkdir(parents=True)
+    split_ranges = {
+        "train": ("2026-01-01", "2026-01-01"),
+        "val": ("2026-01-02", "2026-01-02"),
+        "test": ("2026-01-03", "2026-01-03"),
+    }
+    audit_workspace(
+        run_dir,
+        "KLGA",
+        split_ranges,
+        audit_fn=lambda **_kwargs: {"ready": False, "failures": ["missing"]},
+    )
+
+    audit_workspace(
+        run_dir,
+        "KLGA",
+        split_ranges,
+        audit_fn=lambda **_kwargs: {"ready": True, "failures": []},
+    )
+
+    assert not (run_dir / "failed_audit_summary.json").exists()

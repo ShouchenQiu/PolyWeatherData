@@ -58,6 +58,10 @@ class TrainingWorkspace:
     def audit_summary_path(self) -> Path:
         return self.run_dir / "audit_summary.json"
 
+    @property
+    def audit_frames_dir(self) -> Path:
+        return self.artifacts_dir / "audit_frames"
+
     def ensure(self) -> None:
         for path in (
             self.data_store_dir,

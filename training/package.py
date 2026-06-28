@@ -111,6 +111,7 @@ def export_lab_input_package(run_dir: Path | str) -> dict[str, Any]:
     workspace.require_ready_audit()
     required = (
         workspace.data_store_dir,
+        workspace.audit_frames_dir,
         workspace.audit_summary_path,
         workspace.stage_state_path,
         workspace.manifest_path,

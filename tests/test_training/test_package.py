@@ -70,8 +70,12 @@ def test_lab_input_package_includes_decoder_cache_and_audit_evidence(tmp_path) -
     workspace.write_json(workspace.audit_summary_path, {"ready": True})
     workspace.write_json(workspace.stage_state_path, {"stages": {}})
     workspace.write_json(workspace.manifest_path, {"run_id": workspace.run_id})
+    audited_frame = workspace.audit_frames_dir / "train.parquet"
+    audited_frame.parent.mkdir(parents=True)
+    audited_frame.write_text("frame", encoding="ascii")
 
     result = export_lab_input_package(workspace.run_dir)
 
     assert "data_store/_decoder_cache/KLGA/2026-01.parquet" in result["members"]
+    assert "artifacts/audit_frames/train.parquet" in result["members"]
     assert "audit_summary.json" in result["members"]

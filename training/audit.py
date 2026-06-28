@@ -14,6 +14,7 @@ from config.settings import Settings
 from data.manager import DataManager
 from data.storage.parquet_store import ParquetStore
 from model.features import TARGET, TFT_KNOWN_REALS, TFT_UNKNOWN_REALS
+from training.audit_frames import AuditedFrameCache
 from training.dataset import (
     DECODER_WEIGHT_COLUMN,
     TrainingDatasetBuilder,
@@ -48,6 +49,7 @@ def audit_workspace(
         data_store=workspace.data_store_dir,
         station_id=station_id,
         split_ranges=split_ranges,
+        frame_cache_dir=workspace.audit_frames_dir,
         **audit_kwargs,
     )
     workspace.write_json(workspace.audit_summary_path, summary)
@@ -57,6 +59,8 @@ def audit_workspace(
             workspace.run_dir / "failed_audit_summary.json",
             summary,
         )
+    else:
+        (workspace.run_dir / "failed_audit_summary.json").unlink(missing_ok=True)
     result = {
         "status": status,
         "station": station_id,
@@ -110,12 +114,18 @@ def audit_training_readiness(
     dataset_builder: Any | None = None,
     progress: bool = False,
     progress_every: int = 100,
+    frame_cache_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     root = Path(data_store)
     station = STATIONS[station_id]
     failures: list[str] = []
     split_summaries: dict[str, Any] = {}
     frames: list[pd.DataFrame] = []
+    frame_cache = (
+        AuditedFrameCache(frame_cache_dir, root)
+        if frame_cache_dir is not None
+        else None
+    )
 
     if dataset_builder is None:
         settings = Settings(data_store_dir=root)
@@ -135,6 +145,22 @@ def audit_training_readiness(
                 f"range={start}:{end}",
                 flush=True,
             )
+
+        source_fingerprint = None
+        cached = (
+            frame_cache.load(split_name, station_id, start, end)
+            if frame_cache is not None
+            else None
+        )
+        reused = cached is not None
+        if cached is not None:
+            frame, source_fingerprint = cached
+            if progress:
+                print(
+                    f"[readiness {split_name}] reuse cached frame "
+                    f"rows={len(frame)}",
+                    flush=True,
+                )
 
         def report_progress(
             completed: int,
@@ -156,17 +182,29 @@ def audit_training_readiness(
                     "progress_callback": report_progress,
                     "progress_every": progress_every,
                 }
-            frame = dataset_builder.build_frame(
-                station,
-                init_times,
-                split=split_name,
-                **build_kwargs,
-            )
+            if cached is None:
+                frame = dataset_builder.build_frame(
+                    station,
+                    init_times,
+                    split=split_name,
+                    **build_kwargs,
+                )
+                if frame_cache is not None:
+                    source_fingerprint = frame_cache.save(
+                        split_name,
+                        station_id,
+                        start,
+                        end,
+                        frame,
+                    )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"{split_name}: builder failed: {exc}")
             frame = pd.DataFrame()
         frames.append(frame)
         summary = _training_frame_summary(frame, init_times)
+        summary["reused"] = reused
+        if source_fingerprint is not None:
+            summary["source_fingerprint"] = source_fingerprint
         split_summaries[split_name] = summary
         if not summary["non_empty"]:
             failures.append(f"{split_name}: empty split")

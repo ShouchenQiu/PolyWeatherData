@@ -24,6 +24,7 @@ def test_build_remote_training_bundle_includes_training_code_and_excludes_produc
     assert "data/storage/parquet_store.py" in members
     assert "training/__init__.py" in members
     assert "training/artifacts.py" in members
+    assert "training/audit_frames.py" in members
     assert "training/config.py" in members
     assert "training/dataset.py" in members
     assert "training/package.py" in members

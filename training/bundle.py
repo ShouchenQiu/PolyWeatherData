@@ -37,6 +37,7 @@ _SOURCE_FILES = (
     "model/store/registry.py",
     "training/__init__.py",
     "training/artifacts.py",
+    "training/audit_frames.py",
     "training/config.py",
     "training/dataset.py",
     "training/package.py",

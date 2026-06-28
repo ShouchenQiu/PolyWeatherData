@@ -37,6 +37,7 @@ from training.workspace import TrainingWorkspace
 if TYPE_CHECKING:
     from data.storage.parquet_store import ParquetStore
     from model.store.registry import ModelRegistry
+    from training.audit_frames import AuditedFrameCache
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,7 @@ def _train_candidate(**kwargs: Any) -> dict[str, Any]:
     from data.storage.parquet_store import ParquetStore
     from db.schema import DbClient
     from model.store.registry import ModelRegistry
+    from training.audit_frames import AuditedFrameCache
     from training.dataset import TrainingDecoderCache
 
     workspace: TrainingWorkspace = kwargs["workspace"]
@@ -144,6 +146,10 @@ def _train_candidate(**kwargs: Any) -> dict[str, Any]:
             data_manager=data_manager,
             decoder_cache=decoder_cache,
             station_config=STATIONS[kwargs["station_id"]],
+            audited_frame_cache=AuditedFrameCache(
+                workspace.audit_frames_dir,
+                workspace.data_store_dir,
+            ),
             random_seed=kwargs["seed"],
             torch_deterministic=kwargs["deterministic"],
             precision=kwargs["precision"],
@@ -185,6 +191,7 @@ class TftTrainer:
         decoder_cache: object | None = None,
         dataset_builder: object | None = None,
         station_config: object | None = None,
+        audited_frame_cache: "AuditedFrameCache | None" = None,
         random_seed: int = 42,
         torch_deterministic: bool = True,
         precision: str | int = 32,
@@ -201,6 +208,7 @@ class TftTrainer:
         self._decoder_cache = decoder_cache
         self._dataset_builder = dataset_builder
         self._station_config = station_config
+        self._audited_frame_cache = audited_frame_cache
         self._random_seed = int(
             experiment_config.trainer.seed
             if experiment_config is not None else random_seed
@@ -464,7 +472,43 @@ class TftTrainer:
             )
         return df
 
-    def _build_split_frames(self, station_id: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def _build_split_frames(
+        self,
+        station_id: str,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        if self._audited_frame_cache is not None:
+            cached_frames: list[pd.DataFrame] = []
+            ranges = (
+                ("train", self._settings.train_start, self._settings.train_end),
+                ("val", self._settings.val_start, self._settings.val_end),
+                ("test", self._settings.test_start, self._settings.test_end),
+            )
+            for split, start, end in ranges:
+                print(
+                    f"[train data] validate audited {split} frame "
+                    f"range={start}:{end}",
+                    flush=True,
+                )
+                cached = self._audited_frame_cache.load(
+                    split,
+                    station_id,
+                    start,
+                    end,
+                )
+                if cached is None:
+                    raise RuntimeError(
+                        f"audited {split} frame is missing, stale, or does not "
+                        f"match station={station_id} range={start}:{end}; "
+                        "rerun scripts.audit_training_data"
+                    )
+                frame, _fingerprint = cached
+                print(
+                    f"[train data] reuse audited {split} frame rows={len(frame)}",
+                    flush=True,
+                )
+                cached_frames.append(frame)
+            return cached_frames[0], cached_frames[1], cached_frames[2]
+
         if self._dataset_builder is None:
             if self._data_mgr is None or self._decoder_cache is None:
                 raise ValueError(

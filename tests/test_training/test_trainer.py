@@ -10,6 +10,7 @@ import pytest
 
 from config.settings import Settings
 from config.stations import STATIONS
+from training.audit_frames import AuditedFrameCache
 from training.config import TrainingExperimentConfig
 from training.trainer import TftTrainer
 
@@ -203,6 +204,89 @@ def test_tft_trainer_uses_settings_splits_and_publishes_dataset_pkl(
     assert registry.publish_kwargs["training_dataset_pkl"].exists()
     assert registry.publish_kwargs["metrics"]["train_mae"] != registry.publish_kwargs["metrics"]["best_val_loss"]
     assert result["test_mae"] == 1.23
+
+
+def test_tft_trainer_reuses_source_validated_audited_frames(tmp_path, monkeypatch):
+    _install_training_fakes(monkeypatch)
+    settings = Settings(
+        data_store_dir=tmp_path / "data",
+        train_start="2026-01-01",
+        train_end="2026-01-01",
+        val_start="2026-01-02",
+        val_end="2026-01-02",
+        test_start="2026-01-03",
+        test_end="2026-01-03",
+    )
+    cache = AuditedFrameCache(tmp_path / "audit_frames", settings.data_store_dir)
+    source_builder = FakeBuilder()
+    for split, start, end in (
+        ("train", settings.train_start, settings.train_end),
+        ("val", settings.val_start, settings.val_end),
+        ("test", settings.test_start, settings.test_end),
+    ):
+        init_times = list(
+            pd.date_range(
+                f"{start} 00:00:00",
+                f"{end} 23:00:00",
+                freq="h",
+                tz="UTC",
+            )
+        )
+        cache.save(
+            split,
+            "KLGA",
+            start,
+            end,
+            source_builder.build_frame(STATIONS["KLGA"], init_times, split),
+        )
+    unused_builder = FakeBuilder()
+    registry = FakeRegistry()
+    monkeypatch.setattr(TftTrainer, "_eval_mae", lambda *args, **kwargs: 1.23)
+    trainer = TftTrainer(
+        store=None,
+        registry=registry,
+        output_dir=tmp_path / "checkpoints",
+        settings=settings,
+        dataset_builder=unused_builder,
+        station_config=STATIONS["KLGA"],
+        audited_frame_cache=cache,
+    )
+
+    result = trainer.run(station_id="KLGA", version="cached")
+
+    assert unused_builder.calls == []
+    assert result["test_mae"] == 1.23
+
+
+def test_tft_trainer_rejects_missing_or_stale_audited_frame(tmp_path, monkeypatch):
+    _install_training_fakes(monkeypatch)
+    settings = Settings(
+        data_store_dir=tmp_path / "data",
+        train_start="2026-01-01",
+        train_end="2026-01-01",
+        val_start="2026-01-02",
+        val_end="2026-01-02",
+        test_start="2026-01-03",
+        test_end="2026-01-03",
+    )
+    builder = FakeBuilder()
+    trainer = TftTrainer(
+        store=None,
+        registry=FakeRegistry(),
+        output_dir=tmp_path / "checkpoints",
+        settings=settings,
+        dataset_builder=builder,
+        station_config=STATIONS["KLGA"],
+        audited_frame_cache=AuditedFrameCache(
+            tmp_path / "audit_frames",
+            settings.data_store_dir,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="rerun scripts.audit_training_data"):
+        trainer.run(station_id="KLGA", version="stale")
+
+    assert builder.calls == []
 
 
 def test_tft_trainer_writes_training_metadata_and_result_json(tmp_path, monkeypatch):
