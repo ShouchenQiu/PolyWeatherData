@@ -22,7 +22,7 @@ DEFAULT_END = "2026-06-04"
 
 
 def prepare_training_data(
-    run_dir: Path | str = Path(".demo"),
+    run_dir: Path | str,
     station_id: str = "KLGA",
     start_date: str = DEFAULT_START,
     end_date: str = DEFAULT_END,

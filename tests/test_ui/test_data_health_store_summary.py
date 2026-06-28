@@ -264,7 +264,11 @@ def test_data_health_renders_temperature_comparison_chart(tmp_path):
         stack.enter_context(patch("streamlit.columns", return_value=[_MetricCol(), _MetricCol(), _MetricCol(), _MetricCol(), _MetricCol()]))
         plotly_chart = stack.enter_context(patch("streamlit.plotly_chart"))
 
-        data_health.render(db, data_store_dir=root)
+        data_health.render(
+            db,
+            data_store_dir=root,
+            truth_store_dir=root / "_truth_weather_com",
+        )
 
     assert plotly_chart.call_count >= 1
 
@@ -306,7 +310,11 @@ def test_data_health_renders_iem_weather_truth_from_cache(tmp_path):
         ]))
         plotly_chart = stack.enter_context(patch("streamlit.plotly_chart"))
 
-        data_health.render(db, data_store_dir=root)
+        data_health.render(
+            db,
+            data_store_dir=root,
+            truth_store_dir=root / "_truth_weather_com",
+        )
 
     rendered_tables = [call.args[0] for call in dataframe.call_args_list]
     truth_table = next(table for table in rendered_tables if "truth_error_f" in table.columns)
@@ -706,7 +714,12 @@ def test_iem_weather_truth_frame_joins_hourly_obs_and_computes_f_error(tmp_path)
         ]
     ).to_parquet(cache_dir / "2026-06-03.parquet", index=False)
 
-    frame, message = data_health._iem_weather_truth_frame(root, "KLGA", temp_frame)
+    frame, message = data_health._iem_weather_truth_frame(
+        root,
+        "KLGA",
+        temp_frame,
+        truth_store_dir=root / "_truth_weather_com",
+    )
 
     assert message is None
     assert frame["valid_hour"].tolist() == [valid_hour]
@@ -729,7 +742,7 @@ def test_iem_weather_truth_frame_uses_independent_truth_store(
     monkeypatch,
 ):
     root = tmp_path / "new_run" / "data_store"
-    truth_root = tmp_path / "old_demo" / "_truth_weather_com"
+    truth_root = tmp_path / "project" / "data_store" / "_truth_weather_com"
     valid_hour = pd.Timestamp("2026-06-04 01:00:00", tz="UTC")
     temp_frame = pd.DataFrame(
         [{
@@ -761,6 +774,22 @@ def test_iem_weather_truth_frame_uses_independent_truth_store(
 
     assert message is None
     assert frame["weather_com_temp_f"].tolist() == [68.0]
+
+
+def test_truth_store_default_is_project_level_not_selected_training_store(
+    tmp_path,
+    monkeypatch,
+):
+    selected_store = tmp_path / "run" / "data_store"
+    project_truth = tmp_path / "project" / "data_store" / "_truth_weather_com"
+    monkeypatch.delenv("POLYWEATHER_TRUTH_STORE", raising=False)
+    monkeypatch.setattr(
+        data_health,
+        "Settings",
+        lambda: type("_Settings", (), {"truth_store_dir": project_truth})(),
+    )
+
+    assert data_health._resolve_truth_store_dir(selected_store) == project_truth
 
 
 def test_iem_weather_truth_frame_prefers_iem_representative_weather_candidate(tmp_path):

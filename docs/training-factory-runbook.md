@@ -106,23 +106,6 @@ Decoder dependency warming fetches only the nearest prior MAJOR run for each
 off-hour init. It deliberately does not fetch the MAJOR run before that: the
 older 48-hour horizon ends earlier and cannot fill the later tail.
 
-After changing decoder fill policy, rotate the existing station cache before
-preparation; otherwise restartable preparation correctly treats its old 48-row
-windows as complete and skips them:
-
-```bash
-mv "$RUN_DIR/data_store/_decoder_cache/$STATION" \
-  "$RUN_DIR/data_store/_decoder_cache/${STATION}.pre-persistence"
-./.venv/bin/python -m scripts.batch_prepare_training_data \
-  --run-dir "$RUN_DIR" \
-  --station "$STATION" \
-  --start 2024-10-01 \
-  --end 2026-05-31 \
-  --workers 4 \
-  --skip-hrrr \
-  --skip-iem
-```
-
 ## 2. Audit
 
 Coverage-only audit:

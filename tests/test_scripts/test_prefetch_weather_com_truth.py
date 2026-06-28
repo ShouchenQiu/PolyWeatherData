@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import sys
+from unittest.mock import MagicMock
+
 import pandas as pd
 
 from data.storage.parquet_store import ParquetStore
+from scripts import prefetch_weather_com_truth as prefetch_module
 from scripts.prefetch_weather_com_truth import prefetch_weather_com_truth
 
 
@@ -82,3 +86,42 @@ def test_prefetch_reports_partial_failures_and_keeps_completed_dates(tmp_path):
     assert summary["fetched_dates"] == 1
     assert summary["errors"] == 1
     assert summary["error_details"][0]["date"] == "2026-06-02"
+
+
+def test_cli_defaults_to_project_truth_store_not_selected_data_store(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    selected_store = tmp_path / "run" / "data_store"
+    project_truth = tmp_path / "project" / "data_store" / "_truth_weather_com"
+    monkeypatch.delenv("POLYWEATHER_TRUTH_STORE", raising=False)
+    monkeypatch.setattr(
+        prefetch_module,
+        "Settings",
+        lambda: type(
+            "_Settings",
+            (),
+            {
+                "data_store_dir": tmp_path / "default-data",
+                "truth_store_dir": project_truth,
+            },
+        )(),
+    )
+    prefetch = MagicMock(return_value={"errors": 0})
+    monkeypatch.setattr(prefetch_module, "prefetch_weather_com_truth", prefetch)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prefetch_weather_com_truth",
+            "--data-store",
+            str(selected_store),
+        ],
+    )
+
+    prefetch_module._cli()
+
+    assert prefetch.call_args.kwargs["data_store_dir"] == selected_store
+    assert prefetch.call_args.kwargs["truth_store_dir"] == project_truth
+    assert '"errors": 0' in capsys.readouterr().out

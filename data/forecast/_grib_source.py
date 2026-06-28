@@ -15,8 +15,8 @@ Non-MAJOR init_times (03Z, 09Z, 15Z, 21Z)
 Only fxx 0-18 are available from NOAA for non-MAJOR runs.  fetch() detects the
 init hour, downloads fxx 0-18, then fetches the nearest prior MAJOR-hour run
 (fxx 0-48) and splices them via HrrrFill.  The final 1-5 uncovered hours are
-bounded linear extrapolations; an earlier MAJOR run cannot cover later
-valid_times and is not fetched.  [ADR-0012]
+filled by persisting the last sourced values; an earlier MAJOR run cannot cover
+later valid_times and is not fetched.  [ADR-0016]
 """
 from __future__ import annotations
 

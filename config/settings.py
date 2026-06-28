@@ -22,6 +22,14 @@ class Settings:
     data_store_dir: Path = field(
         default_factory=lambda: _PROJECT_ROOT / "data_store"
     )
+    truth_store_dir: Path = field(
+        default_factory=lambda: Path(
+            os.environ.get(
+                "POLYWEATHER_TRUTH_STORE",
+                _PROJECT_ROOT / "data_store" / "_truth_weather_com",
+            )
+        )
+    )
     forecast_store_dir: Path | None = None
     obs_store_dir: Path | None = None
     model_store_dir: Path = field(

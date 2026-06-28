@@ -10,7 +10,7 @@ from training.prepare_data import DEFAULT_END, DEFAULT_START, prepare_training_d
 
 def _cli() -> None:
     parser = argparse.ArgumentParser(description="Prepare batch training weather data")
-    parser.add_argument("--run-dir", default=".demo")
+    parser.add_argument("--run-dir", required=True)
     parser.add_argument("--station", default="KLGA", choices=sorted(STATIONS))
     parser.add_argument("--start", default=DEFAULT_START)
     parser.add_argument("--end", default=DEFAULT_END)

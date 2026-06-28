@@ -1570,12 +1570,12 @@ def _resolve_data_store_dir(data_store_dir: Path | str | None = None) -> Path:
 
 
 def _resolve_truth_store_dir(
-    data_store_dir: Path,
+    _data_store_dir: Path,
     truth_store_dir: Path | str | None = None,
 ) -> Path:
-    if truth_store_dir is None:
-        truth_store_dir = os.environ.get("POLYWEATHER_TRUTH_STORE")
-    return Path(truth_store_dir) if truth_store_dir else data_store_dir / "_truth_weather_com"
+    if truth_store_dir is not None:
+        return Path(truth_store_dir)
+    return Settings().truth_store_dir
 
 
 def _read_store(root: Path, subdir: str, station_id: str) -> pd.DataFrame:

@@ -127,8 +127,7 @@ def _cli() -> None:
     )
     truth_store = Path(
         args.truth_store
-        or os.environ.get("POLYWEATHER_TRUTH_STORE")
-        or data_store / "_truth_weather_com"
+        or settings.truth_store_dir
     )
     summary = prefetch_weather_com_truth(
         data_store_dir=data_store,

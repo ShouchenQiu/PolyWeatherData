@@ -30,11 +30,13 @@ def _cli() -> None:
     parser.add_argument("--test", help="start:end")
     args = parser.parse_args()
 
+    if not args.run_dir and not args.data_store:
+        parser.error("provide --run-dir or --data-store")
     run_dir = Path(args.run_dir) if args.run_dir else None
     data_store = (
         Path(args.data_store)
         if args.data_store
-        else (run_dir / "data_store" if run_dir else Path(".demo/data_store"))
+        else run_dir / "data_store"
     )
     split_values = (args.train, args.val, args.test)
     if all(split_values):

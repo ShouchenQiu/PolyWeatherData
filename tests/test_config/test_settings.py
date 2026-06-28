@@ -142,6 +142,19 @@ def test_forecast_and_obs_store_dir_defaults():
     assert s.obs_store_dir == s.data_store_dir / "obs"
 
 
+def test_truth_store_dir_is_project_level_and_not_tied_to_data_store(tmp_path):
+    s = Settings(data_store_dir=tmp_path / "training-run" / "data_store")
+
+    assert s.truth_store_dir == s.project_root / "data_store" / "_truth_weather_com"
+
+
+def test_truth_store_dir_reads_environment_override(tmp_path, monkeypatch):
+    truth_store = tmp_path / "weather-truth"
+    monkeypatch.setenv("POLYWEATHER_TRUTH_STORE", str(truth_store))
+
+    assert Settings().truth_store_dir == truth_store
+
+
 def test_tft_training_hyperparameter_defaults():
     s = Settings()
     assert s.tft_hidden_size == 32

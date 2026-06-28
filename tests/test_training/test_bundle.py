@@ -39,7 +39,6 @@ def test_build_remote_training_bundle_includes_training_code_and_excludes_produc
     assert "data/forecast/hrrr_zarr.py" not in members
     assert "data/forecast/_grib_source.py" not in members
     assert "model/pipeline.py" not in members
-    assert "scripts/seed_demo_data.py" not in members
     assert "scripts/batch_download_iem.py" not in members
     assert "scripts/batch_download_zarr.py" not in members
     assert "scripts/batch_prepare_training_data.py" not in members
