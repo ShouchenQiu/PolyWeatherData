@@ -83,7 +83,8 @@ class AuditedFrameCache:
         self.root_dir.mkdir(parents=True, exist_ok=True)
         frame_path = self.frame_path(split)
         frame_tmp = frame_path.with_suffix(".parquet.tmp")
-        frame.to_parquet(frame_tmp, index=False)
+        persisted_frame = _normalize_timestamp_columns(frame)
+        persisted_frame.to_parquet(frame_tmp, index=False)
         frame_tmp.replace(frame_path)
 
         manifest = {
@@ -232,6 +233,14 @@ def _stable_frame_payload(frame: pd.DataFrame) -> bytes:
             )
         hasher.update(row_hashes.to_numpy().tobytes())
     return hasher.digest()
+
+
+def _normalize_timestamp_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    normalized = frame.copy()
+    for column in ("init_time", "valid_time"):
+        if column in normalized.columns:
+            normalized[column] = pd.to_datetime(normalized[column], utc=True)
+    return normalized
 
 
 def _first_valid_time(
