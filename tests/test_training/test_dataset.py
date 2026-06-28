@@ -42,6 +42,15 @@ class FakeCachedDecoderSource(FakeDecoderSource):
         self._full_window_cache = {}
 
 
+class FakeTailFallbackDecoderSource(FakeDecoderSource):
+    def fetch(self, init_time, fxx_range, station):
+        result = super().fetch(init_time, fxx_range, station)
+        frame = result[station.station_id]
+        frame["is_extrapolated"] = frame["fxx"] >= 46
+        frame["extrapolation_step"] = (frame["fxx"] - 45).clip(lower=0)
+        return result
+
+
 class FailingDecoderSource:
     def __init__(self) -> None:
         self.called_inits: list[pd.Timestamp] = []
@@ -107,6 +116,8 @@ def test_decoder_cache_miss_fetches_cleans_and_persists(tmp_path):
     assert list(df["fxx"]) == list(range(1, 49))
     assert df["TMP_2m"].iloc[0] == 1.0
     assert "WS_10m" in df.columns
+    assert df["is_extrapolated"].eq(False).all()  # noqa: E712
+    assert df["extrapolation_step"].eq(0).all()
     assert cache.path_for("KLGA", init).exists()
     assert cache.path_for("KLGA", init).name == "2026-01.parquet"
 
@@ -389,6 +400,44 @@ def test_training_builder_uses_bootstrap_stores_to_build_one_sample(tmp_path):
     assert frame["local_idx"].tolist() == list(range(120))
     assert frame.iloc[:72]["temp_error"].notna().all()
     assert set(frame.iloc[72:]["fxx"].astype(int)) == set(range(1, 49))
+    assert frame["decoder_weight"].eq(1.0).all()
+
+
+def test_training_builder_zero_weights_only_tail_fallback_targets(tmp_path):
+    station = STATIONS["KLGA"]
+    init = pd.Timestamp("2026-01-10 12:00:00", tz="UTC")
+    first_row = init - pd.Timedelta(hours=144)
+    forecast_store = ParquetStore(tmp_path / "forecast")
+    obs_store = ParquetStore(tmp_path / "obs")
+    _append_bootstrap_windows(
+        forecast_store,
+        obs_store,
+        station.station_id,
+        first_row,
+        193,
+    )
+    data_manager = DataManager(
+        [],
+        [],
+        forecast_store,
+        obs_store,
+        settings=Settings(),
+    )
+    cache = TrainingDecoderCache(
+        tmp_path / "decoder-cache",
+        source=FakeTailFallbackDecoderSource(),
+    )
+
+    frame = TrainingDatasetBuilder(data_manager, cache).build_frame(
+        station,
+        [init],
+        split="train",
+    )
+    decoder = frame.iloc[72:]
+
+    assert decoder.loc[decoder["fxx"] <= 45, "decoder_weight"].eq(1.0).all()
+    assert decoder.loc[decoder["fxx"] >= 46, "decoder_weight"].eq(0.0).all()
+    assert frame.iloc[:72]["decoder_weight"].eq(1.0).all()
 
 
 def test_training_builder_records_readiness_skips(tmp_path):

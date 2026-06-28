@@ -253,7 +253,8 @@ class Cleaner:
         """Add derived feature columns to a cleaned IEM observation DataFrame.
 
         Raw temperature/dew point columns are retained as canonical model
-        inputs. Observed wind components are converted to speed + direction.
+        inputs. Observed wind components are converted to speed + direction,
+        then sparse model-input gaps are repaired with provenance flags.
         """
         df = df.copy()
         if "obs_U" in df.columns and "obs_V" in df.columns:
@@ -263,7 +264,81 @@ class Cleaner:
             df["obs_WS"] = ws
             df["obs_WD_sin"] = wds
             df["obs_WD_cos"] = wdc
-        return df
+        return Cleaner.repair_iem_model_inputs(df)
+
+    @staticmethod
+    def repair_iem_model_inputs(df: pd.DataFrame) -> pd.DataFrame:
+        """Repair sparse IEM wind/visibility gaps without hiding provenance.
+
+        Missing raw wind speed is recovered from the already-derived vector
+        speed, missing gust falls back to that repaired speed, and isolated
+        visibility gaps are interpolated in time. Longer visibility outages
+        remain missing so the training audit can reject them.
+        """
+        work = df.copy()
+        original_index = work.index
+        if "valid_time" in work.columns:
+            work = work.assign(_repair_order=np.arange(len(work))).sort_values(
+                "valid_time"
+            )
+
+        speed_missing = (
+            work["raw_wind_spd_kt"].isna()
+            if "raw_wind_spd_kt" in work.columns
+            else pd.Series(False, index=work.index)
+        )
+        if speed_missing.any() and "obs_WS" in work.columns:
+            work.loc[speed_missing, "raw_wind_spd_kt"] = work.loc[
+                speed_missing, "obs_WS"
+            ]
+
+        gust_missing = (
+            work["raw_wind_gust_kt"].isna()
+            if "raw_wind_gust_kt" in work.columns
+            else pd.Series(False, index=work.index)
+        )
+        if (
+            gust_missing.any()
+            and "raw_wind_spd_kt" in work.columns
+        ):
+            work.loc[gust_missing, "raw_wind_gust_kt"] = work.loc[
+                gust_missing, "raw_wind_spd_kt"
+            ]
+
+        visibility_missing = (
+            work["raw_vis_sm"].isna()
+            if "raw_vis_sm" in work.columns
+            else pd.Series(False, index=work.index)
+        )
+        if visibility_missing.any():
+            visibility = pd.to_numeric(work["raw_vis_sm"], errors="coerce")
+            work["raw_vis_sm"] = visibility.interpolate(
+                method="linear",
+                limit=2,
+                limit_direction="both",
+                limit_area="inside",
+            )
+
+        for column, missing in (
+            ("raw_wind_spd_kt", speed_missing),
+            ("raw_wind_gust_kt", gust_missing),
+            ("raw_vis_sm", visibility_missing),
+        ):
+            if column not in work.columns:
+                continue
+            flag = f"{column}_imputed"
+            previous = (
+                work[flag].fillna(False).astype(bool)
+                if flag in work.columns
+                else pd.Series(False, index=work.index)
+            )
+            newly_filled = missing & work[column].notna()
+            work[flag] = previous | newly_filled
+
+        if "_repair_order" in work.columns:
+            work = work.sort_values("_repair_order").drop(columns="_repair_order")
+            work.index = original_index
+        return work
 
     @staticmethod
     def compute_temp_error(df: pd.DataFrame) -> pd.DataFrame:

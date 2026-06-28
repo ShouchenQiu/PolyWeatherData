@@ -531,6 +531,37 @@ def test_pipeline_excludes_extrapolated_fxx_from_daily_high():
     assert captured["n_hours"] <= 12
 
 
+def test_pipeline_persists_last_trusted_quantiles_for_tail_fallback():
+    mc = McSampler(n_samp=200, rng_seed=0)
+    tft = _make_tft_mock()
+    tft.predict.return_value = {
+        fxx: {
+            "p10": float(fxx - 2),
+            "p50": float(fxx),
+            "p90": float(fxx + 2),
+        }
+        for fxx in range(1, 49)
+    }
+    dm = _make_data_mgr(_INIT_TIME)
+    hrrr = _make_hrrr_df(_INIT_TIME)
+    hrrr["is_extrapolated"] = hrrr["fxx"] >= 46
+    dm.fetch_hrrr.return_value = hrrr
+
+    result = ModelPipeline(tft=tft, mc=mc, data_mgr=dm).run(
+        KLGA,
+        _INIT_TIME,
+        _BUCKETS,
+    )
+
+    assert result["tail_fallback_fxx"] == [46, 47, 48]
+    for fxx in (46, 47, 48):
+        assert result["quantiles"][fxx]["p10"] == pytest.approx(43.0)
+        assert result["quantiles"][fxx]["p50"] == pytest.approx(45.0)
+        assert result["quantiles"][fxx]["p90"] == pytest.approx(47.0)
+        assert result["quantiles"][fxx]["is_tail_fallback"] is True
+        assert result["quantiles"][fxx]["fallback_from_fxx"] == 45
+
+
 def test_pipeline_raises_if_all_target_fxx_extrapolated():
     """run() must raise ValueError when all target fxx rows are extrapolated."""
     mc  = McSampler(n_samp=200, rng_seed=0)

@@ -5,11 +5,12 @@ HrrrFill extends these to 48h by aligning on valid_time against the nearest
 prior MAJOR-hour run (00Z, 06Z, 12Z, 18Z) which covers 0-48 fxx.
 
 For valid_times in the tail that are not covered by the nearest MAJOR run
-(up to 5h in the worst case), HrrrFill linearly extrapolates from the last two
-aligned values.  An earlier MAJOR run ends earlier and cannot cover this tail,
-so it is deliberately not consulted.  Extrapolation beyond 5h raises
-RuntimeError.  Extrapolated rows are flagged with ``is_extrapolated=True``.
-[ADR-0012]
+(up to 5h in the worst case), HrrrFill persists the last aligned values.  An
+earlier MAJOR run ends earlier and cannot cover this tail, so it is deliberately
+not consulted.  Filling beyond 5h raises RuntimeError.  Persisted rows retain
+the backwards-compatible ``is_extrapolated=True`` marker and record
+``extrapolation_step`` 1..5.
+[ADR-0016]
 """
 from __future__ import annotations
 
@@ -20,7 +21,15 @@ MAJOR_HOURS = frozenset({0, 6, 12, 18})
 _TARGET_FXX_COUNT = 49  # fxx 0..48 inclusive
 _MAX_EXTRAP_HOURS = 5
 # Metadata columns excluded from data_cols union and not copied from source rows.
-_META_COLS = frozenset({"init_time", "fxx", "valid_time", "_vt", "_vt_raw", "is_extrapolated"})
+_META_COLS = frozenset({
+    "init_time",
+    "fxx",
+    "valid_time",
+    "_vt",
+    "_vt_raw",
+    "is_extrapolated",
+    "extrapolation_step",
+})
 
 
 def nearest_prior_major(init_time: pd.Timestamp) -> pd.Timestamp:
@@ -69,7 +78,7 @@ class HrrrFill:
     using:
         1. non_major_df  for any matching valid_time (highest priority)
         2. nearest_major_df for tail valid_times not in non_major_df
-        3. Linear extrapolation for the final uncovered valid_times
+        3. Last-value persistence for the final uncovered valid_times
            (capped at 5 hours; beyond that raises RuntimeError)
 
     All DataFrames must have a ``valid_time`` column (UTC-aware timestamps).
@@ -95,8 +104,9 @@ class HrrrFill:
         Returns
         -------
         DataFrame with fxx 0..48 rows, reindexed to the non-major init_time.
-        Includes ``is_extrapolated`` column (False for sourced rows, True for
-        linearly-extrapolated rows).
+        Includes ``is_extrapolated`` (False for sourced rows, True for
+        persisted rows) and ``extrapolation_step`` (0 for sourced rows, 1..5
+        for the persisted tail).
 
         Raises
         ------
@@ -128,9 +138,8 @@ class HrrrFill:
 
         rows: list[dict] = []
 
-        # State for linear extrapolation
+        # State for bounded last-value persistence.
         last_aligned: dict | None = None
-        prev_aligned: dict | None = None
         extrap_steps = 0
 
         for fxx in range(_TARGET_FXX_COUNT):
@@ -140,17 +149,15 @@ class HrrrFill:
             if nm_row is not None:
                 src_row: dict | None = nm_row
                 is_extrap = False
-                prev_aligned = last_aligned
                 last_aligned = src_row
                 extrap_steps = 0
             elif maj_idx.get(vt) is not None:
                 src_row = maj_idx[vt]
                 is_extrap = False
-                prev_aligned = last_aligned
                 last_aligned = src_row
                 extrap_steps = 0
             else:
-                # No source covers this valid_time -- linear extrapolation
+                # No source covers this valid_time -- bounded persistence.
                 extrap_steps += 1
                 if extrap_steps > _MAX_EXTRAP_HOURS:
                     raise RuntimeError(
@@ -166,25 +173,17 @@ class HrrrFill:
                 "fxx": fxx,
                 "valid_time": vt,
                 "is_extrapolated": is_extrap,
+                "extrapolation_step": extrap_steps if is_extrap else 0,
             }
 
             if src_row is not None:
                 for col in data_cols:
                     row[col] = src_row.get(col, float("nan"))
             elif last_aligned is not None:
-                # Linear extrapolation: slope from last two aligned rows (per 1h step)
+                # Persist the last real aligned value. This is deliberately
+                # feature-agnostic and cannot overshoot physical bounds.
                 for col in data_cols:
-                    last_val = last_aligned.get(col, float("nan"))
-                    prev_val = (
-                        prev_aligned.get(col, float("nan"))
-                        if prev_aligned is not None
-                        else last_val
-                    )
-                    try:
-                        slope = float(last_val) - float(prev_val)
-                        row[col] = float(last_val) + slope * extrap_steps
-                    except (TypeError, ValueError):
-                        row[col] = float("nan")
+                    row[col] = last_aligned.get(col, float("nan"))
             else:
                 for col in data_cols:
                     row[col] = float("nan")

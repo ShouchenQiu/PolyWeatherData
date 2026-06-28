@@ -20,6 +20,8 @@ from data.storage.cleaner import Cleaner
 from model.features import add_model_features
 from model.tft import MAX_ENCODER_LENGTH
 
+DECODER_WEIGHT_COLUMN = "decoder_weight"
+
 
 @dataclass
 class TrainingDecoderCache:
@@ -520,6 +522,27 @@ class TrainingDecoderCache:
                 f"decoder TMP_2m must be present and non-null for "
                 f"station={station_id} init={init_utc}"
             )
+        if "is_extrapolated" not in decoder.columns:
+            decoder["is_extrapolated"] = False
+        decoder["is_extrapolated"] = (
+            decoder["is_extrapolated"].fillna(False).astype(bool)
+        )
+        decoder["extrapolation_step"] = 0
+        fallback_fxx = sorted(
+            decoder.loc[decoder["is_extrapolated"], "fxx"].astype(int).tolist()
+        )
+        if fallback_fxx:
+            expected = list(range(fallback_fxx[0], 49))
+            if fallback_fxx != expected:
+                raise ValueError(
+                    "decoder is_extrapolated rows must form a contiguous tail "
+                    f"for station={station_id} init={init_utc}; got {fallback_fxx}"
+                )
+            decoder.loc[
+                decoder["is_extrapolated"],
+                "extrapolation_step",
+            ] = range(1, len(fallback_fxx) + 1)
+        decoder["extrapolation_step"] = decoder["extrapolation_step"].astype(int)
         return decoder
 
 
@@ -587,6 +610,13 @@ class TrainingDatasetBuilder:
                 decoder, start_idx=self._encoder_hours, init_utc=init_utc,
                 station_id=station.station_id,
             )
+            encoder[DECODER_WEIGHT_COLUMN] = 1.0
+            extrapolated = (
+                decoder["is_extrapolated"].fillna(False).astype(bool)
+                if "is_extrapolated" in decoder.columns
+                else pd.Series(False, index=decoder.index)
+            )
+            decoder[DECODER_WEIGHT_COLUMN] = (~extrapolated).astype("float32")
             combined = pd.concat([encoder, decoder], ignore_index=True)
             combined["split"] = split
             frames.append(combined)

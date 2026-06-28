@@ -1,5 +1,7 @@
 # HrrrFill resolves non-MAJOR tail gaps with bounded extrapolation
 
+**Status**: superseded by ADR-0016
+
 Non-MAJOR HRRR init times only provide native forecast hours through f18.
 For training decoder windows we still need f1..f48. `HrrrFill` builds that
 window by aligning rows on `valid_time`:

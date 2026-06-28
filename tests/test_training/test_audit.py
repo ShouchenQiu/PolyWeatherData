@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from data.storage.parquet_store import ParquetStore
-from model.features import TFT_KNOWN_REALS
+from model.features import TFT_KNOWN_REALS, TFT_UNKNOWN_REALS
 from training.audit import (
     audit_training_readiness,
     audit_weather_backfill,
@@ -85,6 +85,7 @@ class FakeBuilder:
         for init_time in init_times:
             for i in range(120):
                 row = {col: 1.0 for col in TFT_KNOWN_REALS}
+                row.update({col: 1.0 for col in TFT_UNKNOWN_REALS})
                 row.update(
                     {
                         "init_time_str": str(init_time),
@@ -94,7 +95,7 @@ class FakeBuilder:
                         "time_idx": i,
                         "fxx": max(1, i - 71),
                         "temp_error": 0.1,
-                        "raw_tmpc_tenths": 1.0 if i < 72 else None,
+                        "decoder_weight": 1.0,
                         "split": split,
                     }
                 )
@@ -121,6 +122,33 @@ def test_audit_training_readiness_reports_hash_samples_and_feature_order(tmp_pat
     assert summary["data_order_hash"]
     assert "TMP_2m" in summary["feature_list_and_order"]["known_reals"]
     assert summary["feature_list_and_order"]["target"] == "temp_error"
+
+
+def test_audit_training_readiness_rejects_nan_encoder_unknown_real(tmp_path):
+    class NaNUnknownBuilder(FakeBuilder):
+        def build_frame(self, station, init_times, split):
+            frame = super().build_frame(station, init_times, split)
+            frame.loc[
+                (frame["init_time_str"] == str(init_times[0]))
+                & (frame["local_idx"] == 3),
+                "raw_vis_sm",
+            ] = float("nan")
+            return frame
+
+    summary = audit_training_readiness(
+        data_store=tmp_path / "data_store",
+        station_id="KLGA",
+        split_ranges={
+            "train": ("2026-01-01", "2026-01-01"),
+            "val": ("2026-01-02", "2026-01-02"),
+            "test": ("2026-01-03", "2026-01-03"),
+        },
+        dataset_builder=NaNUnknownBuilder(),
+    )
+
+    assert summary["ready"] is False
+    assert summary["splits"]["train"]["nan_required_columns"] == ["raw_vis_sm"]
+    assert "train: NaN in required columns ['raw_vis_sm']" in summary["failures"]
 
 
 def test_audit_workspace_writes_failed_evidence(tmp_path):

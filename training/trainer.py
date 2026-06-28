@@ -31,6 +31,7 @@ from config.stations import STATIONS
 from model.features import TARGET, TFT_KNOWN_REALS, TFT_UNKNOWN_REALS
 from training.artifacts import write_training_artifacts
 from training.config import ModelConfig, TrainerConfig, TrainingExperimentConfig
+from training.dataset import DECODER_WEIGHT_COLUMN
 from training.workspace import TrainingWorkspace
 
 if TYPE_CHECKING:
@@ -299,6 +300,7 @@ class TftTrainer:
             df_train,
             time_idx                          = "local_idx",
             target                            = _TARGET,
+            weight                            = DECODER_WEIGHT_COLUMN,
             group_ids                         = _GROUP_IDS,
             max_encoder_length                = self._settings.tft_max_encoder_length,
             max_prediction_length             = self._settings.tft_max_prediction_length,
@@ -523,11 +525,23 @@ class TftTrainer:
             all_pred = prediction.output
             if all_pred.ndim == 3:
                 all_pred = all_pred[:, :, 1]
-            target = prediction.y[0] if isinstance(prediction.y, tuple) else prediction.y
+            if isinstance(prediction.y, tuple):
+                target = prediction.y[0]
+                weight = prediction.y[1] if len(prediction.y) > 1 else None
+            else:
+                target = prediction.y
+                weight = None
             if target is None:
                 raise ValueError("prediction target is missing")
-            all_tgt = target
-            mae = float((all_pred - all_tgt).abs().mean())
+            absolute_error = (all_pred - target).abs()
+            if weight is None:
+                mae = float(absolute_error.mean())
+            else:
+                trusted_weight = weight.to(absolute_error)
+                weight_sum = trusted_weight.sum()
+                if float(weight_sum) <= 0:
+                    raise ValueError("prediction target weight has no trusted cells")
+                mae = float((absolute_error * trusted_weight).sum() / weight_sum)
             return round(mae, 5)
         except Exception as exc:
             logger.warning("Could not compute test MAE: %s", exc)

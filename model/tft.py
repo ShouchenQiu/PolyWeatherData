@@ -179,6 +179,10 @@ class TftModel:
         combined = pd.concat(
             [encoder_df, decoder_df], ignore_index=True
         )
+        # New training datasets carry a zero-weight mask for persisted HRRR
+        # tail targets. Prediction has no loss calculation, but
+        # TimeSeriesDataSet.from_dataset still requires the weight column.
+        combined["decoder_weight"] = 1.0
 
         testing = TimeSeriesDataSet.from_dataset(
             self._training_ds,

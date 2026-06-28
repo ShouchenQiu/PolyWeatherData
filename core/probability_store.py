@@ -26,13 +26,14 @@ class ProbabilitySnapshot:
         Mapping of (lo_f, hi_f) -> mc_prob (float, 0..1) for this key.
     quantiles_by_fxx:
         Decoder-hour quantile output shared by all buckets in the snapshot:
-        ``{fxx: {"p10": float, "p50": float, "p90": float}}``.
+        ``{fxx: {"p10": float, "p50": float, "p90": float, ...}}``. Persisted
+        tail rows may also carry fallback provenance.
     last_tick_utc:
         UTC timestamp of the ForecastLoop run that produced this snapshot.
     """
 
     buckets:          dict[tuple[float, float], float]
-    quantiles_by_fxx: dict[int, dict[str, float]]
+    quantiles_by_fxx: dict[int, dict[str, float | int | bool]]
     last_tick_utc:    datetime
 
     def age_minutes(self, now: datetime | None = None) -> float:

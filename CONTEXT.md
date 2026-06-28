@@ -23,11 +23,20 @@ a full 48-hour forecast horizon; non-MAJOR init_times produce only 18 h.
 _Avoid_: full run, extended run
 
 **HRRR fill**: Extending a non-MAJOR init_time's 18-hour forecast to 48 hours by
-splicing valid_times from the nearest prior MAJOR-hour run, then linearly
-extrapolating only the final uncovered 1..5 hours. Earlier MAJOR runs are not
-consulted because they end earlier; following MAJOR runs are forbidden future
-information.
+splicing valid_times from the nearest prior MAJOR-hour run, then persisting the
+last available values across only the final uncovered 1..5 hours. Earlier MAJOR
+runs are not consulted because they end earlier; following MAJOR runs are
+forbidden future information.
 _Avoid_: padding, interpolation
+
+**trusted decoder horizon**: The sourced prefix of a 48-hour decoder window,
+whose length is 48 minus the non-MAJOR init's hour offset from its prior MAJOR.
+_Avoid_: model horizon, available horizon
+
+**tail fallback**: The final 1..5 decoder hours backed by persisted HRRR inputs,
+excluded from TFT loss and trading calculations, and presented using the last
+trusted TFT quantiles.
+_Avoid_: TFT prediction, extrapolated forecast
 
 **encoder window**: Past 72 hours of (f01, IEM obs) pairs fed to the TFT encoder,
 indexed -71..0 relative to current init_time.

@@ -13,7 +13,11 @@ from config.settings import Settings
 from data.manager import DataManager
 from data.storage.parquet_store import ParquetStore
 from model.features import TARGET, TFT_KNOWN_REALS, TFT_UNKNOWN_REALS
-from training.dataset import TrainingDecoderCache, TrainingDatasetBuilder
+from training.dataset import (
+    DECODER_WEIGHT_COLUMN,
+    TrainingDatasetBuilder,
+    TrainingDecoderCache,
+)
 from training.workspace import TrainingWorkspace
 
 
@@ -160,7 +164,17 @@ def _training_frame_summary(
     frame: pd.DataFrame,
     init_times: list[pd.Timestamp],
 ) -> dict[str, Any]:
-    required = set(TFT_KNOWN_REALS + [TARGET, "valid_time", "init_time_str", "local_idx"])
+    required = set(
+        TFT_KNOWN_REALS
+        + TFT_UNKNOWN_REALS
+        + [
+            TARGET,
+            DECODER_WEIGHT_COLUMN,
+            "valid_time",
+            "init_time_str",
+            "local_idx",
+        ]
+    )
     if frame.empty:
         return {
             "row_count": 0,

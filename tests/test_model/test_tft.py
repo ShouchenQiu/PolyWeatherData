@@ -100,6 +100,8 @@ class TestTftModelUnResidualize:
             )
             result = model.predict(enc, dec)
 
+        combined = mock_tsd.from_dataset.call_args.args[1]
+        assert combined["decoder_weight"].eq(1.0).all()
         # Every fxx should have absolute = residual + TMP_2m
         for fxx in range(1, 49):
             assert result[fxx]["p10"] == pytest.approx(residual_row[0] + tmp2m_val)

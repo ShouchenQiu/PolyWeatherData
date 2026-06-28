@@ -203,18 +203,21 @@ def test_fill_tail_extrapolation_raises_beyond_5h():
         fill.fill(non_major, nearest)
 
 
-def test_fill_tail_extrapolation_values_are_linear():
-    """Extrapolated row values follow linear trend from last two aligned rows."""
+def test_fill_tail_uses_last_aligned_values_and_records_fill_age():
+    """Uncovered tail persists the last aligned values and records age 1..N."""
     fill = HrrrFill()
     non_major = _make_df("2026-01-01 03:00", range(0, 19), col_val=1.0)
     # nearest = 00Z fxx 0..48; last two covered rows from nearest
     # fxx_out 44: vt = 03Z+44h = 00Z+47h -> nearest fxx 47: col=1.0+47*0.01=1.47
     # fxx_out 45: vt = 03Z+45h = 00Z+48h -> nearest fxx 48: col=1.0+48*0.01=1.48
-    # fxx_out 46 (1st extrap): slope = (1.48 - 1.47) = 0.01 -> val ~ 1.48 + 0.01 = 1.49
+    # fxx_out 46..48 persist the last available 1.48 value.
     nearest = _make_df("2026-01-01 00:00", range(0, 49), col_val=1.0)
     result = fill.fill(non_major, nearest)
-    fxx46 = result[result["fxx"] == 46].iloc[0]["TMP_2m"]
-    assert fxx46 == pytest.approx(1.48 + 0.01, abs=0.005)
+    tail = result[result["fxx"].between(46, 48)]
+
+    assert tail["TMP_2m"].tolist() == pytest.approx([1.48, 1.48, 1.48])
+    assert tail["extrapolation_step"].tolist() == [1, 2, 3]
+    assert (result.loc[result["fxx"] <= 45, "extrapolation_step"] == 0).all()
 
 
 # ---------------------------------------------------------------------------

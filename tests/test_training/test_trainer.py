@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 
 import pandas as pd
+import pytest
 
 from config.settings import Settings
 from config.stations import STATIONS
@@ -33,6 +34,7 @@ class FakeBuilder:
                     "fxx": max(1, i - 71),
                     "TMP_2m": 5.0,
                     "temp_error": 1.0,
+                    "decoder_weight": 1.0,
                     "split": split,
                 }
             )
@@ -49,12 +51,14 @@ class FakeRegistry:
 
 class FakeTimeSeriesDataSet:
     created_train_frames: list[pd.DataFrame] = []
+    created_train_kwargs: list[dict] = []
 
     def __init__(self, df, **kwargs):
         self.df = df
         self.kwargs = kwargs
         self.target_normalizer = kwargs.get("target_normalizer")
         FakeTimeSeriesDataSet.created_train_frames.append(df.copy())
+        FakeTimeSeriesDataSet.created_train_kwargs.append(dict(kwargs))
 
     @classmethod
     def from_dataset(cls, dataset, df, **kwargs):
@@ -93,6 +97,7 @@ class FakeCheckpoint:
 
 def _install_training_fakes(monkeypatch):
     FakeTimeSeriesDataSet.created_train_frames = []
+    FakeTimeSeriesDataSet.created_train_kwargs = []
     torch_mod = types.ModuleType("torch")
     torch_mod.__version__ = "2.fake"
     torch_mod.version = types.SimpleNamespace(cuda="12.fake")
@@ -138,6 +143,23 @@ def test_training_interfaces_live_in_training_factory():
     assert TrainingExperimentConfig.__module__ == "training.config"
 
 
+def test_eval_mae_excludes_zero_weight_tail_targets():
+    torch = pytest.importorskip("torch")
+    prediction = types.SimpleNamespace(
+        output=torch.tensor([[1.0, 10.0]]),
+        y=(
+            torch.tensor([[1.0, 0.0]]),
+            torch.tensor([[1.0, 0.0]]),
+        ),
+    )
+    model = types.SimpleNamespace(predict=lambda *_args, **_kwargs: prediction)
+    trainer = TftTrainer.__new__(TftTrainer)
+
+    mae = trainer._eval_mae(None, model, object())
+
+    assert mae == pytest.approx(0.0)
+
+
 def test_production_tft_does_not_import_training_module():
     source = Path("model/tft.py").read_text(encoding="utf-8")
 
@@ -177,6 +199,7 @@ def test_tft_trainer_uses_settings_splits_and_publishes_dataset_pkl(
     assert builder.calls[0][1] == pd.Timestamp("2026-01-01 00:00:00", tz="UTC")
     assert builder.calls[0][2] == pd.Timestamp("2026-01-01 23:00:00", tz="UTC")
     assert FakeTimeSeriesDataSet.created_train_frames[0]["split"].eq("train").all()
+    assert FakeTimeSeriesDataSet.created_train_kwargs[0]["weight"] == "decoder_weight"
     assert registry.publish_kwargs["training_dataset_pkl"].exists()
     assert registry.publish_kwargs["metrics"]["train_mae"] != registry.publish_kwargs["metrics"]["best_val_loss"]
     assert result["test_mae"] == 1.23

@@ -393,6 +393,38 @@ def test_process_iem_drops_temperature_source_markers_and_keeps_model_features()
     assert result["raw_wind_gust_kt"].iloc[0] == pytest.approx(5.0)
 
 
+def test_process_iem_repairs_sparse_model_input_gaps_with_provenance():
+    df = pd.DataFrame({
+        "valid_time": [
+            "2026-01-01 00:51:00",
+            "2026-01-01 01:51:00",
+            "2026-01-01 02:51:00",
+        ],
+        "raw_wind_spd_kt": [4.0, float("nan"), 8.0],
+        "raw_wind_gust_kt": [6.0, float("nan"), 10.0],
+        "obs_U": [4.0, 3.0, 8.0],
+        "obs_V": [0.0, 4.0, 0.0],
+        "raw_vis_sm": [4.0, float("nan"), 10.0],
+    })
+
+    result = Cleaner.process_iem(df)
+    repaired = result.iloc[1]
+
+    assert repaired["raw_wind_spd_kt"] == pytest.approx(5.0)
+    assert repaired["raw_wind_gust_kt"] == pytest.approx(5.0)
+    assert repaired["raw_vis_sm"] == pytest.approx(7.0)
+    assert bool(repaired["raw_wind_spd_kt_imputed"])
+    assert bool(repaired["raw_wind_gust_kt_imputed"])
+    assert bool(repaired["raw_vis_sm_imputed"])
+    assert not result.iloc[0][
+        [
+            "raw_wind_spd_kt_imputed",
+            "raw_wind_gust_kt_imputed",
+            "raw_vis_sm_imputed",
+        ]
+    ].any()
+
+
 # ---------------------------------------------------------------------------
 # V03: compute_temp_error
 # ---------------------------------------------------------------------------

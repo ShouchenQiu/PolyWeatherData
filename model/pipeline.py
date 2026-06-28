@@ -100,6 +100,7 @@ class ModelPipeline:
             "probs":        {(lo_f, hi_f): float},
             "p50_high_f":   float,
             "quantiles":    {fxx: {p10, p50, p90}},
+            "tail_fallback_fxx": list[int],
             "last_tick_utc": pd.Timestamp (UTC),
         }
         """
@@ -191,7 +192,10 @@ class ModelPipeline:
             )
 
         # 5. TFT inference -> {fxx: {p10, p50, p90}}
-        quantiles = self.tft.predict(encoder_df, decoder_df)
+        quantiles = {
+            int(fxx): dict(values)
+            for fxx, values in self.tft.predict(encoder_df, decoder_df).items()
+        }
 
         # 5a. Quantile sanity: keys must be exactly 1..48, values finite, p10<=p50<=p90.
         if set(quantiles.keys()) != set(range(1, 49)):
@@ -212,6 +216,8 @@ class ModelPipeline:
                     f"Quantiles not ordered for fxx={fxx}: "
                     f"p10={p10}, p50={p50}, p90={p90}"
                 )
+
+        tail_fallback_fxx = self._apply_tail_fallback(quantiles, decoder_df)
 
         # 6. Select target fxx for daily-high computation (ADR-0010).
         #    When target_date is provided: use local-calendar-day window and
@@ -279,8 +285,50 @@ class ModelPipeline:
             "probs":         probs,
             "p50_high_f":    p50_high_f,
             "quantiles":     quantiles,
+            "tail_fallback_fxx": tail_fallback_fxx,
             "last_tick_utc": datetime.now(timezone.utc),
         }
+
+    @staticmethod
+    def _apply_tail_fallback(
+        quantiles: dict[int, dict[str, float | int | bool]],
+        decoder_df: pd.DataFrame,
+    ) -> list[int]:
+        """Persist the last trusted quantiles across a synthetic HRRR tail."""
+        if "is_extrapolated" not in decoder_df.columns:
+            return []
+        extrapolated = decoder_df["is_extrapolated"].fillna(False).astype(bool)
+        fallback_fxx = sorted(
+            decoder_df.loc[extrapolated, "fxx"].astype(int).tolist()
+        )
+        if not fallback_fxx:
+            return []
+
+        first_fallback = fallback_fxx[0]
+        expected_tail = list(range(first_fallback, 49))
+        if fallback_fxx != expected_tail:
+            raise ValueError(
+                "is_extrapolated rows must form a contiguous decoder tail, "
+                f"got {fallback_fxx}"
+            )
+        trusted_fxx = [
+            int(fxx)
+            for fxx in decoder_df.loc[~extrapolated, "fxx"].tolist()
+            if int(fxx) < first_fallback
+        ]
+        if not trusted_fxx:
+            raise ValueError("decoder has no trusted hour before extrapolated tail")
+        fallback_from = max(trusted_fxx)
+        base = quantiles[fallback_from]
+        for fxx in fallback_fxx:
+            quantiles[fxx] = {
+                "p10": float(base["p10"]),
+                "p50": float(base["p50"]),
+                "p90": float(base["p90"]),
+                "is_tail_fallback": True,
+                "fallback_from_fxx": fallback_from,
+            }
+        return fallback_fxx
 
     # ------------------------------------------------------------------
     # Internal helpers

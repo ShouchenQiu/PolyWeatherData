@@ -1,6 +1,6 @@
 # HrrrFill uses nearest-major overlap, then bounded extrapolation
 
-**Status**: accepted, implemented
+**Status**: superseded by ADR-0016
 
 ADR-0005 defines the intended non-MAJOR HRRR decoder-window behavior:
 native non-MAJOR coverage first, nearest prior MAJOR overlap second, and bounded
