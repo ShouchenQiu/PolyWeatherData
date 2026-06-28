@@ -403,6 +403,46 @@ def test_training_builder_uses_bootstrap_stores_to_build_one_sample(tmp_path):
     assert frame["decoder_weight"].eq(1.0).all()
 
 
+def test_training_builder_reports_incremental_progress(tmp_path):
+    station = STATIONS["KLGA"]
+    init = pd.Timestamp("2026-01-10 12:00:00", tz="UTC")
+    first_row = init - pd.Timedelta(hours=144)
+    forecast_store = ParquetStore(tmp_path / "forecast")
+    obs_store = ParquetStore(tmp_path / "obs")
+    _append_bootstrap_windows(
+        forecast_store,
+        obs_store,
+        station.station_id,
+        first_row,
+        193,
+    )
+    data_manager = DataManager(
+        [],
+        [],
+        forecast_store,
+        obs_store,
+        settings=Settings(),
+    )
+    cache = TrainingDecoderCache(
+        tmp_path / "decoder-cache",
+        source=FakeDecoderSource(),
+    )
+    progress = []
+
+    frame = TrainingDatasetBuilder(data_manager, cache).build_frame(
+        station,
+        [init],
+        split="train",
+        progress_callback=lambda completed, total, built, skipped: progress.append(
+            (completed, total, built, skipped)
+        ),
+        progress_every=10,
+    )
+
+    assert len(frame) == 120
+    assert progress == [(1, 1, 1, 0)]
+
+
 def test_training_builder_zero_weights_only_tail_fallback_targets(tmp_path):
     station = STATIONS["KLGA"]
     init = pd.Timestamp("2026-01-10 12:00:00", tz="UTC")

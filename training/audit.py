@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -26,6 +27,8 @@ def audit_workspace(
     station_id: str,
     split_ranges: dict[str, tuple[str, str] | list[str]],
     audit_fn: Callable[..., dict[str, Any]] | None = None,
+    progress: bool = False,
+    progress_every: int = 100,
 ) -> dict[str, Any]:
     """Audit one workspace and persist readiness evidence."""
     workspace = TrainingWorkspace(run_dir)
@@ -35,10 +38,17 @@ def audit_workspace(
         )
     started_at = datetime.now(timezone.utc).isoformat()
     audit = audit_fn or audit_training_readiness
+    audit_kwargs: dict[str, Any] = {}
+    if progress:
+        audit_kwargs = {
+            "progress": True,
+            "progress_every": progress_every,
+        }
     summary = audit(
         data_store=workspace.data_store_dir,
         station_id=station_id,
         split_ranges=split_ranges,
+        **audit_kwargs,
     )
     workspace.write_json(workspace.audit_summary_path, summary)
     status = "audited" if summary.get("ready", False) else "audit_failed"
@@ -98,6 +108,8 @@ def audit_training_readiness(
     station_id: str,
     split_ranges: dict[str, tuple[str, str] | list[str]],
     dataset_builder: Any | None = None,
+    progress: bool = False,
+    progress_every: int = 100,
 ) -> dict[str, Any]:
     root = Path(data_store)
     station = STATIONS[station_id]
@@ -116,8 +128,40 @@ def audit_training_readiness(
     for split_name in ("train", "val", "test"):
         start, end = split_ranges[split_name]
         init_times = _expected_hours(start, end)
+        split_started = time.perf_counter()
+        if progress:
+            print(
+                f"[readiness {split_name}] start inits={len(init_times)} "
+                f"range={start}:{end}",
+                flush=True,
+            )
+
+        def report_progress(
+            completed: int,
+            total: int,
+            built: int,
+            skipped: int,
+        ) -> None:
+            elapsed = time.perf_counter() - split_started
+            print(
+                f"[readiness {split_name}] {completed}/{total} "
+                f"built={built} skipped={skipped} elapsed={elapsed:.1f}s",
+                flush=True,
+            )
+
         try:
-            frame = dataset_builder.build_frame(station, init_times, split=split_name)
+            build_kwargs: dict[str, Any] = {}
+            if progress:
+                build_kwargs = {
+                    "progress_callback": report_progress,
+                    "progress_every": progress_every,
+                }
+            frame = dataset_builder.build_frame(
+                station,
+                init_times,
+                split=split_name,
+                **build_kwargs,
+            )
         except Exception as exc:  # noqa: BLE001
             failures.append(f"{split_name}: builder failed: {exc}")
             frame = pd.DataFrame()
@@ -137,9 +181,16 @@ def audit_training_readiness(
             failures.append(
                 f"{split_name}: NaN in required columns {summary['nan_required_columns']}"
             )
+        if progress:
+            print(
+                f"[readiness {split_name}] complete "
+                f"rows={summary['row_count']} samples={summary['sample_count']} "
+                f"elapsed={time.perf_counter() - split_started:.1f}s",
+                flush=True,
+            )
 
     data_hash = _hash_training_frames(frames)
-    return {
+    result = {
         "ready": not failures,
         "failures": failures,
         "data_store": str(root),
@@ -152,6 +203,13 @@ def audit_training_readiness(
             "target": TARGET,
         },
     }
+    if progress:
+        print(
+            f"[readiness] complete ready={result['ready']} "
+            f"failures={len(failures)}",
+            flush=True,
+        )
+    return result
 
 
 def _expected_hours(start_date: str, end_date: str) -> list[pd.Timestamp]:

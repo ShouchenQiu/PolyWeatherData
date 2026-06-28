@@ -142,9 +142,12 @@ Training-readiness audit:
   --station "$STATION" \
   --train 2024-10-07:2026-03-31 \
   --val 2026-04-01:2026-04-30 \
-  --test 2026-05-01:2026-05-31
+  --test 2026-05-01:2026-05-31 \
+  --progress-every 100
 ```
 
+Readiness audit streams each split's processed, built, and skipped init counts
+with elapsed time. Lower `--progress-every` for more frequent updates.
 Training must not start unless `audit_summary.json` contains `"ready": true`.
 An unsuccessful readiness audit also writes `failed_audit_summary.json`.
 

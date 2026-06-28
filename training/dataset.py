@@ -10,7 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -565,10 +565,28 @@ class TrainingDatasetBuilder:
         station: Any,
         init_times: list[pd.Timestamp],
         split: str,
+        progress_callback: Callable[[int, int, int, int], None] | None = None,
+        progress_every: int = 100,
     ) -> pd.DataFrame:
         frames: list[pd.DataFrame] = []
         self.skipped = []
-        for init_time in init_times:
+        total = len(init_times)
+        report_every = max(1, int(progress_every))
+
+        def report(completed: int) -> None:
+            if progress_callback is not None and (
+                completed == 1
+                or completed % report_every == 0
+                or completed == total
+            ):
+                progress_callback(
+                    completed,
+                    total,
+                    len(frames),
+                    len(self.skipped),
+                )
+
+        for completed, init_time in enumerate(init_times, start=1):
             init_utc = _to_utc(init_time)
             status = self._data_manager.inference_readiness(
                 station, init_utc, self._encoder_hours
@@ -582,6 +600,7 @@ class TrainingDatasetBuilder:
                         "first_eligible_init": status.first_eligible_init,
                     }
                 )
+                report(completed)
                 continue
             try:
                 encoder = self._data_manager.build_encoder_obs_window(
@@ -600,6 +619,7 @@ class TrainingDatasetBuilder:
                         "first_eligible_init": None,
                     }
                 )
+                report(completed)
                 continue
 
             encoder = add_model_features(
@@ -620,6 +640,7 @@ class TrainingDatasetBuilder:
             combined = pd.concat([encoder, decoder], ignore_index=True)
             combined["split"] = split
             frames.append(combined)
+            report(completed)
         if not frames:
             return pd.DataFrame()
         return pd.concat(frames, ignore_index=True)

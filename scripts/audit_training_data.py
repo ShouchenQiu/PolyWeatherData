@@ -28,6 +28,12 @@ def _cli() -> None:
     parser.add_argument("--train", help="start:end")
     parser.add_argument("--val", help="start:end")
     parser.add_argument("--test", help="start:end")
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=100,
+        help="report readiness progress every N init windows",
+    )
     args = parser.parse_args()
 
     if not args.run_dir and not args.data_store:
@@ -50,6 +56,8 @@ def _cli() -> None:
                 run_dir,
                 args.station,
                 split_ranges,
+                progress=True,
+                progress_every=args.progress_every,
             )
             summary = result["audit"]
         else:
@@ -57,6 +65,8 @@ def _cli() -> None:
                 data_store,
                 args.station,
                 split_ranges,
+                progress=True,
+                progress_every=args.progress_every,
             )
     elif args.start and args.end:
         summary = audit_weather_backfill(

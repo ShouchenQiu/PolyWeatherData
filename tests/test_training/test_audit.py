@@ -124,6 +124,47 @@ def test_audit_training_readiness_reports_hash_samples_and_feature_order(tmp_pat
     assert summary["feature_list_and_order"]["target"] == "temp_error"
 
 
+def test_audit_training_readiness_streams_split_progress(tmp_path, capsys):
+    class ProgressBuilder(FakeBuilder):
+        def build_frame(
+            self,
+            station,
+            init_times,
+            split,
+            progress_callback=None,
+            progress_every=100,
+        ):
+            if progress_callback is not None:
+                progress_callback(1, len(init_times), 1, 0)
+                progress_callback(
+                    len(init_times),
+                    len(init_times),
+                    len(init_times),
+                    0,
+                )
+            return super().build_frame(station, init_times, split)
+
+    summary = audit_training_readiness(
+        data_store=tmp_path / "data_store",
+        station_id="KLGA",
+        split_ranges={
+            "train": ("2026-01-01", "2026-01-01"),
+            "val": ("2026-01-02", "2026-01-02"),
+            "test": ("2026-01-03", "2026-01-03"),
+        },
+        dataset_builder=ProgressBuilder(),
+        progress=True,
+        progress_every=10,
+    )
+
+    output = capsys.readouterr().out
+    assert "[readiness train] start inits=24" in output
+    assert "[readiness train] 24/24 built=24 skipped=0" in output
+    assert "[readiness test] complete rows=2880 samples=24" in output
+    assert "[readiness] complete ready=True" in output
+    assert summary["ready"] is True
+
+
 def test_audit_training_readiness_rejects_nan_encoder_unknown_real(tmp_path):
     class NaNUnknownBuilder(FakeBuilder):
         def build_frame(self, station, init_times, split):
