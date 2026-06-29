@@ -9,13 +9,17 @@ from training.config import (
     TrainerConfig,
 )
 from training.experiment import FinalEvaluationApproval
+from training.optuna_engine import OptunaEngine
+from training.worker import TrainingWorker
 
 __all__ = [
     "ExperimentTemplate",
     "FinalEvaluationApproval",
     "ModelConfig",
+    "OptunaEngine",
     "ResolvedTrialSnapshot",
     "StudySpec",
     "TrainingCatalog",
+    "TrainingWorker",
     "TrainerConfig",
 ]

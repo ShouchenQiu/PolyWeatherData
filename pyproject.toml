@@ -23,6 +23,7 @@ dependencies = [
     "loguru",
     "streamlit",
     "plotly",
+    "optuna>=4,<5",
 ]
 
 [project.optional-dependencies]

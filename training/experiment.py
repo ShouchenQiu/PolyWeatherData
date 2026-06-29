@@ -5,6 +5,84 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from training.config import ExperimentTemplate, SmokePolicy
+
+
+@dataclass(frozen=True)
+class ValidationExecutionLimits:
+    """Resolved resource limits for one train/validation-only execution."""
+
+    execution_type: str
+    min_epochs: int
+    max_epochs: int
+    batch_size: int
+    precision: str
+    num_workers: int
+    limit_train_batches: int | None
+    limit_val_batches: int | None
+    timeout_minutes: int | None
+
+    @classmethod
+    def for_smoke(cls, policy: SmokePolicy) -> "ValidationExecutionLimits":
+        return cls(
+            execution_type="smoke",
+            min_epochs=1,
+            max_epochs=policy.max_epochs,
+            batch_size=policy.batch_size,
+            precision=policy.precision,
+            num_workers=policy.num_workers,
+            limit_train_batches=policy.limit_train_batches,
+            limit_val_batches=policy.limit_val_batches,
+            timeout_minutes=policy.timeout_minutes,
+        )
+
+    @classmethod
+    def from_catalog_limits(
+        cls,
+        execution_type: str,
+        limits: dict[str, Any],
+        template: ExperimentTemplate,
+    ) -> "ValidationExecutionLimits":
+        if execution_type == "smoke":
+            return cls.for_smoke(template.execution.smoke)
+        if execution_type == "calibration":
+            return cls(
+                execution_type="calibration",
+                min_epochs=1,
+                max_epochs=int(limits["max_epochs"]),
+                batch_size=int(limits["batch_size"]),
+                precision=str(limits["precision"]),
+                num_workers=int(limits["num_workers"]),
+                limit_train_batches=None,
+                limit_val_batches=None,
+                timeout_minutes=max(
+                    1, int(float(limits["max_gpu_hours"]) * 60)
+                ),
+            )
+        raise ValueError(
+            f"unsupported validation execution type: {execution_type}"
+        )
+
+    @classmethod
+    def for_trial(
+        cls,
+        template: ExperimentTemplate,
+        parameters: dict[str, Any],
+    ) -> "ValidationExecutionLimits":
+        return cls(
+            execution_type="trial",
+            min_epochs=template.trainer.min_epochs,
+            max_epochs=template.trainer.max_epochs,
+            batch_size=int(
+                parameters.get("batch_size", template.trainer.batch_size)
+            ),
+            precision=template.trainer.precision,
+            num_workers=template.trainer.num_workers,
+            limit_train_batches=None,
+            limit_val_batches=None,
+            timeout_minutes=None,
+        )
+
 
 @dataclass(frozen=True)
 class FinalEvaluationApproval:

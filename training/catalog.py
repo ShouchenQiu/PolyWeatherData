@@ -79,6 +79,35 @@ class ArtifactRecord:
     created_at: str
 
 
+@dataclass(frozen=True)
+class ExecutionRecord:
+    execution_id: str
+    study_id: str
+    execution_type: str
+    trial_number: int | None
+    attempt: int
+    status: str
+    limits: dict[str, object]
+    progress: dict[str, object]
+    metrics: dict[str, object]
+    error: str | None
+    log_path: str | None
+    worker_id: str | None
+    created_at: str
+    started_at: str | None
+    heartbeat_at: str | None
+    finished_at: str | None
+
+
+@dataclass(frozen=True)
+class StudyApprovalRecord:
+    approval_id: str
+    study_id: str
+    approval_type: str
+    approved_by: str
+    approved_at: str
+
+
 _STUDY_TRANSITIONS = {
     "draft": {"smoke_queued"},
     "smoke_queued": {"smoke_running", "cancel_requested"},
@@ -206,6 +235,25 @@ class TrainingCatalog:
                 created_at     TEXT NOT NULL,
                 UNIQUE(study_id, artifact_type, path)
             );
+            CREATE TABLE IF NOT EXISTS executions (
+                execution_id    TEXT PRIMARY KEY,
+                study_id        TEXT NOT NULL REFERENCES studies(study_id),
+                execution_type  TEXT NOT NULL,
+                trial_number    INTEGER NOT NULL DEFAULT -1,
+                attempt         INTEGER NOT NULL,
+                status          TEXT NOT NULL,
+                limits_json     TEXT NOT NULL,
+                progress_json   TEXT NOT NULL,
+                metrics_json    TEXT NOT NULL,
+                error           TEXT,
+                log_path        TEXT,
+                worker_id       TEXT,
+                created_at      TEXT NOT NULL,
+                started_at      TEXT,
+                heartbeat_at    TEXT,
+                finished_at     TEXT,
+                UNIQUE(study_id, execution_type, trial_number, attempt)
+            );
             CREATE TABLE IF NOT EXISTS final_approvals (
                 approval_id           TEXT PRIMARY KEY,
                 study_id              TEXT NOT NULL UNIQUE
@@ -217,6 +265,14 @@ class TrainingCatalog:
                 approved_at           TEXT NOT NULL,
                 consumed_at           TEXT
             );
+            CREATE TABLE IF NOT EXISTS study_approvals (
+                approval_id    TEXT PRIMARY KEY,
+                study_id       TEXT NOT NULL REFERENCES studies(study_id),
+                approval_type  TEXT NOT NULL,
+                approved_by    TEXT NOT NULL,
+                approved_at    TEXT NOT NULL,
+                UNIQUE(study_id, approval_type)
+            );
             COMMIT;
             """
         )
@@ -224,6 +280,78 @@ class TrainingCatalog:
             """
             INSERT OR IGNORE INTO catalog_migrations(version, applied_at)
             VALUES (1, ?)
+            """,
+            (self._now_iso(),),
+        )
+        execution_columns = {
+            row["name"]
+            for row in self._conn.execute(
+                "PRAGMA table_info(executions)"
+            ).fetchall()
+        }
+        if "worker_id" not in execution_columns:
+            self._conn.execute(
+                "ALTER TABLE executions ADD COLUMN worker_id TEXT"
+            )
+        execution_columns = {
+            row["name"]
+            for row in self._conn.execute(
+                "PRAGMA table_info(executions)"
+            ).fetchall()
+        }
+        if "trial_number" not in execution_columns:
+            self._conn.executescript(
+                """
+                BEGIN IMMEDIATE;
+                ALTER TABLE executions RENAME TO executions_legacy;
+                CREATE TABLE executions (
+                    execution_id    TEXT PRIMARY KEY,
+                    study_id        TEXT NOT NULL REFERENCES studies(study_id),
+                    execution_type  TEXT NOT NULL,
+                    trial_number    INTEGER NOT NULL DEFAULT -1,
+                    attempt         INTEGER NOT NULL,
+                    status          TEXT NOT NULL,
+                    limits_json     TEXT NOT NULL,
+                    progress_json   TEXT NOT NULL,
+                    metrics_json    TEXT NOT NULL,
+                    error           TEXT,
+                    log_path        TEXT,
+                    worker_id       TEXT,
+                    created_at      TEXT NOT NULL,
+                    started_at      TEXT,
+                    heartbeat_at    TEXT,
+                    finished_at     TEXT,
+                    UNIQUE(
+                        study_id, execution_type, trial_number, attempt
+                    )
+                );
+                INSERT INTO executions(
+                    execution_id, study_id, execution_type, trial_number,
+                    attempt, status, limits_json, progress_json, metrics_json,
+                    error, log_path, worker_id, created_at, started_at,
+                    heartbeat_at, finished_at
+                )
+                SELECT
+                    execution_id, study_id, execution_type, -1,
+                    attempt, status, limits_json, progress_json, metrics_json,
+                    error, log_path, worker_id, created_at, started_at,
+                    heartbeat_at, finished_at
+                FROM executions_legacy;
+                DROP TABLE executions_legacy;
+                COMMIT;
+                """
+            )
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO catalog_migrations(version, applied_at)
+            VALUES (2, ?)
+            """,
+            (self._now_iso(),),
+        )
+        self._conn.execute(
+            """
+            INSERT OR IGNORE INTO catalog_migrations(version, applied_at)
+            VALUES (3, ?)
             """,
             (self._now_iso(),),
         )
@@ -343,6 +471,12 @@ class TrainingCatalog:
             raise KeyError(f"workspace is not registered: {path}")
         return _workspace_record(row)
 
+    def list_workspaces(self) -> list[WorkspaceRecord]:
+        rows = self._conn.execute(
+            "SELECT * FROM workspaces ORDER BY registered_at, path"
+        ).fetchall()
+        return [_workspace_record(row) for row in rows]
+
     def get_template(self, template_hash: str) -> TemplateRecord:
         row = self._conn.execute(
             "SELECT * FROM templates WHERE template_hash = ?",
@@ -351,6 +485,12 @@ class TrainingCatalog:
         if row is None:
             raise KeyError(f"template is not registered: {template_hash}")
         return _template_record(row)
+
+    def list_templates(self) -> list[TemplateRecord]:
+        rows = self._conn.execute(
+            "SELECT * FROM templates ORDER BY registered_at, template_hash"
+        ).fetchall()
+        return [_template_record(row) for row in rows]
 
     def get_study(self, study_id: str) -> StudyRecord:
         row = self._conn.execute(
@@ -417,6 +557,913 @@ class TrainingCatalog:
             (study_id,),
         ).fetchall()
         return [StudyEvent(**dict(row)) for row in rows]
+
+    def enqueue_smoke(self, study_id: str) -> ExecutionRecord:
+        """Create the first bounded smoke execution and advance its gate."""
+        study = self.validate_study(study_id)
+        if study.status != "draft":
+            raise PermissionError("smoke can only be enqueued from draft")
+        template_record = self.get_template(study.template_hash)
+        template = ExperimentTemplate.from_dict(
+            json.loads(template_record.config_json)
+        )
+        limits = asdict(template.execution.smoke)
+        now = self._now_iso()
+        execution_id = f"{study_id}-smoke-a1"
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            current = self.get_study(study_id)
+            if current.status != "draft":
+                raise PermissionError("smoke can only be enqueued from draft")
+            self._conn.execute(
+                """
+                INSERT INTO executions(
+                    execution_id, study_id, execution_type, attempt, status,
+                    limits_json, progress_json, metrics_json, error, log_path,
+                    worker_id, created_at, started_at, heartbeat_at, finished_at
+                ) VALUES (?, ?, 'smoke', 1, 'queued', ?, '{}', '{}', NULL,
+                          NULL, NULL, ?, NULL, NULL, NULL)
+                """,
+                (
+                    execution_id,
+                    study_id,
+                    json.dumps(limits, sort_keys=True, separators=(",", ":")),
+                    now,
+                ),
+            )
+            self._conn.execute(
+                """
+                UPDATE studies SET status = 'smoke_queued', updated_at = ?
+                WHERE study_id = ? AND status = 'draft'
+                """,
+                (now, study_id),
+            )
+            self._insert_event(
+                study_id,
+                from_status="draft",
+                to_status="smoke_queued",
+                message=f"smoke execution {execution_id} queued",
+                occurred_at=now,
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return self.get_execution(execution_id)
+
+    def enqueue_calibration(self, study_id: str) -> ExecutionRecord:
+        """Queue baseline calibration only after successful smoke evidence."""
+        study = self.validate_study(study_id)
+        if study.status != "smoke_passed":
+            raise PermissionError(
+                "calibration requires study status smoke_passed"
+            )
+        template_record = self.get_template(study.template_hash)
+        template = ExperimentTemplate.from_dict(
+            json.loads(template_record.config_json)
+        )
+        limits = {
+            **asdict(template.execution.calibration),
+            "batch_size": template.trainer.batch_size,
+            "precision": template.trainer.precision,
+            "num_workers": template.trainer.num_workers,
+        }
+        now = self._now_iso()
+        execution_id = f"{study_id}-calibration-a1"
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            current = self.get_study(study_id)
+            if current.status != "smoke_passed":
+                raise PermissionError(
+                    "calibration requires study status smoke_passed"
+                )
+            self._conn.execute(
+                """
+                INSERT INTO executions(
+                    execution_id, study_id, execution_type, attempt, status,
+                    limits_json, progress_json, metrics_json, error, log_path,
+                    worker_id, created_at, started_at, heartbeat_at, finished_at
+                ) VALUES (?, ?, 'calibration', 1, 'queued', ?, '{}', '{}',
+                          NULL, NULL, NULL, ?, NULL, NULL, NULL)
+                """,
+                (
+                    execution_id,
+                    study_id,
+                    json.dumps(limits, sort_keys=True, separators=(",", ":")),
+                    now,
+                ),
+            )
+            self._conn.execute(
+                """
+                UPDATE studies
+                SET status = 'calibration_queued', updated_at = ?
+                WHERE study_id = ? AND status = 'smoke_passed'
+                """,
+                (now, study_id),
+            )
+            self._insert_event(
+                study_id,
+                from_status="smoke_passed",
+                to_status="calibration_queued",
+                message=f"calibration execution {execution_id} queued",
+                occurred_at=now,
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return self.get_execution(execution_id)
+
+    def get_execution(self, execution_id: str) -> ExecutionRecord:
+        row = self._conn.execute(
+            "SELECT * FROM executions WHERE execution_id = ?",
+            (execution_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"execution does not exist: {execution_id}")
+        return _execution_record(row)
+
+    def list_executions(self, study_id: str) -> list[ExecutionRecord]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM executions
+            WHERE study_id = ?
+            ORDER BY created_at, execution_id
+            """,
+            (study_id,),
+        ).fetchall()
+        return [_execution_record(row) for row in rows]
+
+    def start_search(self, study_id: str) -> StudyRecord:
+        """Transition one approved Optuna study from queued to running."""
+        study = self.validate_study(study_id)
+        if study.status == "running":
+            return study
+        if study.status != "queued":
+            raise PermissionError("search must be approved and queued")
+        return self.transition_study(
+            study_id,
+            "running",
+            message="Optuna search started",
+        )
+
+    def claim_next_search(self, *, worker_id: str) -> StudyRecord | None:
+        """Claim an approved or interrupted-in-process Optuna study."""
+        worker_id = worker_id.strip()
+        if not worker_id:
+            raise ValueError("worker_id must be non-empty")
+        now = self._now_iso()
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._conn.execute(
+                """
+                SELECT * FROM studies
+                WHERE status IN ('running', 'queued')
+                ORDER BY
+                    CASE status WHEN 'running' THEN 0 ELSE 1 END,
+                    updated_at,
+                    study_id
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                self._conn.execute("COMMIT")
+                return None
+            if row["status"] == "queued":
+                cursor = self._conn.execute(
+                    """
+                    UPDATE studies SET status = 'running', updated_at = ?
+                    WHERE study_id = ? AND status = 'queued'
+                    """,
+                    (now, row["study_id"]),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("study status changed concurrently")
+                self._insert_event(
+                    row["study_id"],
+                    from_status="queued",
+                    to_status="running",
+                    message=f"Optuna search claimed by {worker_id}",
+                    occurred_at=now,
+                )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return self.get_study(row["study_id"])
+
+    def start_trial_execution(
+        self,
+        study_id: str,
+        *,
+        trial_number: int,
+        limits: dict[str, object],
+        log_path: Path | str,
+    ) -> ExecutionRecord:
+        """Record one running Optuna trial under an already-running study."""
+        study = self.validate_study(study_id)
+        if study.status != "running":
+            raise PermissionError("trial requires a running Optuna study")
+        if trial_number < 0:
+            raise ValueError("trial_number must be non-negative")
+        execution_id = f"{study_id}-trial-{trial_number:05d}-a1"
+        now = self._now_iso()
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO executions(
+                    execution_id, study_id, execution_type, trial_number,
+                    attempt, status,
+                    limits_json, progress_json, metrics_json, error, log_path,
+                    worker_id, created_at, started_at, heartbeat_at, finished_at
+                ) VALUES (?, ?, 'trial', ?, 1, 'running', ?, '{}', '{}', NULL,
+                          ?, 'optuna', ?, ?, ?, NULL)
+                """,
+                (
+                    execution_id,
+                    study_id,
+                    trial_number,
+                    json.dumps(limits, sort_keys=True, separators=(",", ":")),
+                    str(Path(log_path).resolve()),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise RuntimeError(
+                f"trial execution already exists: {execution_id}"
+            ) from exc
+        return self.get_execution(execution_id)
+
+    def finish_trial_execution(
+        self,
+        execution_id: str,
+        *,
+        status: str,
+        metrics: dict[str, object],
+        error: str | None = None,
+    ) -> ExecutionRecord:
+        """Finish one trial without changing the parent study state."""
+        if status not in {"succeeded", "pruned", "failed", "interrupted"}:
+            raise ValueError("invalid terminal trial status")
+        execution = self.get_execution(execution_id)
+        if execution.execution_type != "trial" or execution.status != "running":
+            raise PermissionError("only a running trial can finish")
+        if status in {"failed", "interrupted"} and not (error or "").strip():
+            raise ValueError("failed/interrupted trial requires an error")
+        now = self._now_iso()
+        cursor = self._conn.execute(
+            """
+            UPDATE executions
+            SET status = ?, metrics_json = ?, error = ?, heartbeat_at = ?,
+                finished_at = ?
+            WHERE execution_id = ? AND status = 'running'
+            """,
+            (
+                status,
+                json.dumps(metrics, sort_keys=True, separators=(",", ":")),
+                error,
+                now,
+                now,
+                execution_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("trial execution status changed concurrently")
+        return self.get_execution(execution_id)
+
+    def finish_search(self, study_id: str, *, status: str) -> StudyRecord:
+        if status not in {"completed", "budget_exhausted"}:
+            raise ValueError("invalid terminal search status")
+        return self.transition_study(
+            study_id,
+            status,
+            message=f"Optuna search {status}",
+        )
+
+    def claim_next_execution(
+        self,
+        *,
+        worker_id: str,
+    ) -> ExecutionRecord | None:
+        """Atomically claim the oldest queued execution for one worker."""
+        worker_id = worker_id.strip()
+        if not worker_id:
+            raise ValueError("worker_id must be non-empty")
+        now = self._now_iso()
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._conn.execute(
+                """
+                SELECT e.*, s.workspace_path, s.status AS study_status
+                FROM executions e
+                JOIN studies s ON s.study_id = e.study_id
+                WHERE e.status = 'queued'
+                ORDER BY e.created_at, e.execution_id
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                self._conn.execute("COMMIT")
+                return None
+            expected_study_status = f"{row['execution_type']}_queued"
+            if row["study_status"] != expected_study_status:
+                raise RuntimeError(
+                    "queued execution does not match its study status"
+                )
+            running_study_status = f"{row['execution_type']}_running"
+            log_path = (
+                Path(row["workspace_path"])
+                / "studies"
+                / row["study_id"]
+                / row["execution_type"]
+                / f"attempt-{row['attempt']}"
+                / "execution.log"
+            ).resolve()
+            cursor = self._conn.execute(
+                """
+                UPDATE executions
+                SET status = 'running', log_path = ?, worker_id = ?,
+                    started_at = ?, heartbeat_at = ?
+                WHERE execution_id = ? AND status = 'queued'
+                """,
+                (
+                    str(log_path),
+                    worker_id,
+                    now,
+                    now,
+                    row["execution_id"],
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("execution status changed concurrently")
+            cursor = self._conn.execute(
+                """
+                UPDATE studies SET status = ?, updated_at = ?
+                WHERE study_id = ? AND status = ?
+                """,
+                (
+                    running_study_status,
+                    now,
+                    row["study_id"],
+                    expected_study_status,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("study status changed concurrently")
+            self._insert_event(
+                row["study_id"],
+                from_status=expected_study_status,
+                to_status=running_study_status,
+                message=(
+                    f"execution {row['execution_id']} claimed by {worker_id}"
+                ),
+                occurred_at=now,
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return self.get_execution(row["execution_id"])
+
+    def recover_interrupted_executions(
+        self,
+        *,
+        worker_id: str,
+    ) -> list[ExecutionRecord]:
+        """Mark abandoned running work interrupted after GPU-lock takeover."""
+        worker_id = worker_id.strip()
+        if not worker_id:
+            raise ValueError("worker_id must be non-empty")
+        now = self._now_iso()
+        recovered_ids: list[str] = []
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM executions
+                WHERE status IN ('running', 'cancel_requested')
+                ORDER BY started_at, execution_id
+                """
+            ).fetchall()
+            for row in rows:
+                if row["status"] == "cancel_requested":
+                    cursor = self._conn.execute(
+                        """
+                        UPDATE executions
+                        SET status = 'cancelled', heartbeat_at = ?,
+                            finished_at = ?
+                        WHERE execution_id = ?
+                          AND status = 'cancel_requested'
+                        """,
+                        (now, now, row["execution_id"]),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "execution status changed concurrently"
+                        )
+                    cursor = self._conn.execute(
+                        """
+                        UPDATE studies
+                        SET status = 'cancelled', updated_at = ?
+                        WHERE study_id = ?
+                          AND status = 'cancel_requested'
+                        """,
+                        (now, row["study_id"]),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError(
+                            "cancel request does not match study status"
+                        )
+                    self._insert_event(
+                        row["study_id"],
+                        from_status="cancel_requested",
+                        to_status="cancelled",
+                        message=(
+                            f"abandoned cancel completed by {worker_id}"
+                        ),
+                        occurred_at=now,
+                    )
+                    recovered_ids.append(row["execution_id"])
+                    continue
+                previous_worker = row["worker_id"] or "unknown worker"
+                reason = (
+                    f"worker {previous_worker} stopped before completion; "
+                    f"recovered by {worker_id}"
+                )
+                metrics = json.loads(row["metrics_json"])
+                started_at = row["started_at"]
+                if started_at:
+                    elapsed = max(
+                        0.0,
+                        (
+                            datetime.fromisoformat(now)
+                            - datetime.fromisoformat(started_at)
+                        ).total_seconds(),
+                    )
+                    metrics["gpu_seconds"] = max(
+                        float(metrics.get("gpu_seconds", 0.0)),
+                        elapsed,
+                    )
+                cursor = self._conn.execute(
+                    """
+                    UPDATE executions
+                    SET status = 'interrupted', error = ?, metrics_json = ?,
+                        heartbeat_at = ?, finished_at = ?
+                    WHERE execution_id = ? AND status = 'running'
+                    """,
+                    (
+                        reason,
+                        json.dumps(
+                            metrics,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        now,
+                        now,
+                        row["execution_id"],
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("execution status changed concurrently")
+                if row["execution_type"] == "trial":
+                    study = self.get_study(row["study_id"])
+                    if study.status != "running":
+                        raise RuntimeError(
+                            "running trial requires a running study"
+                        )
+                    self._insert_event(
+                        row["study_id"],
+                        from_status="running",
+                        to_status="running",
+                        message=(
+                            f"trial execution {row['execution_id']} "
+                            f"interrupted: {reason}"
+                        ),
+                        occurred_at=now,
+                    )
+                    recovered_ids.append(row["execution_id"])
+                    continue
+                from_study_status = f"{row['execution_type']}_running"
+                cursor = self._conn.execute(
+                    """
+                    UPDATE studies SET status = 'interrupted', updated_at = ?
+                    WHERE study_id = ? AND status = ?
+                    """,
+                    (now, row["study_id"], from_study_status),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "running execution does not match study status"
+                    )
+                self._insert_event(
+                    row["study_id"],
+                    from_status=from_study_status,
+                    to_status="interrupted",
+                    message=reason,
+                    occurred_at=now,
+                )
+                recovered_ids.append(row["execution_id"])
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return [
+            self.get_execution(execution_id)
+            for execution_id in recovered_ids
+        ]
+
+    def retry_execution(self, execution_id: str) -> ExecutionRecord:
+        """Queue a new attempt while preserving failed/interrupted evidence."""
+        previous = self.get_execution(execution_id)
+        if previous.execution_type == "trial":
+            raise PermissionError(
+                "Optuna trials are resumed by the study, not retried manually"
+            )
+        if previous.status not in {"failed", "interrupted", "cancelled"}:
+            raise PermissionError(
+                "retry requires failed, interrupted, or cancelled execution"
+            )
+        study = self.validate_study(previous.study_id)
+        if study.status not in {"failed", "interrupted", "cancelled"}:
+            raise PermissionError("study is not retryable")
+        now = self._now_iso()
+        queued_study_status = f"{previous.execution_type}_queued"
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._conn.execute(
+                """
+                SELECT COALESCE(MAX(attempt), 0) AS max_attempt
+                FROM executions
+                WHERE study_id = ? AND execution_type = ?
+                """,
+                (previous.study_id, previous.execution_type),
+            ).fetchone()
+            attempt = int(row["max_attempt"]) + 1
+            retry_id = (
+                f"{previous.study_id}-{previous.execution_type}-a{attempt}"
+            )
+            self._conn.execute(
+                """
+                INSERT INTO executions(
+                    execution_id, study_id, execution_type, attempt, status,
+                    limits_json, progress_json, metrics_json, error, log_path,
+                    worker_id, created_at, started_at, heartbeat_at, finished_at
+                ) VALUES (?, ?, ?, ?, 'queued', ?, '{}', '{}', NULL, NULL,
+                          NULL, ?, NULL, NULL, NULL)
+                """,
+                (
+                    retry_id,
+                    previous.study_id,
+                    previous.execution_type,
+                    attempt,
+                    json.dumps(
+                        previous.limits,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    now,
+                ),
+            )
+            cursor = self._conn.execute(
+                """
+                UPDATE studies SET status = ?, updated_at = ?
+                WHERE study_id = ? AND status = ?
+                """,
+                (
+                    queued_study_status,
+                    now,
+                    previous.study_id,
+                    study.status,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("study status changed concurrently")
+            self._insert_event(
+                previous.study_id,
+                from_status=study.status,
+                to_status=queued_study_status,
+                message=(
+                    f"execution {previous.execution_id} retried as {retry_id}"
+                ),
+                occurred_at=now,
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return self.get_execution(retry_id)
+
+    def request_cancel(self, execution_id: str) -> ExecutionRecord:
+        """Request cooperative cancellation, or cancel queued work immediately."""
+        execution = self.get_execution(execution_id)
+        if execution.status in {"cancel_requested", "cancelled"}:
+            return execution
+        if execution.status not in {"queued", "running"}:
+            raise PermissionError("only queued or running execution can cancel")
+        study = self.get_study(execution.study_id)
+        expected_study_status = (
+            "running"
+            if execution.execution_type == "trial"
+            and execution.status == "running"
+            else f"{execution.execution_type}_{execution.status}"
+        )
+        if study.status != expected_study_status:
+            raise RuntimeError("execution does not match study status")
+        now = self._now_iso()
+        execution_status = (
+            "cancelled" if execution.status == "queued" else "cancel_requested"
+        )
+        study_status = execution_status
+        finished_at = now if execution_status == "cancelled" else None
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self._conn.execute(
+                """
+                UPDATE executions
+                SET status = ?, heartbeat_at = ?, finished_at = ?
+                WHERE execution_id = ? AND status = ?
+                """,
+                (
+                    execution_status,
+                    now,
+                    finished_at,
+                    execution_id,
+                    execution.status,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("execution status changed concurrently")
+            cursor = self._conn.execute(
+                """
+                UPDATE studies SET status = ?, updated_at = ?
+                WHERE study_id = ? AND status = ?
+                """,
+                (
+                    study_status,
+                    now,
+                    execution.study_id,
+                    study.status,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("study status changed concurrently")
+            self._insert_event(
+                execution.study_id,
+                from_status=study.status,
+                to_status=study_status,
+                message=f"cancel requested for execution {execution_id}",
+                occurred_at=now,
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return self.get_execution(execution_id)
+
+    def complete_cancel(self, execution_id: str) -> ExecutionRecord:
+        """Acknowledge cooperative cancellation from the running adapter."""
+        execution = self.get_execution(execution_id)
+        if execution.status == "cancelled":
+            return execution
+        if execution.status != "cancel_requested":
+            raise PermissionError("execution has no pending cancel request")
+        study = self.get_study(execution.study_id)
+        if study.status != "cancel_requested":
+            raise RuntimeError("cancel request does not match study status")
+        now = self._now_iso()
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self._conn.execute(
+                """
+                UPDATE executions
+                SET status = 'cancelled', heartbeat_at = ?, finished_at = ?
+                WHERE execution_id = ? AND status = 'cancel_requested'
+                """,
+                (now, now, execution_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("execution status changed concurrently")
+            cursor = self._conn.execute(
+                """
+                UPDATE studies SET status = 'cancelled', updated_at = ?
+                WHERE study_id = ? AND status = 'cancel_requested'
+                """,
+                (now, execution.study_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("study status changed concurrently")
+            self._insert_event(
+                execution.study_id,
+                from_status="cancel_requested",
+                to_status="cancelled",
+                message=f"execution {execution_id} cancelled",
+                occurred_at=now,
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return self.get_execution(execution_id)
+
+    def start_execution(
+        self,
+        execution_id: str,
+        *,
+        log_path: Path | str,
+    ) -> ExecutionRecord:
+        execution = self.get_execution(execution_id)
+        study = self.validate_study(execution.study_id)
+        expected_study_status = f"{execution.execution_type}_queued"
+        running_study_status = f"{execution.execution_type}_running"
+        if execution.status != "queued" or study.status != expected_study_status:
+            raise PermissionError("execution is not queued for its study")
+        now = self._now_iso()
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self._conn.execute(
+                """
+                UPDATE executions
+                SET status = 'running', log_path = ?, started_at = ?,
+                    heartbeat_at = ?, worker_id = 'direct'
+                WHERE execution_id = ? AND status = 'queued'
+                """,
+                (str(Path(log_path).resolve()), now, now, execution_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("execution status changed concurrently")
+            cursor = self._conn.execute(
+                """
+                UPDATE studies SET status = ?, updated_at = ?
+                WHERE study_id = ? AND status = ?
+                """,
+                (
+                    running_study_status,
+                    now,
+                    study.study_id,
+                    expected_study_status,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("study status changed concurrently")
+            self._insert_event(
+                study.study_id,
+                from_status=expected_study_status,
+                to_status=running_study_status,
+                message=f"execution {execution_id} started",
+                occurred_at=now,
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return self.get_execution(execution_id)
+
+    def record_execution_progress(
+        self,
+        execution_id: str,
+        progress: dict[str, object],
+    ) -> ExecutionRecord:
+        execution = self.get_execution(execution_id)
+        if execution.status != "running":
+            raise PermissionError("progress requires a running execution")
+        merged = {**execution.progress, **progress}
+        now = self._now_iso()
+        cursor = self._conn.execute(
+            """
+            UPDATE executions SET progress_json = ?, heartbeat_at = ?
+            WHERE execution_id = ? AND status = 'running'
+            """,
+            (
+                json.dumps(merged, sort_keys=True, separators=(",", ":")),
+                now,
+                execution_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("execution status changed concurrently")
+        return self.get_execution(execution_id)
+
+    def finish_execution(
+        self,
+        execution_id: str,
+        *,
+        metrics: dict[str, object],
+    ) -> ExecutionRecord:
+        execution = self.get_execution(execution_id)
+        if execution.status != "running":
+            raise PermissionError("only a running execution can succeed")
+        if execution.execution_type == "smoke":
+            from_study_status = "smoke_running"
+            to_study_status = "smoke_passed"
+        elif execution.execution_type == "calibration":
+            from_study_status = "calibration_running"
+            to_study_status = "gated"
+        else:
+            raise ValueError(
+                f"unsupported execution type: {execution.execution_type}"
+            )
+        now = self._now_iso()
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self._conn.execute(
+                """
+                UPDATE executions
+                SET status = 'succeeded', metrics_json = ?, heartbeat_at = ?,
+                    finished_at = ?
+                WHERE execution_id = ? AND status = 'running'
+                """,
+                (
+                    json.dumps(metrics, sort_keys=True, separators=(",", ":")),
+                    now,
+                    now,
+                    execution_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("execution status changed concurrently")
+            cursor = self._conn.execute(
+                """
+                UPDATE studies SET status = ?, updated_at = ?
+                WHERE study_id = ? AND status = ?
+                """,
+                (
+                    to_study_status,
+                    now,
+                    execution.study_id,
+                    from_study_status,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("study is not running this execution")
+            self._insert_event(
+                execution.study_id,
+                from_status=from_study_status,
+                to_status=to_study_status,
+                message=f"execution {execution_id} succeeded",
+                occurred_at=now,
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return self.get_execution(execution_id)
+
+    def fail_execution(
+        self,
+        execution_id: str,
+        *,
+        error: str,
+    ) -> ExecutionRecord:
+        execution = self.get_execution(execution_id)
+        if execution.status not in {"queued", "running"}:
+            raise PermissionError("only queued or running execution can fail")
+        error = error.strip()
+        if not error:
+            raise ValueError("execution failure reason must be non-empty")
+        study = self.get_study(execution.study_id)
+        expected_statuses = {
+            f"{execution.execution_type}_queued",
+            f"{execution.execution_type}_running",
+        }
+        if study.status not in expected_statuses:
+            raise PermissionError("study is not executing this task")
+        now = self._now_iso()
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self._conn.execute(
+                """
+                UPDATE executions
+                SET status = 'failed', error = ?, heartbeat_at = ?,
+                    finished_at = ?
+                WHERE execution_id = ? AND status IN ('queued', 'running')
+                """,
+                (error, now, now, execution_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("execution status changed concurrently")
+            cursor = self._conn.execute(
+                """
+                UPDATE studies SET status = 'failed', updated_at = ?
+                WHERE study_id = ? AND status = ?
+                """,
+                (now, execution.study_id, study.status),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("study status changed concurrently")
+            self._insert_event(
+                execution.study_id,
+                from_status=study.status,
+                to_status="failed",
+                message=f"execution {execution_id} failed: {error}",
+                occurred_at=now,
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return self.get_execution(execution_id)
 
     def register_artifact(
         self,
@@ -557,6 +1604,100 @@ class TrainingCatalog:
             self._conn.execute("ROLLBACK")
             raise
         return self._final_approval(study_id)
+
+    def approve_search(
+        self,
+        study_id: str,
+        *,
+        approved_by: str,
+    ) -> StudyApprovalRecord:
+        """Record explicit human approval before Optuna may be queued."""
+        self.validate_study(study_id)
+        approved_by = approved_by.strip()
+        if not approved_by:
+            raise ValueError("approved_by must be non-empty")
+        now = self._now_iso()
+        approval_id = f"search-{uuid.uuid4().hex}"
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self._conn.execute(
+                """
+                SELECT approval_id FROM study_approvals
+                WHERE study_id = ? AND approval_type = 'search'
+                """,
+                (study_id,),
+            ).fetchone()
+            if existing is not None:
+                raise PermissionError(
+                    "search is already approved for this study"
+                )
+            study = self.get_study(study_id)
+            if study.status != "gated":
+                raise PermissionError(
+                    "study must be gated before search approval"
+                )
+            self._conn.execute(
+                """
+                INSERT INTO study_approvals(
+                    approval_id, study_id, approval_type, approved_by,
+                    approved_at
+                ) VALUES (?, ?, 'search', ?, ?)
+                """,
+                (approval_id, study_id, approved_by, now),
+            )
+            cursor = self._conn.execute(
+                """
+                UPDATE studies SET status = 'queued', updated_at = ?
+                WHERE study_id = ? AND status = 'gated'
+                """,
+                (now, study_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("study status changed concurrently")
+            self._insert_event(
+                study_id,
+                from_status="gated",
+                to_status="queued",
+                message=f"search approved by {approved_by}",
+                occurred_at=now,
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        return self.get_study_approval(study_id, "search")
+
+    def get_study_approval(
+        self,
+        study_id: str,
+        approval_type: str,
+    ) -> StudyApprovalRecord:
+        row = self._conn.execute(
+            """
+            SELECT * FROM study_approvals
+            WHERE study_id = ? AND approval_type = ?
+            """,
+            (study_id, approval_type),
+        ).fetchone()
+        if row is None:
+            raise KeyError(
+                f"study approval does not exist: {study_id}/{approval_type}"
+            )
+        return StudyApprovalRecord(**dict(row))
+
+    def list_study_approvals(
+        self,
+        study_id: str,
+    ) -> list[StudyApprovalRecord]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM study_approvals
+            WHERE study_id = ?
+            ORDER BY approved_at, approval_id
+            """,
+            (study_id,),
+        ).fetchall()
+        return [StudyApprovalRecord(**dict(row)) for row in rows]
 
     def consume_final_approval(
         self,
@@ -936,6 +2077,29 @@ def _template_record(row: sqlite3.Row) -> TemplateRecord:
 
 def _study_record(row: sqlite3.Row) -> StudyRecord:
     return StudyRecord(**dict(row))
+
+
+def _execution_record(row: sqlite3.Row) -> ExecutionRecord:
+    return ExecutionRecord(
+        execution_id=row["execution_id"],
+        study_id=row["study_id"],
+        execution_type=row["execution_type"],
+        trial_number=(
+            None if int(row["trial_number"]) < 0 else int(row["trial_number"])
+        ),
+        attempt=int(row["attempt"]),
+        status=row["status"],
+        limits=json.loads(row["limits_json"]),
+        progress=json.loads(row["progress_json"]),
+        metrics=json.loads(row["metrics_json"]),
+        error=row["error"],
+        log_path=row["log_path"],
+        worker_id=row["worker_id"],
+        created_at=row["created_at"],
+        started_at=row["started_at"],
+        heartbeat_at=row["heartbeat_at"],
+        finished_at=row["finished_at"],
+    )
 
 
 def _sha256_file(path: Path) -> str:

@@ -12,7 +12,7 @@ from config.settings import Settings
 from config.stations import STATIONS
 from training.audit_frames import AuditedFrameCache
 from training.config import ExperimentTemplate, ResolvedTrialSnapshot
-from training.experiment import FinalEvaluationApproval
+from training.experiment import FinalEvaluationApproval, ValidationExecutionLimits
 from training.trainer import TftTrainer
 
 
@@ -75,18 +75,43 @@ class FakeTimeSeriesDataSet:
 
 class FakeTFT:
     kwargs = None
+    loaded_checkpoint = None
 
     @classmethod
     def from_dataset(cls, *args, **kwargs):
         cls.kwargs = kwargs
         return cls()
 
+    @classmethod
+    def load_from_checkpoint(cls, path):
+        cls.loaded_checkpoint = path
+        return cls()
+
 
 class FakeTrainer:
+    kwargs = None
+
     def __init__(self, *args, **kwargs):
-        self.current_epoch = 3
+        FakeTrainer.kwargs = kwargs
+        self.current_epoch = 0
+        self.num_training_batches = kwargs.get("limit_train_batches", 1)
+        self.num_val_batches = [kwargs.get("limit_val_batches", 1)]
+        self.callback_metrics = {"val_loss": 0.25}
+        self.sanity_checking = False
 
     def fit(self, *args, **kwargs):
+        for callback in FakeTrainer.kwargs.get("callbacks", []):
+            hook = getattr(callback, "on_train_batch_end", None)
+            if hook is not None:
+                for batch_idx in range(int(self.num_training_batches)):
+                    hook(self, args[0], None, None, batch_idx)
+            hook = getattr(callback, "on_validation_batch_end", None)
+            if hook is not None:
+                for batch_idx in range(int(self.num_val_batches[0])):
+                    hook(self, args[0], None, None, batch_idx, 0)
+            hook = getattr(callback, "on_validation_epoch_end", None)
+            if hook is not None:
+                hook(self, args[0])
         return None
 
 
@@ -100,7 +125,14 @@ class FakeCheckpoint:
 def _install_training_fakes(monkeypatch):
     FakeTimeSeriesDataSet.created_train_frames = []
     FakeTimeSeriesDataSet.created_train_kwargs = []
+    FakeTrainer.kwargs = None
     torch_mod = types.ModuleType("torch")
+    torch_mod.deterministic_calls = []
+    torch_mod.use_deterministic_algorithms = (
+        lambda enabled, **kwargs: torch_mod.deterministic_calls.append(
+            (enabled, kwargs)
+        )
+    )
     torch_mod.__version__ = "2.fake"
     torch_mod.version = types.SimpleNamespace(cuda="12.fake")
     torch_mod.backends = types.SimpleNamespace(
@@ -109,6 +141,10 @@ def _install_training_fakes(monkeypatch):
     torch_mod.cuda = types.SimpleNamespace(
         is_available=lambda: False,
         get_device_name=lambda *_args, **_kwargs: None,
+        reset_peak_memory_stats=lambda: None,
+        max_memory_allocated=lambda: 0,
+        max_memory_reserved=lambda: 0,
+        memory_allocated=lambda: 0,
     )
     lightning_pkg = types.ModuleType("lightning")
     pl_mod = types.ModuleType("lightning.pytorch")
@@ -121,6 +157,7 @@ def _install_training_fakes(monkeypatch):
 
     pl_mod.seed_everything = lambda *args, **kwargs: None
     pl_mod.__version__ = "2.lightning"
+    pl_mod.Callback = object
     pl_mod.Trainer = FakeTrainer
     callbacks_mod.EarlyStopping = lambda *args, **kwargs: object()
     callbacks_mod.ModelCheckpoint = FakeCheckpoint
@@ -349,6 +386,138 @@ def test_validation_execution_never_loads_test_or_publishes_candidate(
     assert "test_mae" not in result
     assert result["best_val_loss"] == 0.25
     assert registry.publish_kwargs is None
+
+
+def test_smoke_execution_applies_hard_training_limits(
+    tmp_path,
+    monkeypatch,
+):
+    _install_training_fakes(monkeypatch)
+    experiment = _experiment_template()
+    settings = Settings(data_store_dir=tmp_path / "data")
+    builder = FakeBuilder()
+    registry = FakeRegistry()
+    trainer = TftTrainer(
+        store=None,
+        registry=registry,
+        output_dir=tmp_path / "checkpoints",
+        settings=settings,
+        dataset_builder=builder,
+        station_config=STATIONS["KLGA"],
+        experiment_config=experiment,
+    )
+
+    result = trainer.run_validation(
+        station_id="KLGA",
+        execution_id="smoke-0001",
+        limits=ValidationExecutionLimits.for_smoke(experiment.execution.smoke),
+    )
+
+    assert FakeTrainer.kwargs["max_epochs"] == 1
+    assert FakeTrainer.kwargs["min_epochs"] == 1
+    assert FakeTrainer.kwargs["limit_train_batches"] == 20
+    assert FakeTrainer.kwargs["limit_val_batches"] == 5
+    assert FakeTrainer.kwargs["max_time"].total_seconds() == 30 * 60
+    assert FakeTrainer.kwargs["logger"] is False
+    assert FakeTFT.kwargs["mask_bias"] == -float("inf")
+    assert sys.modules["torch"].deterministic_calls == [
+        (True, {"warn_only": True})
+    ]
+    assert [call[3] for call in builder.calls] == ["train", "val"]
+    assert registry.publish_kwargs is None
+    assert result["execution_type"] == "smoke"
+    assert result["environment"]["deterministic_mode"] == "warn_only"
+
+
+def test_smoke_reports_live_batch_progress_and_verifies_checkpoint_reload(
+    tmp_path,
+    monkeypatch,
+):
+    _install_training_fakes(monkeypatch)
+    experiment = _experiment_template()
+    progress = []
+    trainer = TftTrainer(
+        store=None,
+        registry=FakeRegistry(),
+        output_dir=tmp_path / "checkpoints",
+        settings=Settings(data_store_dir=tmp_path / "data"),
+        dataset_builder=FakeBuilder(),
+        station_config=STATIONS["KLGA"],
+        experiment_config=experiment,
+    )
+
+    result = trainer.run_validation(
+        station_id="KLGA",
+        execution_id="smoke-progress",
+        limits=ValidationExecutionLimits.for_smoke(experiment.execution.smoke),
+        progress_reporter=progress.append,
+    )
+
+    assert any(item["phase"] == "fit" for item in progress)
+    assert any(item.get("train_batches_completed") == 1 for item in progress)
+    assert any(item.get("val_batches_completed") == 1 for item in progress)
+    assert [
+        item["train_batches_completed"]
+        for item in progress
+        if "train_batches_completed" in item
+    ] == [1, 10, 20]
+    assert [
+        item["val_batches_completed"]
+        for item in progress
+        if "val_batches_completed" in item
+    ] == [1, 5]
+    assert any(
+        item.get("validation_quantile_loss") == 0.25
+        for item in progress
+    )
+    assert FakeTFT.loaded_checkpoint == result["checkpoint_path"]
+    assert result["checkpoint_reload_verified"] is True
+    assert result["environment"]["cuda_available"] is False
+
+
+def test_trial_execution_applies_resolved_search_parameters(
+    tmp_path,
+    monkeypatch,
+):
+    _install_training_fakes(monkeypatch)
+    experiment = _experiment_template()
+    parameters = {
+        "hidden_size": 64,
+        "attention_head_size": 2,
+        "hidden_continuous_size": 24,
+        "dropout": 0.35,
+        "learning_rate": 0.001,
+        "weight_decay": 0.002,
+        "batch_size": 8,
+        "gradient_clip_val": 0.5,
+    }
+    trainer = TftTrainer(
+        store=None,
+        registry=FakeRegistry(),
+        output_dir=tmp_path / "checkpoints",
+        settings=Settings(data_store_dir=tmp_path / "data"),
+        dataset_builder=FakeBuilder(),
+        station_config=STATIONS["KLGA"],
+        experiment_config=experiment,
+    )
+
+    trainer.run_validation(
+        station_id="KLGA",
+        execution_id="trial-00001",
+        limits=ValidationExecutionLimits.for_trial(
+            experiment,
+            parameters,
+        ),
+        trial_parameters=parameters,
+    )
+
+    assert FakeTFT.kwargs["hidden_size"] == 64
+    assert FakeTFT.kwargs["attention_head_size"] == 2
+    assert FakeTFT.kwargs["hidden_continuous_size"] == 24
+    assert FakeTFT.kwargs["dropout"] == 0.35
+    assert FakeTFT.kwargs["learning_rate"] == 0.001
+    assert FakeTFT.kwargs["weight_decay"] == 0.002
+    assert FakeTrainer.kwargs["gradient_clip_val"] == 0.5
 
 
 def test_final_execution_rejects_missing_approval_before_loading_data(

@@ -32,6 +32,22 @@ def _parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status")
     status.add_argument("--study")
 
+    enqueue_smoke = subparsers.add_parser("enqueue-smoke")
+    enqueue_smoke.add_argument("--study", required=True)
+
+    enqueue_calibration = subparsers.add_parser("enqueue-calibration")
+    enqueue_calibration.add_argument("--study", required=True)
+
+    retry = subparsers.add_parser("retry")
+    retry.add_argument("--execution", required=True)
+
+    cancel = subparsers.add_parser("cancel")
+    cancel.add_argument("--execution", required=True)
+
+    approve_search = subparsers.add_parser("approve-search")
+    approve_search.add_argument("--study", required=True)
+    approve_search.add_argument("--approved-by", required=True)
+
     approve = subparsers.add_parser("approve-final")
     approve.add_argument("--study", required=True)
     approve.add_argument("--trial-snapshot", required=True)
@@ -46,9 +62,44 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload: Any = asdict(
                 catalog.create_study(args.workspace, args.template)
             )
+        elif args.command == "enqueue-smoke":
+            payload = asdict(catalog.enqueue_smoke(args.study))
+        elif args.command == "enqueue-calibration":
+            payload = asdict(catalog.enqueue_calibration(args.study))
+        elif args.command == "retry":
+            payload = asdict(catalog.retry_execution(args.execution))
+        elif args.command == "cancel":
+            payload = asdict(catalog.request_cancel(args.execution))
+        elif args.command == "approve-search":
+            payload = asdict(
+                catalog.approve_search(
+                    args.study,
+                    approved_by=args.approved_by,
+                )
+            )
         elif args.command == "status":
             payload = (
-                asdict(catalog.get_study(args.study))
+                {
+                    "study": asdict(catalog.get_study(args.study)),
+                    "executions": [
+                        asdict(execution)
+                        for execution in catalog.list_executions(args.study)
+                    ],
+                    "approvals": [
+                        asdict(approval)
+                        for approval in catalog.list_study_approvals(
+                            args.study
+                        )
+                    ],
+                    "events": [
+                        asdict(event)
+                        for event in catalog.list_events(args.study)
+                    ],
+                    "artifacts": [
+                        asdict(artifact)
+                        for artifact in catalog.list_artifacts(args.study)
+                    ],
+                }
                 if args.study
                 else [asdict(study) for study in catalog.list_studies()]
             )

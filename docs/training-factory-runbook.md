@@ -195,26 +195,118 @@ manifest. It fails closed on station, split range, source fingerprint, row
 count, template hash, or data-hash drift. Study and candidate identifiers are
 never entered manually.
 
-## 4. Run Train/Validation Execution
+## 4. Run Managed Smoke And Calibration
 
 The managed experiment and Optuna workflow is specified in
 [`experiment-management-optuna-plan.md`](experiment-management-optuna-plan.md).
-Slices 1 and 2 are implemented: this command reads the versioned Git template,
-loads only the audited train and validation frames, writes validation evidence,
-and cannot publish a candidate.
+Queue the bounded smoke gate after creating a study:
 
 ```bash
-./.venv/bin/python -m scripts.train_tft \
-  --run-dir "$RUN_DIR" \
-  --station KLGA \
-  --version manual_validation_01 \
-  --experiment-config experiments/klga/tft_optuna_v1.json
+./.venv/bin/python -m scripts.manage_training \
+  --catalog runs/_management/training_catalog.db \
+  enqueue-smoke \
+  --study "$STUDY_ID"
+
+./.venv/bin/python -m scripts.run_training_execution \
+  --catalog runs/_management/training_catalog.db \
+  --execution "${STUDY_ID}-smoke-a1"
 ```
 
-Inline split ranges are no longer accepted. The template station must match the
-ready audit, and the audited frame cache still validates each requested range
-and source fingerprint. The command writes `validation_result.json`; it does not
-write `train_result.json` or model-registry state.
+Inspect live phase, batch/epoch progress, GPU memory, metrics, log path, or
+failure reason from another terminal:
+
+```bash
+./.venv/bin/python -m scripts.manage_training \
+  --catalog runs/_management/training_catalog.db \
+  status \
+  --study "$STUDY_ID"
+```
+
+Only after smoke succeeds, queue and run calibration:
+
+```bash
+./.venv/bin/python -m scripts.manage_training \
+  --catalog runs/_management/training_catalog.db \
+  enqueue-calibration \
+  --study "$STUDY_ID"
+
+./.venv/bin/python -m scripts.run_training_execution \
+  --catalog runs/_management/training_catalog.db \
+  --execution "${STUDY_ID}-calibration-a1"
+```
+
+Smoke is limited to one epoch, 20 train batches, 5 validation batches, and 30
+minutes. Calibration is limited to one full epoch and two GPU-hours. Both read
+only the audited train/validation frames, write evidence below
+`studies/<STUDY_ID>/`, and cannot publish a candidate. A failed execution leaves
+the study failed and cannot enter the next gate.
+
+For normal managed operation, start the single-GPU background worker instead of
+running individual execution commands:
+
+```bash
+./.venv/bin/python -m scripts.training_worker \
+  --catalog runs/_management/training_catalog.db \
+  --gpu-lock runs/_management/training.gpu.lock \
+  --optuna-storage sqlite:///runs/_management/optuna.db
+```
+
+The worker transactionally claims one queued execution. A second worker cannot
+acquire the GPU lock. After an unclean process exit, the replacement worker
+marks abandoned running work `interrupted`; it never reports it as successful.
+Retry and cancel are explicit catalog commands:
+
+```bash
+./.venv/bin/python -m scripts.manage_training \
+  --catalog runs/_management/training_catalog.db \
+  retry --execution "$EXECUTION_ID"
+
+./.venv/bin/python -m scripts.manage_training \
+  --catalog runs/_management/training_catalog.db \
+  cancel --execution "$EXECUTION_ID"
+```
+
+After calibration reaches `gated`, record the human search approval:
+
+```bash
+./.venv/bin/python -m scripts.manage_training \
+  --catalog runs/_management/training_catalog.db \
+  approve-search --study "$STUDY_ID" --approved-by "$USER"
+```
+
+The Streamlit Training page submits the same catalog commands and displays
+workspace, study, execution, approval, progress, metrics, failure, and log-tail
+evidence. It never trains inside the Streamlit request thread.
+
+The eventual 48 GPU-hour Optuna run is an operator-started job. Start it
+manually after the small-budget integration checks, let it run without Codex
+polling, then ask Codex to validate the completed catalog, Optuna storage,
+logs, and Top-K evidence once.
+
+For the current KLGA study, do not run `approve-search` until the operator is
+ready to begin the 48 GPU-hour budget. Approval changes the study from `gated`
+to `queued`; the next worker invocation will claim it and create/resume the
+separate Optuna SQLite storage. The worker always uses `n_jobs=1`.
+
+To run manually:
+
+```bash
+./.venv/bin/python -m scripts.manage_training \
+  --catalog runs/_management/training_catalog.db \
+  approve-search --study "$STUDY_ID" --approved-by "$USER"
+
+./.venv/bin/python -m scripts.training_worker \
+  --catalog runs/_management/training_catalog.db \
+  --gpu-lock runs/_management/training.gpu.lock \
+  --optuna-storage sqlite:///runs/_management/optuna.db
+```
+
+Stopping the terminal cleanly waits for the current trial. For immediate
+cooperative cancellation, select the running trial execution in the Training
+page or run `manage_training cancel --execution <TRIAL_EXECUTION_ID>`. After an
+unclean process exit, rerun the same worker command; the catalog marks the old
+trial interrupted, Optuna marks its stale RUNNING trial failed, charges elapsed
+time conservatively, and resumes with the next trial number.
 
 Final test evaluation and inactive-candidate publication are available only
 through `TftTrainer.run_final`. `TrainingCatalog.approve_final` binds approval

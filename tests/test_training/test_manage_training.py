@@ -62,3 +62,103 @@ def test_manage_training_create_study_prints_managed_identity(
     assert payload["study_id"].startswith("klga-tft_optuna_v1-")
     assert payload["candidate_version"].endswith("_final")
     assert payload["status"] == "draft"
+
+
+def test_manage_training_can_enqueue_smoke_and_show_execution_progress(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    workspace = _workspace(tmp_path)
+    catalog_path = tmp_path / "training_catalog.db"
+    main(
+        [
+            "--catalog",
+            str(catalog_path),
+            "create-study",
+            "--workspace",
+            str(workspace.run_dir),
+            "--template",
+            "experiments/klga/tft_optuna_v1.json",
+        ]
+    )
+    study_id = json.loads(capsys.readouterr().out)["study_id"]
+
+    main(
+        [
+            "--catalog",
+            str(catalog_path),
+            "enqueue-smoke",
+            "--study",
+            study_id,
+        ]
+    )
+    queued = json.loads(capsys.readouterr().out)
+    main(
+        [
+            "--catalog",
+            str(catalog_path),
+            "status",
+            "--study",
+            study_id,
+        ]
+    )
+    status = json.loads(capsys.readouterr().out)
+
+    assert queued["status"] == "queued"
+    assert status["study"]["status"] == "smoke_queued"
+    assert status["executions"][0]["execution_id"] == queued["execution_id"]
+
+
+def test_manage_training_cancel_and_retry_preserve_attempt_history(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    workspace = _workspace(tmp_path)
+    catalog_path = tmp_path / "training_catalog.db"
+    main(
+        [
+            "--catalog",
+            str(catalog_path),
+            "create-study",
+            "--workspace",
+            str(workspace.run_dir),
+            "--template",
+            "experiments/klga/tft_optuna_v1.json",
+        ]
+    )
+    study_id = json.loads(capsys.readouterr().out)["study_id"]
+    main(
+        [
+            "--catalog",
+            str(catalog_path),
+            "enqueue-smoke",
+            "--study",
+            study_id,
+        ]
+    )
+    execution_id = json.loads(capsys.readouterr().out)["execution_id"]
+
+    main(
+        [
+            "--catalog",
+            str(catalog_path),
+            "cancel",
+            "--execution",
+            execution_id,
+        ]
+    )
+    cancelled = json.loads(capsys.readouterr().out)
+    main(
+        [
+            "--catalog",
+            str(catalog_path),
+            "retry",
+            "--execution",
+            execution_id,
+        ]
+    )
+    retried = json.loads(capsys.readouterr().out)
+
+    assert cancelled["status"] == "cancelled"
+    assert retried["attempt"] == 2
+    assert retried["status"] == "queued"

@@ -1,6 +1,7 @@
 """Training verification page."""
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -8,19 +9,149 @@ import pandas as pd
 import streamlit as st
 
 from config.settings import Settings
+from training.catalog import TrainingCatalog
 from ui import queries
 
 if TYPE_CHECKING:
     from db.schema import DbClient
 
 
-def render(db: "DbClient", settings: Settings | None = None) -> None:
+def render(
+    db: "DbClient",
+    settings: Settings | None = None,
+    *,
+    catalog_path: Path | str | None = None,
+) -> None:
     st.header("Training")
     settings = settings or Settings()
+    managed_catalog = (
+        Path(catalog_path)
+        if catalog_path is not None
+        else settings.project_root
+        / "runs"
+        / "_management"
+        / "training_catalog.db"
+    )
 
+    _render_experiment_management(managed_catalog)
     _render_split_settings(settings)
     _render_model_versions(db, settings)
     _render_training_artifacts(settings)
+
+
+def _render_experiment_management(catalog_path: Path) -> None:
+    st.subheader("Managed Experiments")
+    if not catalog_path.exists():
+        st.info(f"Training catalog not found: {catalog_path}")
+        return
+    with TrainingCatalog(catalog_path) as catalog:
+        workspaces = catalog.list_workspaces()
+        if workspaces:
+            st.dataframe(
+                pd.DataFrame(
+                    [asdict(workspace) for workspace in workspaces]
+                ),
+                use_container_width=True,
+            )
+        studies = catalog.list_studies()
+        if not studies:
+            st.info("No managed studies.")
+            return
+        st.dataframe(
+            pd.DataFrame([asdict(study) for study in studies]),
+            use_container_width=True,
+        )
+        study_id = st.selectbox(
+            "Study",
+            [study.study_id for study in studies],
+            key="training-study",
+        )
+        study = catalog.get_study(study_id)
+        executions = catalog.list_executions(study_id)
+        approvals = catalog.list_study_approvals(study_id)
+        if approvals:
+            st.dataframe(
+                pd.DataFrame([asdict(approval) for approval in approvals]),
+                use_container_width=True,
+            )
+        selected_execution = None
+        if executions:
+            st.dataframe(
+                pd.DataFrame(
+                    [asdict(execution) for execution in executions]
+                ),
+                use_container_width=True,
+            )
+            execution_id = st.selectbox(
+                "Execution",
+                [execution.execution_id for execution in executions],
+                key=f"training-execution-{study_id}",
+            )
+            selected_execution = catalog.get_execution(execution_id)
+            _render_execution_log(selected_execution.log_path)
+        else:
+            st.info("No executions for selected study.")
+        try:
+            if study.status == "draft" and st.button(
+                "Queue smoke",
+                key=f"queue-smoke-{study_id}",
+            ):
+                catalog.enqueue_smoke(study_id)
+                st.success("Smoke queued.")
+            elif study.status == "smoke_passed" and st.button(
+                "Queue calibration",
+                key=f"queue-calibration-{study_id}",
+            ):
+                catalog.enqueue_calibration(study_id)
+                st.success("Calibration queued.")
+            elif study.status == "gated":
+                approved_by = st.text_input(
+                    "Search approver",
+                    key=f"search-approver-{study_id}",
+                )
+                if st.button(
+                    "Approve search",
+                    key=f"approve-search-{study_id}",
+                ):
+                    catalog.approve_search(
+                        study_id,
+                        approved_by=approved_by,
+                    )
+                    st.success("Search approved and queued.")
+            elif (
+                selected_execution is not None
+                and selected_execution.status in {"queued", "running"}
+                and st.button(
+                    "Cancel execution",
+                    key=f"cancel-{selected_execution.execution_id}",
+                )
+            ):
+                catalog.request_cancel(selected_execution.execution_id)
+                st.success("Cancellation recorded.")
+            elif (
+                selected_execution is not None
+                and selected_execution.execution_type != "trial"
+                and selected_execution.status
+                in {"failed", "interrupted", "cancelled"}
+                and st.button(
+                    "Retry execution",
+                    key=f"retry-{selected_execution.execution_id}",
+                )
+            ):
+                catalog.retry_execution(selected_execution.execution_id)
+                st.success("Retry queued.")
+        except (PermissionError, RuntimeError, ValueError) as exc:
+            st.warning(str(exc))
+
+
+def _render_execution_log(log_path: str | None) -> None:
+    if not log_path:
+        return
+    path = Path(log_path)
+    if not path.is_file():
+        return
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    st.code("\n".join(lines[-200:]), language="text")
 
 
 def _render_split_settings(settings: Settings) -> None:

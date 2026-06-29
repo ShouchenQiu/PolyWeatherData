@@ -235,6 +235,157 @@ def test_study_transition_updates_status_and_appends_event(tmp_path: Path) -> No
     assert events[-1].message == "operator queued smoke"
 
 
+def test_enqueue_smoke_records_resolved_limits_and_advances_gate(
+    tmp_path: Path,
+) -> None:
+    workspace = _ready_workspace(tmp_path)
+    catalog = TrainingCatalog(tmp_path / "training_catalog.db")
+    study = catalog.create_study(
+        workspace.run_dir,
+        "experiments/klga/tft_optuna_v1.json",
+    )
+
+    execution = catalog.enqueue_smoke(study.study_id)
+
+    assert execution.execution_type == "smoke"
+    assert execution.attempt == 1
+    assert execution.status == "queued"
+    assert execution.limits["max_epochs"] == 1
+    assert execution.limits["limit_train_batches"] == 20
+    assert catalog.get_execution(execution.execution_id) == execution
+    assert catalog.get_study(study.study_id).status == "smoke_queued"
+    with pytest.raises(PermissionError, match="draft"):
+        catalog.enqueue_smoke(study.study_id)
+
+
+def test_smoke_progress_and_gpu_evidence_are_queryable_until_success(
+    tmp_path: Path,
+) -> None:
+    workspace = _ready_workspace(tmp_path)
+    catalog = TrainingCatalog(tmp_path / "training_catalog.db")
+    study = catalog.create_study(
+        workspace.run_dir,
+        "experiments/klga/tft_optuna_v1.json",
+    )
+    queued = catalog.enqueue_smoke(study.study_id)
+    log_path = (
+        workspace.run_dir
+        / "studies"
+        / study.study_id
+        / "smoke"
+        / "attempt-1"
+        / "execution.log"
+    )
+
+    running = catalog.start_execution(queued.execution_id, log_path=log_path)
+    visible = catalog.record_execution_progress(
+        running.execution_id,
+        {
+            "phase": "fit",
+            "epoch": 0,
+            "train_batches_completed": 7,
+            "train_batches_total": 20,
+            "gpu_memory_allocated_bytes": 1_024,
+        },
+    )
+    succeeded = catalog.finish_execution(
+        running.execution_id,
+        metrics={
+            "best_val_loss": 0.25,
+            "gpu_peak_memory_allocated_bytes": 2_048,
+            "gpu_seconds": 12.5,
+        },
+    )
+
+    assert visible.progress["train_batches_completed"] == 7
+    assert visible.heartbeat_at is not None
+    assert succeeded.status == "succeeded"
+    assert succeeded.metrics["gpu_peak_memory_allocated_bytes"] == 2_048
+    assert succeeded.finished_at is not None
+    assert catalog.get_study(study.study_id).status == "smoke_passed"
+
+
+def test_failed_smoke_records_reason_and_cannot_enter_calibration(
+    tmp_path: Path,
+) -> None:
+    workspace = _ready_workspace(tmp_path)
+    catalog = TrainingCatalog(tmp_path / "training_catalog.db")
+    study = catalog.create_study(
+        workspace.run_dir,
+        "experiments/klga/tft_optuna_v1.json",
+    )
+    queued = catalog.enqueue_smoke(study.study_id)
+    catalog.start_execution(
+        queued.execution_id,
+        log_path=workspace.run_dir / "smoke.log",
+    )
+
+    failed = catalog.fail_execution(
+        queued.execution_id,
+        error="CUDA out of memory",
+    )
+
+    assert failed.status == "failed"
+    assert failed.error == "CUDA out of memory"
+    assert catalog.get_study(study.study_id).status == "failed"
+    with pytest.raises(PermissionError, match="smoke_passed"):
+        catalog.enqueue_calibration(study.study_id)
+
+
+def test_successful_smoke_unlocks_one_bounded_calibration(
+    tmp_path: Path,
+) -> None:
+    workspace = _ready_workspace(tmp_path)
+    catalog = TrainingCatalog(tmp_path / "training_catalog.db")
+    study = catalog.create_study(
+        workspace.run_dir,
+        "experiments/klga/tft_optuna_v1.json",
+    )
+    smoke = catalog.enqueue_smoke(study.study_id)
+    catalog.start_execution(
+        smoke.execution_id,
+        log_path=workspace.run_dir / "smoke.log",
+    )
+    catalog.finish_execution(smoke.execution_id, metrics={"best_val_loss": 0.3})
+
+    calibration = catalog.enqueue_calibration(study.study_id)
+
+    assert calibration.status == "queued"
+    assert calibration.limits["max_epochs"] == 1
+    assert calibration.limits["max_gpu_hours"] == 2.0
+    assert catalog.get_study(study.study_id).status == "calibration_queued"
+
+
+def test_search_approval_advances_gated_study_only_once(
+    tmp_path: Path,
+) -> None:
+    workspace = _ready_workspace(tmp_path)
+    catalog = TrainingCatalog(tmp_path / "training_catalog.db")
+    study = catalog.create_study(
+        workspace.run_dir,
+        "experiments/klga/tft_optuna_v1.json",
+    )
+    for status in (
+        "smoke_queued",
+        "smoke_running",
+        "smoke_passed",
+        "calibration_queued",
+        "calibration_running",
+        "gated",
+    ):
+        catalog.transition_study(study.study_id, status)
+
+    approval = catalog.approve_search(
+        study.study_id,
+        approved_by="john",
+    )
+
+    assert approval.approval_type == "search"
+    assert catalog.get_study(study.study_id).status == "queued"
+    with pytest.raises(PermissionError, match="already approved"):
+        catalog.approve_search(study.study_id, approved_by="john")
+
+
 def test_catalog_indexes_artifact_with_content_hash(tmp_path: Path) -> None:
     workspace = _ready_workspace(tmp_path)
     catalog = TrainingCatalog(tmp_path / "training_catalog.db")

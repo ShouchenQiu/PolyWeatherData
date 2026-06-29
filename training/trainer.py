@@ -21,7 +21,9 @@ from __future__ import annotations
 import json
 import logging
 import pickle
-from datetime import datetime, timezone
+import platform
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -36,7 +38,7 @@ from training.config import (
     ResolvedTrialSnapshot,
 )
 from training.dataset import DECODER_WEIGHT_COLUMN
-from training.experiment import FinalEvaluationApproval
+from training.experiment import FinalEvaluationApproval, ValidationExecutionLimits
 from training.workspace import TrainingWorkspace
 
 if TYPE_CHECKING:
@@ -124,7 +126,7 @@ def _train_validation(**kwargs: Any) -> dict[str, Any]:
         trainer = TftTrainer(
             forecast_store,
             ModelRegistry(settings.model_store_dir, db),
-            output_dir=workspace.checkpoints_dir,
+            output_dir=kwargs.get("output_dir", workspace.checkpoints_dir),
             settings=settings,
             data_manager=data_manager,
             decoder_cache=decoder_cache,
@@ -142,6 +144,9 @@ def _train_validation(**kwargs: Any) -> dict[str, Any]:
         return trainer.run_validation(
             station_id=kwargs["station_id"],
             execution_id=kwargs["version"],
+            limits=kwargs.get("limits"),
+            progress_reporter=kwargs.get("progress_reporter"),
+            trial_parameters=kwargs.get("trial_parameters"),
         )
     finally:
         db.close()
@@ -237,6 +242,9 @@ class TftTrainer:
         self,
         station_id: str,
         execution_id: str,
+        limits: ValidationExecutionLimits | None = None,
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
+        trial_parameters: dict[str, object] | None = None,
     ) -> dict[str, Any]:
         """Fit against train/validation only and return validation evidence."""
         return self._run(
@@ -244,6 +252,9 @@ class TftTrainer:
             version=execution_id,
             include_test=False,
             publish_candidate=False,
+            limits=limits,
+            progress_reporter=progress_reporter,
+            trial_parameters=trial_parameters,
         )
 
     def run_final(
@@ -286,6 +297,9 @@ class TftTrainer:
             version=version,
             include_test=True,
             publish_candidate=True,
+            limits=None,
+            progress_reporter=None,
+            trial_parameters=None,
         )
 
     def _run(
@@ -295,11 +309,61 @@ class TftTrainer:
         version: str | None,
         include_test: bool,
         publish_candidate: bool,
+        limits: ValidationExecutionLimits | None,
+        progress_reporter: Callable[[dict[str, object]], None] | None,
+        trial_parameters: dict[str, object] | None,
     ) -> dict[str, Any]:
         if version is None:
             version = datetime.now(timezone.utc).strftime("v%Y%m%d_%H%M%S")
         if publish_candidate and not include_test:
             raise ValueError("candidate publishing requires final test evaluation")
+        if trial_parameters is not None:
+            if limits is None or limits.execution_type != "trial":
+                raise PermissionError(
+                    "resolved parameters require a trial execution"
+                )
+            if self._experiment_config is None:
+                raise PermissionError(
+                    "trial parameters require an experiment template"
+                )
+            expected = set(self._experiment_config.study.search_space)
+            if set(trial_parameters) != expected:
+                raise ValueError(
+                    "trial parameters must exactly match template search space"
+                )
+            setting_names = {
+                "hidden_size": "tft_hidden_size",
+                "attention_head_size": "tft_attention_head_size",
+                "hidden_continuous_size": "tft_hidden_continuous_size",
+                "dropout": "tft_dropout",
+                "learning_rate": "tft_learning_rate",
+                "weight_decay": "tft_weight_decay",
+            }
+            for name, setting_name in setting_names.items():
+                setattr(
+                    self._settings,
+                    setting_name,
+                    trial_parameters[name],
+                )
+        batch_size = (
+            limits.batch_size
+            if limits is not None
+            else self._settings.tft_batch_size
+        )
+        num_workers = (
+            limits.num_workers if limits is not None else self._num_workers
+        )
+        precision = limits.precision if limits is not None else self._precision
+        min_epochs = (
+            limits.min_epochs
+            if limits is not None
+            else self._settings.tft_min_epochs
+        )
+        max_epochs = (
+            limits.max_epochs
+            if limits is not None
+            else self._settings.tft_max_epochs
+        )
 
         try:
             import torch
@@ -321,9 +385,100 @@ class TftTrainer:
 
         pl.seed_everything(self._random_seed, workers=True)
         if self._torch_deterministic and hasattr(torch, "use_deterministic_algorithms"):
-            torch.use_deterministic_algorithms(True)
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        cuda_available = bool(torch.cuda.is_available())
+        if cuda_available and hasattr(torch.cuda, "reset_peak_memory_stats"):
+            torch.cuda.reset_peak_memory_stats()
+
+        def report(**payload: object) -> None:
+            if progress_reporter is not None:
+                progress_reporter(payload)
+
+        class ExecutionProgressCallback(pl.Callback):
+            @staticmethod
+            def _should_report(completed: int, total: int) -> bool:
+                return (
+                    completed == 1
+                    or completed % 10 == 0
+                    or completed == total
+                )
+
+            def on_train_batch_end(
+                self,
+                trainer: object,
+                _module: object,
+                _outputs: object,
+                _batch: object,
+                batch_idx: int,
+            ) -> None:
+                completed = batch_idx + 1
+                total = int(getattr(trainer, "num_training_batches", 0))
+                if not self._should_report(completed, total):
+                    return
+                report(
+                    phase="fit",
+                    epoch=int(getattr(trainer, "current_epoch", 0)),
+                    train_batches_completed=completed,
+                    train_batches_total=total,
+                    gpu_memory_allocated_bytes=(
+                        int(torch.cuda.memory_allocated())
+                        if cuda_available
+                        else 0
+                    ),
+                )
+
+            def on_validation_batch_end(
+                self,
+                trainer: object,
+                _module: object,
+                _outputs: object,
+                _batch: object,
+                batch_idx: int,
+                dataloader_idx: int = 0,
+            ) -> None:
+                if bool(getattr(trainer, "sanity_checking", False)):
+                    return
+                totals = getattr(trainer, "num_val_batches", [0])
+                total = int(totals[dataloader_idx] if totals else 0)
+                completed = batch_idx + 1
+                if not self._should_report(completed, total):
+                    return
+                report(
+                    phase="validate",
+                    epoch=int(getattr(trainer, "current_epoch", 0)),
+                    val_batches_completed=completed,
+                    val_batches_total=total,
+                    gpu_memory_allocated_bytes=(
+                        int(torch.cuda.memory_allocated())
+                        if cuda_available
+                        else 0
+                    ),
+                )
+
+            def on_validation_epoch_end(
+                self,
+                trainer: object,
+                _module: object,
+            ) -> None:
+                if bool(getattr(trainer, "sanity_checking", False)):
+                    return
+                metrics = getattr(trainer, "callback_metrics", {})
+                value = metrics.get("val_loss")
+                if value is None:
+                    return
+                report(
+                    phase="validation_epoch_end",
+                    epoch=int(getattr(trainer, "current_epoch", 0)),
+                    validation_quantile_loss=float(value),
+                    gpu_memory_allocated_bytes=(
+                        int(torch.cuda.memory_allocated())
+                        if cuda_available
+                        else 0
+                    ),
+                )
 
         # -- Load and prepare data -------------------------------------------
+        report(phase="load_data")
         split_frames = self._build_split_frames(
             station_id,
             include_test=include_test,
@@ -377,18 +532,18 @@ class TftTrainer:
 
         train_loader = training.to_dataloader(
             train=True,
-            batch_size=self._settings.tft_batch_size,
-            num_workers=self._num_workers,
+            batch_size=batch_size,
+            num_workers=num_workers,
             shuffle=True,
         )
         val_loader = validation.to_dataloader(
-            train=False, batch_size=self._settings.tft_batch_size, num_workers=self._num_workers
+            train=False, batch_size=batch_size, num_workers=num_workers
         )
         test_loader = (
             testing.to_dataloader(
                 train=False,
-                batch_size=self._settings.tft_batch_size,
-                num_workers=self._num_workers,
+                batch_size=batch_size,
+                num_workers=num_workers,
             )
             if testing is not None
             else None
@@ -407,6 +562,8 @@ class TftTrainer:
             log_val_interval           = 1,
             reduce_on_plateau_patience = self._settings.tft_reduce_lr_patience,
             weight_decay               = self._settings.tft_weight_decay,
+            # pytorch-forecasting's -1e9 default overflows under FP16 autocast.
+            mask_bias                  = -float("inf"),
         )
 
         # -- Callbacks -------------------------------------------------------
@@ -429,21 +586,49 @@ class TftTrainer:
         )
 
         # -- Train -----------------------------------------------------------
-        trainer = pl.Trainer(
+        callbacks = [early_stop, checkpoint]
+        if progress_reporter is not None:
+            callbacks.append(ExecutionProgressCallback())
+        gradient_clip_val = (
+            float(trial_parameters["gradient_clip_val"])
+            if trial_parameters is not None
+            else self._gradient_clip_val
+        )
+        trainer_kwargs: dict[str, Any] = dict(
             accelerator         = "auto",
-            precision           = self._precision,
-            min_epochs          = self._settings.tft_min_epochs,
-            max_epochs          = self._settings.tft_max_epochs,
-            callbacks           = [early_stop, checkpoint],
+            precision           = precision,
+            min_epochs          = min_epochs,
+            max_epochs          = max_epochs,
+            callbacks           = callbacks,
+            logger              = False,
             enable_progress_bar = True,
             log_every_n_steps   = 10,
-            gradient_clip_val   = self._gradient_clip_val,
+            gradient_clip_val   = gradient_clip_val,
         )
+        if limits is not None:
+            trainer_kwargs.update(
+                limit_train_batches=limits.limit_train_batches,
+                limit_val_batches=limits.limit_val_batches,
+            )
+            if limits.timeout_minutes is not None:
+                trainer_kwargs["max_time"] = timedelta(
+                    minutes=limits.timeout_minutes
+                )
+        trainer = pl.Trainer(**trainer_kwargs)
+        report(phase="fit", epoch=0)
+        fit_started = time.monotonic()
         trainer.fit(tft, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        fit_seconds = time.monotonic() - fit_started
 
         best_ckpt  = Path(checkpoint.best_model_path)
         best_loss  = float(checkpoint.best_model_score)
+        final_loss = float(
+            trainer.callback_metrics.get("val_loss", best_loss)
+        )
         epochs_run = trainer.current_epoch
+        report(phase="checkpoint_reload", checkpoint_path=str(best_ckpt))
+        reloaded = TemporalFusionTransformer.load_from_checkpoint(str(best_ckpt))
+        del reloaded
         training_dataset_pkl = ckpt_dir / "training_dataset.pkl"
         with open(training_dataset_pkl, "wb") as fh:
             pickle.dump(training, fh)
@@ -458,10 +643,44 @@ class TftTrainer:
         }
         result = {
             "version":          version,
+            "execution_type": (
+                limits.execution_type if limits is not None else "final"
+            ),
             "best_val_loss":    best_loss,
+            "final_val_loss":   final_loss,
             "epochs_run":       epochs_run,
             "checkpoint_path":  str(best_ckpt),
+            "checkpoint_reload_verified": True,
             "train_mae":        train_mae,
+            "environment": {
+                "python": platform.python_version(),
+                "torch": str(getattr(torch, "__version__", "unknown")),
+                "torch_cuda_build": str(
+                    getattr(getattr(torch, "version", None), "cuda", None)
+                ),
+                "cuda_available": cuda_available,
+                "deterministic_mode": (
+                    "warn_only" if self._torch_deterministic else "disabled"
+                ),
+                "gpu_name": (
+                    str(torch.cuda.get_device_name(0))
+                    if cuda_available
+                    else None
+                ),
+            },
+            "gpu_peak_memory_allocated_bytes": (
+                int(torch.cuda.max_memory_allocated())
+                if cuda_available
+                and hasattr(torch.cuda, "max_memory_allocated")
+                else 0
+            ),
+            "gpu_peak_memory_reserved_bytes": (
+                int(torch.cuda.max_memory_reserved())
+                if cuda_available
+                and hasattr(torch.cuda, "max_memory_reserved")
+                else 0
+            ),
+            "gpu_seconds": fit_seconds if cuda_available else 0.0,
         }
         if include_test:
             test_mae = self._eval_mae(trainer, tft, test_loader)

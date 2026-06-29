@@ -381,29 +381,72 @@ final 能产生 test metric 和 inactive candidate。
 
 ### Slice 4：Smoke 与 calibration tracer bullet
 
+**实施状态：已完成（2026-06-29）**
+
 - 实现 execution limits、timeout、GPU/environment telemetry、checkpoint reload。
 - 以当前 KLGA workspace 完成一次真实 smoke，再完成一次受限 calibration。
 - 失败不会进入 Optuna。
+
+真实 smoke 已验证 RTX 2060 / Torch 2.12 + CUDA 13.0 的 mixed-precision
+执行链、逐 batch catalog 进度、显存证据和 checkpoint reload。诊断过程中发现并修复
+`pytorch-forecasting` 默认 attention `mask_bias=-1e9` 的 FP16 溢出；当前 Torch
+CUDA 的 `upsample_linear1d_backward` 无严格 deterministic 实现，因此执行证据明确
+记录 `deterministic_mode=warn_only`，不将其表述为 bit-exact。
+
+真实 smoke 完成 20/20 train batches 和 5/5 val batches，
+`best_val_loss=0.655743`；真实 calibration 完成 3246/3246 train batches 和
+180/180 val batches，耗费约 771 GPU-seconds，`best_val_loss=0.728890`。两者均
+重载 checkpoint 成功，catalog 中的 study 状态为 `gated`，日志未出现 test loader、
+test metric 或 candidate publish。长执行的 catalog 进度在首个、每 10 个和最后一个
+batch 持久化，Lightning 控制台进度仍连续显示。
 
 验收：管理端可看到实时阶段、batch/epoch 进度、显存、日志和明确失败原因；test 和
 registry 保持未访问。
 
 ### Slice 5：后台队列和 UI
 
+**实施状态：已完成（2026-06-29）**
+
 - worker 事务领取 execution，单 GPU lock，支持 restart/interrupted/retry/cancel。
 - 扩展 `ui/pages/console_training.py`：workspace、study、队列、详情、日志和审批。
 - UI 不直接执行训练。
+
+`TrainingWorker` 在跨进程 GPU 文件锁内恢复遗留 `running`、事务领取最早的 queued
+execution，并将崩溃遗留任务标为 `interrupted`。显式 retry 创建新 attempt，保留旧
+日志和错误；queued cancel 立即完成，running cancel 在下一进度检查点协作完成。
+管理页只读写 catalog，可展示 workspace、study、execution、approval、进度、指标和
+日志尾部，不导入或调用训练 runner。
 
 验收：关闭并重启 worker 后 queued 任务继续；running 任务不会被误报成功；UI
 刷新不会重复提交。
 
 ### Slice 6：Optuna adapter 与 48 GPU-hour budget
 
+**实施状态：已完成（2026-06-29，未启动正式 48 小时运行）**
+
 - 增加 Optuna 依赖、独立 storage、TPE、pruner、epoch reporting。
 - 实现累计 GPU-time budget、OOM/NaN/失败分类和 resume。
 - 使用 calibration 结果冻结首个 study spec。
 
+实现使用 Optuna 4.x、固定 seed 的 TPE、MedianPruner 和独立 SQLite storage；
+`n_jobs=1`。每个 sampled config 生成 immutable trial snapshot，并只进入
+train/validation TFT adapter。每个 validation epoch 同时写 catalog progress 和
+Optuna intermediate value。completed、pruned、OOM、NaN、异常及崩溃恢复产生的
+实际/保守 GPU 秒都计入 catalog 预算；达到预算后 callback 停止领取新 trial，当前
+trial 正常收口。Optuna RUNNING 与 catalog interrupted 会在 resume 时对账为失败，
+随后使用下一个 trial number。
+
+search snapshot 冻结 template/study spec、data hash、calibration execution、完整
+epoch GPU 秒、max epochs 和预算内预计完整 trial 数。当前真实 calibration
+约 `771.23s/epoch`，以 20 epochs 粗估单个未剪枝 trial 约 4.28 GPU-hours，48 小时
+约容纳 11.2 个完整 trial；pruning 会提高实际覆盖数。
+
 验收：小预算集成测试可完成、剪枝、停止和恢复；`n_jobs=1`；预算耗尽后不领取新 trial。
+
+本切片只由 Codex 实现 engine 并运行小预算/非 48 小时验收。正式 48 GPU-hour study
+由操作者手动执行 worker/启动命令；Codex 不持续轮询或监管长任务，只在运行结束后
+读取 catalog、Optuna storage、日志和 Top-K evidence 做一次结果验证，以避免无意义
+的对话 token 消耗。
 
 ### Slice 7：Top-K evidence、人工 final 和 candidate
 
@@ -440,6 +483,5 @@ trial snapshots、日志和 candidate hashes 相互可追溯。
 
 ## 11. 下一步
 
-Slice 1、Slice 2 和 Slice 3 已完成。下一步实施 **Slice 4：Smoke 与 calibration
-tracer bullet**：让 catalog 管理 execution limits、进度和 GPU evidence，并在
-当前 KLGA workspace 上先执行真实 smoke；smoke 成功前不进入 calibration 或 Optuna。
+Slice 1 至 Slice 6 已完成。下一步实施 **Slice 7：Top-K evidence、人工 final 和
+candidate**。真实 48 小时 search 仍未批准或启动，留给操作者在最终检查后手动执行。
