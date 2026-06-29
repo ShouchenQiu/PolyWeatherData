@@ -255,6 +255,32 @@ def test_eval_mae_excludes_zero_weight_tail_targets():
     assert mae == pytest.approx(0.0)
 
 
+def test_eval_mae_moves_prediction_targets_to_prediction_device():
+    torch = pytest.importorskip("torch")
+
+    class DeviceBoundTarget:
+        def __init__(self, value):
+            self.value = value
+            self.moved = False
+
+        def to(self, reference):
+            self.moved = True
+            return self.value.to(reference)
+
+    target = DeviceBoundTarget(torch.tensor([[1.0, 2.0]]))
+    prediction = types.SimpleNamespace(
+        output=torch.tensor([[1.0, 2.0]]),
+        y=(target, torch.tensor([[1.0, 1.0]])),
+    )
+    model = types.SimpleNamespace(predict=lambda *_args, **_kwargs: prediction)
+    trainer = TftTrainer.__new__(TftTrainer)
+
+    mae = trainer._eval_mae(None, model, object())
+
+    assert target.moved is True
+    assert mae == pytest.approx(0.0)
+
+
 def test_production_tft_does_not_import_training_module():
     source = Path("model/tft.py").read_text(encoding="utf-8")
 
@@ -304,6 +330,32 @@ def test_tft_trainer_uses_settings_splits_and_publishes_dataset_pkl(
     assert registry.publish_kwargs["training_dataset_pkl"].exists()
     assert registry.publish_kwargs["metrics"]["train_mae"] != registry.publish_kwargs["metrics"]["best_val_loss"]
     assert result["test_mae"] == 1.23
+
+
+def test_run_final_rejects_non_finite_test_mae(tmp_path, monkeypatch):
+    _install_training_fakes(monkeypatch)
+    trainer = TftTrainer(
+        store=None,
+        registry=FakeRegistry(),
+        output_dir=tmp_path / "checkpoints",
+        settings=Settings(data_store_dir=tmp_path / "data"),
+        dataset_builder=FakeBuilder(),
+        station_config=STATIONS["KLGA"],
+        experiment_config=_experiment_template(),
+    )
+    monkeypatch.setattr(
+        TftTrainer,
+        "_eval_mae",
+        lambda *_args, **_kwargs: float("nan"),
+    )
+
+    with pytest.raises(RuntimeError, match="finite test MAE"):
+        trainer.run_final(
+            station_id="KLGA",
+            version="invalid-test-metrics",
+            approval=_final_approval(),
+            trial_snapshot=_trial_snapshot(),
+        )
 
 
 def test_tft_trainer_reuses_source_validated_audited_frames(tmp_path, monkeypatch):

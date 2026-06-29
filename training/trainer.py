@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import pickle
 import platform
 import time
@@ -752,6 +753,10 @@ class TftTrainer:
         }
         if include_test:
             test_mae = self._eval_mae(trainer, tft, test_loader)
+            if not math.isfinite(test_mae):
+                raise RuntimeError(
+                    "final candidate requires a finite test MAE"
+                )
             metrics["test_mae"] = test_mae
             result["test_mae"] = test_mae
         if publish_candidate:
@@ -976,6 +981,7 @@ class TftTrainer:
                 weight = None
             if target is None:
                 raise ValueError("prediction target is missing")
+            target = target.to(all_pred)
             absolute_error = (all_pred - target).abs()
             if weight is None:
                 mae = float(absolute_error.mean())
