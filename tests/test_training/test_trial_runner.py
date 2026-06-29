@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 from training.catalog import TrainingCatalog
+from training.config import ExperimentTemplate, ResolvedTrialSnapshot
 from training.experiment import ValidationExecutionLimits
-from training.trial_runner import run_training_execution
+from training.trial_runner import run_final_execution, run_training_execution
 from training.workspace import TrainingWorkspace
 
 
@@ -127,3 +129,110 @@ def test_running_execution_honours_catalog_cancel_request(
 
     assert cancelled.status == "cancelled"
     assert catalog.get_study(study.study_id).status == "cancelled"
+
+
+def test_final_runner_consumes_once_and_packages_inactive_candidate(
+    tmp_path: Path,
+) -> None:
+    workspace = _ready_workspace(tmp_path)
+    catalog = TrainingCatalog(tmp_path / "training_catalog.db")
+    study = catalog.create_study(
+        workspace.run_dir,
+        "experiments/klga/tft_optuna_v1.json",
+    )
+    for status in (
+        "smoke_queued", "smoke_running", "smoke_passed",
+        "calibration_queued", "calibration_running", "gated",
+        "queued", "running", "completed", "awaiting_selection",
+    ):
+        catalog.transition_study(study.study_id, status)
+    template = ExperimentTemplate.from_json(
+        "experiments/klga/tft_optuna_v1.json"
+    )
+    parameters = {
+        name: spec.choices[0]
+        if spec.kind == "categorical"
+        else spec.minimum
+        for name, spec in template.study.search_space.items()
+    }
+    snapshot = ResolvedTrialSnapshot.from_dict(
+        {
+            "schema_version": 1,
+            "study_id": study.study_id,
+            "trial_number": 3,
+            "execution_type": "trial",
+            "template_hash": study.template_hash,
+            "data_order_hash": "data-order-hash",
+            "parameters": parameters,
+        }
+    )
+    evidence_path = (
+        workspace.run_dir
+        / "studies"
+        / study.study_id
+        / "top_k_validation_evidence.json"
+    )
+    workspace.write_json(
+        evidence_path,
+        {
+            "test_accessed": False,
+            "trials": [
+                {
+                    "trial_number": snapshot.trial_number,
+                    "trial_snapshot_hash": snapshot.snapshot_hash(),
+                }
+            ],
+        },
+    )
+    catalog.register_artifact(
+        study.study_id,
+        artifact_type="top_k_validation_evidence",
+        path=evidence_path,
+    )
+    catalog.approve_final(study.study_id, snapshot, approved_by="pytest")
+
+    def final_backend(*, workspace, version, trial_snapshot, **_kwargs):
+        version_dir = workspace.model_store_dir / version
+        version_dir.mkdir(parents=True)
+        for name in (
+            "model.ckpt",
+            "training_dataset.pkl",
+            "training_metadata.json",
+            "experiment_config.json",
+            "model_contract.json",
+        ):
+            (version_dir / name).write_text("{}", encoding="ascii")
+        (version_dir / "meta.json").write_text(
+            json.dumps({"metrics": {"test_mae": 1.2}}),
+            encoding="ascii",
+        )
+        (version_dir / "candidate_lineage.json").write_text(
+            json.dumps(
+                {
+                    "state": "inactive/review_required",
+                    "study_id": trial_snapshot.study_id,
+                }
+            ),
+            encoding="ascii",
+        )
+        return {"test_mae": 1.2}
+
+    completed = run_final_execution(
+        catalog,
+        study.study_id,
+        final_backend=final_backend,
+    )
+
+    assert completed.status == "succeeded"
+    assert catalog.get_study(study.study_id).status == "candidate_ready"
+    assert {
+        item.artifact_type
+        for item in catalog.list_artifacts(study.study_id)
+    } == {
+        "candidate_lineage",
+        "candidate_package",
+        "execution_log",
+        "final_result",
+        "top_k_validation_evidence",
+    }
+    assert not (workspace.model_store_dir / "active_version.txt").exists()

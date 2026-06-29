@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,7 @@ import streamlit as st
 
 from config.settings import Settings
 from training.catalog import TrainingCatalog
+from training.config import ResolvedTrialSnapshot
 from ui import queries
 
 if TYPE_CHECKING:
@@ -118,6 +120,67 @@ def _render_experiment_management(catalog_path: Path) -> None:
                         approved_by=approved_by,
                     )
                     st.success("Search approved and queued.")
+            elif study.status == "awaiting_selection":
+                artifacts = catalog.list_artifacts(study_id)
+                evidence_artifact = next(
+                    (
+                        item
+                        for item in artifacts
+                        if item.artifact_type
+                        == "top_k_validation_evidence"
+                    ),
+                    None,
+                )
+                if evidence_artifact is None:
+                    st.warning("Build frozen Top-K evidence before selection.")
+                else:
+                    evidence = json.loads(
+                        Path(evidence_artifact.path).read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    trials = evidence.get("trials", [])
+                    st.dataframe(
+                        pd.DataFrame(trials),
+                        use_container_width=True,
+                    )
+                    trial_number = st.selectbox(
+                        "Final trial",
+                        [int(item["trial_number"]) for item in trials],
+                        key=f"final-trial-{study_id}",
+                    )
+                    approved_by = st.text_input(
+                        "Final approver",
+                        key=f"final-approver-{study_id}",
+                    )
+                    if st.button(
+                        "Approve one final test",
+                        key=f"approve-final-{study_id}",
+                    ):
+                        execution_id = next(
+                            item["execution_id"]
+                            for item in trials
+                            if int(item["trial_number"]) == trial_number
+                        )
+                        snapshot_artifact = next(
+                            item
+                            for item in artifacts
+                            if item.artifact_type == "trial_snapshot"
+                            and item.execution_id == execution_id
+                        )
+                        snapshot = ResolvedTrialSnapshot.from_dict(
+                            json.loads(
+                                Path(snapshot_artifact.path).read_text(
+                                    encoding="utf-8"
+                                )
+                            )
+                        )
+                        catalog.approve_final(
+                            study_id,
+                            snapshot,
+                            approved_by=approved_by,
+                        )
+                        st.success("Final test approved exactly once.")
             elif (
                 selected_execution is not None
                 and selected_execution.status in {"queued", "running"}

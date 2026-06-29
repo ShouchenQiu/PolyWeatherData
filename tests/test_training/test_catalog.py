@@ -428,6 +428,38 @@ def test_final_approval_can_be_issued_and_consumed_only_once(
             "parameters": {"hidden_size": 32, "batch_size": 4},
         }
     )
+    evidence_path = (
+        workspace.run_dir
+        / "studies"
+        / study.study_id
+        / "top_k_validation_evidence.json"
+    )
+    workspace.write_json(
+        evidence_path,
+        {
+            "test_accessed": False,
+            "trials": [
+                {
+                    "trial_number": snapshot.trial_number,
+                    "trial_snapshot_hash": snapshot.snapshot_hash(),
+                }
+            ],
+        },
+    )
+    catalog.register_artifact(
+        study.study_id,
+        artifact_type="top_k_validation_evidence",
+        path=evidence_path,
+    )
+    outside_payload = snapshot.to_dict()
+    outside_payload["trial_number"] = 8
+    outside = ResolvedTrialSnapshot.from_dict(outside_payload)
+    with pytest.raises(PermissionError, match="not in frozen"):
+        catalog.approve_final(
+            study.study_id,
+            outside,
+            approved_by="john",
+        )
 
     approved = catalog.approve_final(
         study.study_id,

@@ -22,6 +22,7 @@ def test_candidate_package_contains_model_evidence_and_excludes_decoder_cache(
         "training_metadata.json",
         "experiment_config.json",
         "model_contract.json",
+        "candidate_lineage.json",
     ):
         (version_dir / name).write_text(name, encoding="ascii")
     for name in ("manifest.json", "audit_summary.json", "train_result.json"):
@@ -36,6 +37,7 @@ def test_candidate_package_contains_model_evidence_and_excludes_decoder_cache(
     assert not any("_decoder_cache" in member for member in result["members"])
     with tarfile.open(result["package_path"], "r:gz") as archive:
         assert f"model_store/{version}/model_contract.json" in archive.getnames()
+        assert f"model_store/{version}/candidate_lineage.json" in archive.getnames()
 
 
 def test_production_weather_package_excludes_training_decoder_cache(tmp_path) -> None:

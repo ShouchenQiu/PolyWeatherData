@@ -45,6 +45,9 @@ _SOURCE_FILES = (
     "training/workspace.py",
     "scripts/__init__.py",
     "scripts/package_candidate_model.py",
+    "scripts/build_top_k_evidence.py",
+    "scripts/run_final_training.py",
+    "scripts/validate_training_study.py",
     "scripts/train_tft.py",
 )
 

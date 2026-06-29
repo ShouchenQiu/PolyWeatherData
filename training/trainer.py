@@ -152,6 +152,62 @@ def _train_validation(**kwargs: Any) -> dict[str, Any]:
         db.close()
 
 
+def _train_final(**kwargs: Any) -> dict[str, Any]:
+    """Run the catalog-approved, test-reading final execution."""
+    from data.manager import DataManager
+    from data.storage.parquet_store import ParquetStore
+    from db.schema import DbClient
+    from model.store.registry import ModelRegistry
+    from training.audit_frames import AuditedFrameCache
+    from training.dataset import TrainingDecoderCache
+
+    workspace: TrainingWorkspace = kwargs["workspace"]
+    experiment = ExperimentTemplate.from_json(kwargs["experiment_config"])
+    audit_summary = workspace.require_ready_audit()
+    experiment.validate_audit(audit_summary)
+    if kwargs["station_id"] != experiment.station:
+        raise ValueError("final station does not match experiment template")
+    settings = Settings(
+        data_store_dir=workspace.data_store_dir,
+        model_store_dir=workspace.model_store_dir,
+    )
+    experiment.apply_to_settings(settings)
+    forecast_store = ParquetStore(settings.forecast_store_dir)
+    obs_store = ParquetStore(settings.obs_store_dir)
+    db = DbClient(str(workspace.db_path))
+    try:
+        trainer = TftTrainer(
+            forecast_store,
+            ModelRegistry(settings.model_store_dir, db),
+            output_dir=kwargs.get("output_dir", workspace.checkpoints_dir),
+            settings=settings,
+            data_manager=DataManager(
+                [], [], forecast_store, obs_store, settings=settings
+            ),
+            decoder_cache=TrainingDecoderCache(
+                settings.training_decoder_cache_dir
+            ),
+            station_config=STATIONS[kwargs["station_id"]],
+            audited_frame_cache=AuditedFrameCache(
+                workspace.audit_frames_dir,
+                workspace.data_store_dir,
+            ),
+            random_seed=experiment.trainer.seed,
+            torch_deterministic=experiment.trainer.deterministic,
+            precision=experiment.trainer.precision,
+            num_workers=experiment.trainer.num_workers,
+            experiment_config=experiment,
+        )
+        return trainer.run_final(
+            station_id=kwargs["station_id"],
+            version=kwargs["version"],
+            approval=kwargs["approval"],
+            trial_snapshot=kwargs["trial_snapshot"],
+        )
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------------------
 # TftTrainer
 # ---------------------------------------------------------------------------
@@ -255,6 +311,8 @@ class TftTrainer:
             limits=limits,
             progress_reporter=progress_reporter,
             trial_parameters=trial_parameters,
+            final_approval=None,
+            final_snapshot=None,
         )
 
     def run_final(
@@ -297,9 +355,14 @@ class TftTrainer:
             version=version,
             include_test=True,
             publish_candidate=True,
-            limits=None,
+            limits=ValidationExecutionLimits.for_final(
+                self._experiment_config,
+                dict(trial_snapshot.parameters),
+            ),
             progress_reporter=None,
-            trial_parameters=None,
+            trial_parameters=dict(trial_snapshot.parameters),
+            final_approval=approval,
+            final_snapshot=trial_snapshot,
         )
 
     def _run(
@@ -312,15 +375,20 @@ class TftTrainer:
         limits: ValidationExecutionLimits | None,
         progress_reporter: Callable[[dict[str, object]], None] | None,
         trial_parameters: dict[str, object] | None,
+        final_approval: FinalEvaluationApproval | None,
+        final_snapshot: ResolvedTrialSnapshot | None,
     ) -> dict[str, Any]:
         if version is None:
             version = datetime.now(timezone.utc).strftime("v%Y%m%d_%H%M%S")
         if publish_candidate and not include_test:
             raise ValueError("candidate publishing requires final test evaluation")
         if trial_parameters is not None:
-            if limits is None or limits.execution_type != "trial":
+            if (
+                limits is None
+                or limits.execution_type not in {"trial", "final"}
+            ):
                 raise PermissionError(
-                    "resolved parameters require a trial execution"
+                    "resolved parameters require a trial or final execution"
                 )
             if self._experiment_config is None:
                 raise PermissionError(
@@ -713,6 +781,39 @@ class TftTrainer:
                 num_workers=self._num_workers,
                 settings=self._settings,
             )
+            if final_approval is None or final_snapshot is None:
+                raise PermissionError(
+                    "candidate lineage requires final approval and snapshot"
+                )
+            lineage_path = ckpt_dir / "candidate_lineage.json"
+            lineage_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "state": "inactive/review_required",
+                        "version": version,
+                        "study_id": final_snapshot.study_id,
+                        "selected_trial_number": final_snapshot.trial_number,
+                        "trial_snapshot_hash": final_snapshot.snapshot_hash(),
+                        "template_hash": final_snapshot.template_hash,
+                        "data_order_hash": final_snapshot.data_order_hash,
+                        "parameters": dict(final_snapshot.parameters),
+                        "approval": {
+                            "approval_id": final_approval.approval_id,
+                            "approved_by": final_approval.approved_by,
+                            "approved_at": final_approval.approved_at,
+                        },
+                        "test_metrics": {
+                            "test_mae": result.get("test_mae"),
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                    default=str,
+                ),
+                encoding="ascii",
+            )
+            extra_artifacts.append(lineage_path)
             self._registry.publish(
                 version=version,
                 ckpt_path=best_ckpt,

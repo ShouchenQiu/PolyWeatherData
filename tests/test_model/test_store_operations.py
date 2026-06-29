@@ -20,6 +20,20 @@ def _make_candidate_package(tmp_path: Path, version: str = "candidate_v1") -> Pa
         json.dumps({"schema_version": 1}),
         encoding="ascii",
     )
+    (version_dir / "candidate_lineage.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "state": "inactive/review_required",
+                "study_id": "study-1",
+                "selected_trial_number": 2,
+                "trial_snapshot_hash": "snapshot-hash",
+                "template_hash": "template-hash",
+                "data_order_hash": "data-hash",
+            }
+        ),
+        encoding="ascii",
+    )
     (version_dir / "meta.json").write_text(
         json.dumps(
             {

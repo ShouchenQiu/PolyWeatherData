@@ -301,6 +301,72 @@ To run manually:
   --optuna-storage sqlite:///runs/_management/optuna.db
 ```
 
+For the unattended 48-hour run, use tmux (the approval command is deliberately
+separate, so opening a tmux session cannot accidentally unlock the study):
+
+```bash
+cd /home/john/Work/PolyWeatherBot
+export STUDY_ID='replace-with-gated-study-id'
+
+./.venv/bin/python -m scripts.manage_training \
+  --catalog runs/_management/training_catalog.db \
+  approve-search --study "$STUDY_ID" --approved-by "$USER"
+
+tmux new-session -d -s polyweather-optuna-48h \
+  "cd /home/john/Work/PolyWeatherBot && exec ./.venv/bin/python -m scripts.training_worker --catalog runs/_management/training_catalog.db --gpu-lock runs/_management/training.gpu.lock --optuna-storage sqlite:///runs/_management/optuna.db 2>&1 | tee -a runs/_management/training_worker.log"
+
+tmux attach-session -t polyweather-optuna-48h
+```
+
+Detach with `Ctrl-b d`. Read status without attaching:
+
+```bash
+tmux capture-pane -pt polyweather-optuna-48h -S -80
+./.venv/bin/python -m scripts.manage_training \
+  --catalog runs/_management/training_catalog.db \
+  status --study "$STUDY_ID"
+du -sh runs/_management runs/*/studies 2>/dev/null
+df -h .
+```
+
+After a crash, run the exact same worker command in a new tmux session. It
+reconciles stale RUNNING trials and resumes the persistent Optuna study. For a
+cooperative stop, cancel the current execution through the Training page or
+`manage_training cancel`; do not delete the catalog, Optuna DB, snapshots, or
+logs. Log cleanup is allowed only after validation and backup; keep every
+catalog-indexed artifact and candidate package.
+
+An optional user service template lives at
+`docs/systemd/polyweather-training-worker.service`. Copy it to
+`~/.config/systemd/user/`, run `systemctl --user daemon-reload`, then
+`systemctl --user enable --now polyweather-training-worker`. Use either tmux or
+systemd for one worker, never both.
+
+When search finishes, build validation-only Top-K evidence:
+
+```bash
+./.venv/bin/python -m scripts.build_top_k_evidence \
+  --catalog runs/_management/training_catalog.db \
+  --study "$STUDY_ID"
+```
+
+Select one listed trial in the Training page or with `approve-final`, then run
+the unique final:
+
+```bash
+./.venv/bin/python -m scripts.run_final_training \
+  --catalog runs/_management/training_catalog.db \
+  --study "$STUDY_ID"
+
+./.venv/bin/python -m scripts.validate_training_study \
+  --catalog runs/_management/training_catalog.db \
+  --study "$STUDY_ID"
+```
+
+`run_final_training` consumes the approval transactionally. A second call is
+rejected. The generated candidate carries study/template/trial/snapshot/data
+hashes, remains `inactive/review_required`, and is never promoted automatically.
+
 Stopping the terminal cleanly waits for the current trial. For immediate
 cooperative cancellation, select the running trial execution in the Training
 page or run `manage_training cancel --execution <TRIAL_EXECUTION_ID>`. After an

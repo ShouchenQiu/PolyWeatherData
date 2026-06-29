@@ -1360,6 +1360,9 @@ class TrainingCatalog:
         elif execution.execution_type == "calibration":
             from_study_status = "calibration_running"
             to_study_status = "gated"
+        elif execution.execution_type == "final":
+            from_study_status = "final_running"
+            to_study_status = "candidate_ready"
         else:
             raise ValueError(
                 f"unsupported execution type: {execution.execution_type}"
@@ -1548,6 +1551,36 @@ class TrainingCatalog:
             raise PermissionError(
                 "selected trial snapshot does not match study evidence"
             )
+        top_k_artifacts = [
+            artifact
+            for artifact in self.list_artifacts(study_id)
+            if artifact.artifact_type == "top_k_validation_evidence"
+        ]
+        if len(top_k_artifacts) != 1:
+            raise PermissionError(
+                "final approval requires frozen Top-K validation evidence"
+            )
+        top_k = json.loads(
+            Path(top_k_artifacts[0].path).read_text(encoding="utf-8")
+        )
+        selected = next(
+            (
+                item
+                for item in top_k.get("trials", [])
+                if int(item.get("trial_number", -1))
+                == trial_snapshot.trial_number
+            ),
+            None,
+        )
+        if (
+            selected is None
+            or selected.get("trial_snapshot_hash")
+            != trial_snapshot.snapshot_hash()
+            or top_k.get("test_accessed") is not False
+        ):
+            raise PermissionError(
+                "selected trial is not in frozen validation-only Top-K evidence"
+            )
         now = self._now_iso()
         approval_id = f"final-{uuid.uuid4().hex}"
         self._conn.execute("BEGIN IMMEDIATE")
@@ -1731,6 +1764,47 @@ class TrainingCatalog:
                 raise PermissionError(
                     "final approval was already consumed for this study"
                 )
+            execution_id = f"{study_id}-final-a1"
+            log_path = (
+                Path(current.workspace_path)
+                / "studies"
+                / study_id
+                / "final"
+                / "attempt-1"
+                / "execution.log"
+            ).resolve()
+            self._conn.execute(
+                """
+                INSERT INTO executions(
+                    execution_id, study_id, execution_type, trial_number,
+                    attempt, status, limits_json, progress_json, metrics_json,
+                    error, log_path, worker_id, created_at, started_at,
+                    heartbeat_at, finished_at
+                ) VALUES (?, ?, 'final', ?, 1, 'running', ?, '{}', '{}',
+                          NULL, ?, 'final-cli', ?, ?, ?, NULL)
+                """,
+                (
+                    execution_id,
+                    study_id,
+                    int(row["selected_trial_number"]),
+                    json.dumps(
+                        {
+                            "selected_trial_number": int(
+                                row["selected_trial_number"]
+                            ),
+                            "trial_snapshot_hash": row[
+                                "trial_snapshot_hash"
+                            ],
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    str(log_path),
+                    now,
+                    now,
+                    now,
+                ),
+            )
             self._conn.execute(
                 """
                 UPDATE studies SET status = 'final_running', updated_at = ?

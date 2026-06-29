@@ -450,6 +450,8 @@ epoch GPU 秒、max epochs 和预算内预计完整 trial 数。当前真实 cal
 
 ### Slice 7：Top-K evidence、人工 final 和 candidate
 
+**实施状态：已完成（2026-06-29；真实 study 的 evidence/final 待搜索结束后执行）**
+
 - 生成 Top-5 validation evidence。
 - UI/CLI 选择一个 trial、写审批、执行唯一 test、生成 inactive candidate package。
 - candidate 记录 template/study/trial/config/data hashes。
@@ -458,6 +460,8 @@ epoch GPU 秒、max epochs 和预算内预计完整 trial 数。当前真实 cal
 可由现有 import 流程导入且保持 inactive。
 
 ### Slice 8：运维、文档和真实 48 小时运行
+
+**实施状态：代码与运维文档已完成（2026-06-29）；真实 48 小时运行明确留给操作者）**
 
 - 更新 training runbook、故障恢复、磁盘/日志清理和 systemd user service。
 - 完成真实 smoke 与 baseline 报告，人工确认搜索空间。
@@ -483,5 +487,6 @@ trial snapshots、日志和 candidate hashes 相互可追溯。
 
 ## 11. 下一步
 
-Slice 1 至 Slice 6 已完成。下一步实施 **Slice 7：Top-K evidence、人工 final 和
-candidate**。真实 48 小时 search 仍未批准或启动，留给操作者在最终检查后手动执行。
+Slice 1 至 Slice 8 的工程实现已完成。真实 48 GPU-hour search、Top-K 人工选择和
+唯一 final 属于运行期验收，仍未批准或启动；操作者按 Runbook 的 tmux 命令手动
+执行，结束后再运行只读完整性检查。

@@ -6,6 +6,7 @@ import optuna
 
 from training.catalog import TrainingCatalog
 from training.optuna_engine import OptunaEngine, TrialEvaluation
+from training.selection import TopKEvidenceBuilder
 from training.workspace import TrainingWorkspace
 
 
@@ -421,3 +422,47 @@ def test_running_optuna_trial_can_be_cancelled_through_catalog(
         if item.execution_type == "trial"
     )
     assert trial_execution.status == "cancelled"
+
+
+def test_top_k_manifest_ranks_validation_only_trials_and_locks_selection(
+    tmp_path: Path,
+) -> None:
+    catalog, study_id = _approved_study(tmp_path)
+    losses = [0.6, 0.3, 0.4]
+
+    def evaluate(context):
+        loss = losses[context.trial.number]
+        return TrialEvaluation(
+            best_val_loss=loss,
+            final_val_loss=loss,
+            epochs_run=1,
+            gpu_seconds=1.0,
+            gpu_peak_memory_allocated_bytes=100,
+            checkpoint_path=None,
+        )
+
+    OptunaEngine(
+        catalog,
+        storage_url=f"sqlite:///{tmp_path / 'optuna.db'}",
+    ).run(study_id, evaluator=evaluate, max_trials=3)
+
+    seen_splits = []
+
+    def downstream(context):
+        seen_splits.append(context.split)
+        return {
+            "p50_mae": context.trial_number / 10,
+            "pinball": {"p10": 0.1, "p50": 0.2, "p90": 0.3},
+            "coverage_p10_p90": 0.8,
+            "interval_width": 2.0,
+        }
+
+    manifest = TopKEvidenceBuilder(catalog).build(
+        study_id,
+        evidence_provider=downstream,
+    )
+
+    assert [item["trial_number"] for item in manifest["trials"]] == [1, 2, 0]
+    assert seen_splits == ["val", "val", "val"]
+    assert manifest["test_accessed"] is False
+    assert catalog.get_study(study_id).status == "awaiting_selection"

@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+.demo/
 .venv/
 venv/
 env/
@@ -23,5 +24,4 @@ build/
 .coverage
 htmlcov/
 runs/
-experiments/
 .old_data/

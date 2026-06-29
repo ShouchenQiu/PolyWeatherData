@@ -83,6 +83,25 @@ class ValidationExecutionLimits:
             timeout_minutes=None,
         )
 
+    @classmethod
+    def for_final(
+        cls,
+        template: ExperimentTemplate,
+        parameters: dict[str, Any],
+    ) -> "ValidationExecutionLimits":
+        trial = cls.for_trial(template, parameters)
+        return cls(
+            execution_type="final",
+            min_epochs=trial.min_epochs,
+            max_epochs=trial.max_epochs,
+            batch_size=trial.batch_size,
+            precision=trial.precision,
+            num_workers=trial.num_workers,
+            limit_train_batches=None,
+            limit_val_batches=None,
+            timeout_minutes=None,
+        )
+
 
 @dataclass(frozen=True)
 class FinalEvaluationApproval:

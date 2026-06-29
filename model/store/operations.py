@@ -20,6 +20,7 @@ _CANDIDATE_FILES = (
     "training_metadata.json",
     "experiment_config.json",
     "model_contract.json",
+    "candidate_lineage.json",
 )
 
 
@@ -48,6 +49,15 @@ def import_candidate_model(
                 )
             source_version_dir = version_dirs[0]
             _require_candidate_files(source_version_dir)
+            lineage = json.loads(
+                (source_version_dir / "candidate_lineage.json").read_text(
+                    encoding="ascii"
+                )
+            )
+            if lineage.get("state") != "inactive/review_required":
+                raise ValueError(
+                    "candidate lineage must be inactive/review_required"
+                )
             version = source_version_dir.name
             destination = store / version
             if destination.exists():

@@ -197,6 +197,16 @@ def _trial_snapshot(
     template: ExperimentTemplate | None = None,
 ) -> ResolvedTrialSnapshot:
     template = template or _experiment_template()
+    parameters = {
+        "hidden_size": template.model.hidden_size,
+        "attention_head_size": template.model.attention_head_size,
+        "hidden_continuous_size": template.model.hidden_continuous_size,
+        "dropout": template.model.dropout,
+        "learning_rate": template.model.learning_rate,
+        "weight_decay": template.model.weight_decay,
+        "batch_size": template.trainer.batch_size,
+        "gradient_clip_val": template.trainer.gradient_clip_val,
+    }
     return ResolvedTrialSnapshot.from_dict(
         {
             "schema_version": 1,
@@ -205,7 +215,7 @@ def _trial_snapshot(
             "execution_type": "trial",
             "template_hash": template.config_hash(),
             "data_order_hash": "data-hash",
-            "parameters": {"hidden_size": 32, "batch_size": 4},
+            "parameters": parameters,
         }
     )
 
@@ -641,6 +651,46 @@ def test_approved_final_evaluates_test_and_publishes_inactive_candidate(
     assert [call[3] for call in builder.calls] == ["train", "val", "test"]
     assert result["test_mae"] == 1.23
     assert registry.publish_kwargs["activate"] is False
+
+
+def test_final_replays_the_selected_trial_parameters(tmp_path, monkeypatch):
+    _install_training_fakes(monkeypatch)
+    experiment = _experiment_template()
+    snapshot_payload = _trial_snapshot(experiment).to_dict()
+    snapshot_payload["parameters"].update(
+        {
+            "hidden_size": 64,
+            "attention_head_size": 2,
+            "hidden_continuous_size": 24,
+            "dropout": 0.35,
+            "learning_rate": 0.001,
+            "weight_decay": 0.002,
+            "batch_size": 8,
+            "gradient_clip_val": 0.5,
+        }
+    )
+    snapshot = ResolvedTrialSnapshot.from_dict(snapshot_payload)
+    trainer = TftTrainer(
+        store=None,
+        registry=FakeRegistry(),
+        output_dir=tmp_path / "checkpoints",
+        settings=Settings(data_store_dir=tmp_path / "data"),
+        dataset_builder=FakeBuilder(),
+        station_config=STATIONS["KLGA"],
+        experiment_config=experiment,
+    )
+    monkeypatch.setattr(TftTrainer, "_eval_mae", lambda *_args: 1.23)
+
+    trainer.run_final(
+        station_id="KLGA",
+        version="selected-trial",
+        approval=_final_approval(snapshot),
+        trial_snapshot=snapshot,
+    )
+
+    assert FakeTFT.kwargs["hidden_size"] == 64
+    assert FakeTFT.kwargs["dropout"] == 0.35
+    assert FakeTrainer.kwargs["gradient_clip_val"] == 0.5
 
 
 def test_legacy_run_entrypoint_cannot_bypass_test_lock(

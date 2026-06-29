@@ -18,6 +18,7 @@ _CANDIDATE_FILES = (
     "training_metadata.json",
     "experiment_config.json",
     "model_contract.json",
+    "candidate_lineage.json",
 )
 
 
