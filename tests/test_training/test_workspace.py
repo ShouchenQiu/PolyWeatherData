@@ -53,7 +53,7 @@ def test_train_workspace_requires_audit_and_records_result(tmp_path) -> None:
         train_fn=lambda **_kwargs: {"version": "candidate-v1"},
     )
 
-    assert result["status"] == "trained"
-    assert json.loads((run_dir / "train_result.json").read_text()) == {
+    assert result["status"] == "validated"
+    assert json.loads((run_dir / "validation_result.json").read_text()) == {
         "version": "candidate-v1"
     }

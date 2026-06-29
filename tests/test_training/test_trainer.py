@@ -11,7 +11,8 @@ import pytest
 from config.settings import Settings
 from config.stations import STATIONS
 from training.audit_frames import AuditedFrameCache
-from training.config import TrainingExperimentConfig
+from training.config import ExperimentTemplate, ResolvedTrialSnapshot
+from training.experiment import FinalEvaluationApproval
 from training.trainer import TftTrainer
 
 
@@ -139,9 +140,55 @@ def _install_training_fakes(monkeypatch):
     monkeypatch.setitem(sys.modules, "pytorch_forecasting.data.encoders", encoders_mod)
 
 
+def _final_approval(
+    snapshot: ResolvedTrialSnapshot | None = None,
+) -> FinalEvaluationApproval:
+    snapshot = snapshot or _trial_snapshot()
+    return FinalEvaluationApproval.from_catalog_record(
+        {
+            "approval_id": "approval-test",
+            "study_id": snapshot.study_id,
+            "selected_trial_number": snapshot.trial_number,
+            "trial_snapshot_hash": snapshot.snapshot_hash(),
+            "approved_by": "pytest",
+            "approved_at": "2026-06-29T00:00:00+00:00",
+        }
+    )
+
+
+def _trial_snapshot(
+    template: ExperimentTemplate | None = None,
+) -> ResolvedTrialSnapshot:
+    template = template or _experiment_template()
+    return ResolvedTrialSnapshot.from_dict(
+        {
+            "schema_version": 1,
+            "study_id": "study-test",
+            "trial_number": 1,
+            "execution_type": "trial",
+            "template_hash": template.config_hash(),
+            "data_order_hash": "data-hash",
+            "parameters": {"hidden_size": 32, "batch_size": 4},
+        }
+    )
+
+
+def _experiment_template(**model_overrides) -> ExperimentTemplate:
+    payload = json.loads(
+        Path("experiments/klga/tft_optuna_v1.json").read_text(encoding="ascii")
+    )
+    payload["splits"] = {
+        "train": ["2026-01-01", "2026-01-01"],
+        "val": ["2026-01-02", "2026-01-02"],
+        "test": ["2026-01-03", "2026-01-03"],
+    }
+    payload["model"].update(model_overrides)
+    return ExperimentTemplate.from_dict(payload)
+
+
 def test_training_interfaces_live_in_training_factory():
     assert TftTrainer.__module__ == "training.trainer"
-    assert TrainingExperimentConfig.__module__ == "training.config"
+    assert ExperimentTemplate.__module__ == "training.config"
 
 
 def test_eval_mae_excludes_zero_weight_tail_targets():
@@ -192,9 +239,15 @@ def test_tft_trainer_uses_settings_splits_and_publishes_dataset_pkl(
         settings=settings,
         dataset_builder=builder,
         station_config=STATIONS["KLGA"],
+        experiment_config=_experiment_template(),
     )
 
-    result = trainer.run(station_id="KLGA", version="vtest")
+    result = trainer.run_final(
+        station_id="KLGA",
+        version="vtest",
+        approval=_final_approval(),
+        trial_snapshot=_trial_snapshot(),
+    )
 
     assert [call[3] for call in builder.calls] == ["train", "val", "test"]
     assert builder.calls[0][1] == pd.Timestamp("2026-01-01 00:00:00", tz="UTC")
@@ -252,10 +305,194 @@ def test_tft_trainer_reuses_source_validated_audited_frames(tmp_path, monkeypatc
         audited_frame_cache=cache,
     )
 
-    result = trainer.run(station_id="KLGA", version="cached")
+    result = trainer.run_validation(
+        station_id="KLGA",
+        execution_id="cached",
+    )
 
     assert unused_builder.calls == []
+    assert "test_mae" not in result
+
+
+def test_validation_execution_never_loads_test_or_publishes_candidate(
+    tmp_path,
+    monkeypatch,
+):
+    _install_training_fakes(monkeypatch)
+    settings = Settings(
+        data_store_dir=tmp_path / "data",
+        train_start="2026-01-01",
+        train_end="2026-01-01",
+        val_start="2026-01-02",
+        val_end="2026-01-02",
+        test_start="2026-01-03",
+        test_end="2026-01-03",
+    )
+    builder = FakeBuilder()
+    registry = FakeRegistry()
+    trainer = TftTrainer(
+        store=None,
+        registry=registry,
+        output_dir=tmp_path / "checkpoints",
+        settings=settings,
+        dataset_builder=builder,
+        station_config=STATIONS["KLGA"],
+        experiment_config=_experiment_template(),
+    )
+
+    result = trainer.run_validation(
+        station_id="KLGA",
+        execution_id="trial-0001",
+    )
+
+    assert [call[3] for call in builder.calls] == ["train", "val"]
+    assert "test_mae" not in result
+    assert result["best_val_loss"] == 0.25
+    assert registry.publish_kwargs is None
+
+
+def test_final_execution_rejects_missing_approval_before_loading_data(
+    tmp_path,
+    monkeypatch,
+):
+    _install_training_fakes(monkeypatch)
+    builder = FakeBuilder()
+    trainer = TftTrainer(
+        store=None,
+        registry=FakeRegistry(),
+        output_dir=tmp_path / "checkpoints",
+        settings=Settings(data_store_dir=tmp_path / "data"),
+        dataset_builder=builder,
+        station_config=STATIONS["KLGA"],
+    )
+
+    with pytest.raises(PermissionError, match="final approval"):
+        trainer.run_final(
+            station_id="KLGA",
+            version="candidate-v1",
+            approval=None,
+        )
+
+    assert builder.calls == []
+
+
+def test_final_execution_rejects_unverified_approval_object(
+    tmp_path,
+    monkeypatch,
+):
+    _install_training_fakes(monkeypatch)
+    builder = FakeBuilder()
+    trainer = TftTrainer(
+        store=None,
+        registry=FakeRegistry(),
+        output_dir=tmp_path / "checkpoints",
+        settings=Settings(data_store_dir=tmp_path / "data"),
+        dataset_builder=builder,
+        station_config=STATIONS["KLGA"],
+    )
+
+    with pytest.raises(PermissionError, match="verified final approval"):
+        trainer.run_final(
+            station_id="KLGA",
+            version="candidate-v1",
+            approval=object(),
+        )
+
+    assert builder.calls == []
+
+
+def test_final_execution_rejects_approval_for_another_trial_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    _install_training_fakes(monkeypatch)
+    builder = FakeBuilder()
+    approval = _final_approval()
+    mismatched_snapshot = ResolvedTrialSnapshot.from_dict(
+        {
+            **_trial_snapshot().to_dict(),
+            "trial_number": 2,
+        }
+    )
+    trainer = TftTrainer(
+        store=None,
+        registry=FakeRegistry(),
+        output_dir=tmp_path / "checkpoints",
+        settings=Settings(data_store_dir=tmp_path / "data"),
+        dataset_builder=builder,
+        station_config=STATIONS["KLGA"],
+    )
+
+    with pytest.raises(PermissionError, match="does not match selected trial"):
+        trainer.run_final(
+            station_id="KLGA",
+            version="candidate-v1",
+            approval=approval,
+            trial_snapshot=mismatched_snapshot,
+        )
+
+    assert builder.calls == []
+
+
+def test_approved_final_evaluates_test_and_publishes_inactive_candidate(
+    tmp_path,
+    monkeypatch,
+):
+    _install_training_fakes(monkeypatch)
+    settings = Settings(
+        data_store_dir=tmp_path / "data",
+        train_start="2026-01-01",
+        train_end="2026-01-01",
+        val_start="2026-01-02",
+        val_end="2026-01-02",
+        test_start="2026-01-03",
+        test_end="2026-01-03",
+    )
+    builder = FakeBuilder()
+    registry = FakeRegistry()
+    monkeypatch.setattr(TftTrainer, "_eval_mae", lambda *args, **kwargs: 1.23)
+    trainer = TftTrainer(
+        store=None,
+        registry=registry,
+        output_dir=tmp_path / "checkpoints",
+        settings=settings,
+        dataset_builder=builder,
+        station_config=STATIONS["KLGA"],
+        experiment_config=_experiment_template(),
+    )
+    approval = _final_approval()
+
+    result = trainer.run_final(
+        station_id="KLGA",
+        version="candidate-v1",
+        approval=approval,
+        trial_snapshot=_trial_snapshot(),
+    )
+
+    assert [call[3] for call in builder.calls] == ["train", "val", "test"]
     assert result["test_mae"] == 1.23
+    assert registry.publish_kwargs["activate"] is False
+
+
+def test_legacy_run_entrypoint_cannot_bypass_test_lock(
+    tmp_path,
+    monkeypatch,
+):
+    _install_training_fakes(monkeypatch)
+    builder = FakeBuilder()
+    trainer = TftTrainer(
+        store=None,
+        registry=FakeRegistry(),
+        output_dir=tmp_path / "checkpoints",
+        settings=Settings(data_store_dir=tmp_path / "data"),
+        dataset_builder=builder,
+        station_config=STATIONS["KLGA"],
+    )
+
+    with pytest.raises(PermissionError, match="run_validation.*run_final"):
+        trainer.run(station_id="KLGA", version="bypass")
+
+    assert builder.calls == []
 
 
 def test_tft_trainer_rejects_missing_or_stale_audited_frame(tmp_path, monkeypatch):
@@ -284,7 +521,7 @@ def test_tft_trainer_rejects_missing_or_stale_audited_frame(tmp_path, monkeypatc
     )
 
     with pytest.raises(RuntimeError, match="rerun scripts.audit_training_data"):
-        trainer.run(station_id="KLGA", version="stale")
+        trainer.run_validation(station_id="KLGA", execution_id="stale")
 
     assert builder.calls == []
 
@@ -315,19 +552,25 @@ def test_tft_trainer_writes_training_metadata_and_result_json(tmp_path, monkeypa
         torch_deterministic=True,
         precision="32",
         num_workers=2,
+        experiment_config=_experiment_template(),
     )
 
-    result = trainer.run(station_id="KLGA", version="vmeta")
+    result = trainer.run_final(
+        station_id="KLGA",
+        version="vmeta",
+        approval=_final_approval(),
+        trial_snapshot=_trial_snapshot(),
+    )
 
     version_dir = tmp_path / "checkpoints" / "vmeta"
     metadata = json.loads((version_dir / "training_metadata.json").read_text())
     result_json = json.loads((version_dir / "train_result.json").read_text())
     experiment = json.loads((version_dir / "experiment_config.json").read_text())
     assert registry.publish_kwargs["activate"] is False
-    assert metadata["random_seed"] == 7
+    assert metadata["random_seed"] == 42
     assert metadata["torch_deterministic"] is True
-    assert metadata["precision"] == "32"
-    assert metadata["num_workers"] == 2
+    assert metadata["precision"] == "16-mixed"
+    assert metadata["num_workers"] == 0
     assert metadata["train_sample_count"] == 1
     assert metadata["val_sample_count"] == 1
     assert metadata["test_sample_count"] == 1
@@ -336,52 +579,21 @@ def test_tft_trainer_writes_training_metadata_and_result_json(tmp_path, monkeypa
     assert metadata["target"] == "temp_error"
     assert metadata["data_order_hash"]
     assert result_json["version"] == result["version"]
-    assert experiment["runtime_profile"] == "inline_settings"
+    assert experiment["runtime_profile"] == "john_linux_rtx2060"
 
 
 def test_tft_trainer_uses_experiment_config_and_publishes_contract(tmp_path, monkeypatch):
     _install_training_fakes(monkeypatch)
-    config_path = tmp_path / "experiment.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "station": "KLGA",
-                "splits": {
-                    "train": ["2026-01-01", "2026-01-01"],
-                    "val": ["2026-01-02", "2026-01-02"],
-                    "test": ["2026-01-03", "2026-01-03"],
-                },
-                "model": {
-                    "hidden_size": 64,
-                    "attention_head_size": 2,
-                    "dropout": 0.15,
-                    "hidden_continuous_size": 8,
-                    "learning_rate": 0.001,
-                    "weight_decay": 0.002,
-                    "reduce_lr_patience": 4,
-                    "quantiles": [0.05, 0.5, 0.95],
-                    "target_winsor": 6.0,
-                    "max_encoder_length": 72,
-                    "max_prediction_length": 48,
-                },
-                "trainer": {
-                    "min_epochs": 2,
-                    "max_epochs": 4,
-                    "batch_size": 24,
-                    "seed": 11,
-                    "deterministic": True,
-                    "precision": "32",
-                    "num_workers": 1,
-                    "early_stop_patience": 3,
-                    "gradient_clip_val": 0.2,
-                },
-                "runtime_profile": "john_linux_2060",
-            }
-        ),
-        encoding="ascii",
+    experiment = _experiment_template(
+        hidden_size=64,
+        attention_head_size=2,
+        dropout=0.15,
+        hidden_continuous_size=8,
+        learning_rate=0.001,
+        weight_decay=0.002,
+        reduce_lr_patience=4,
+        target_winsor=6.0,
     )
-    experiment = TrainingExperimentConfig.from_json(config_path)
     settings = Settings(data_store_dir=tmp_path / "data")
     experiment.apply_to_settings(settings)
     builder = FakeBuilder()
@@ -398,7 +610,13 @@ def test_tft_trainer_uses_experiment_config_and_publishes_contract(tmp_path, mon
         experiment_config=experiment,
     )
 
-    trainer.run(station_id="KLGA", version="vexp")
+    snapshot = _trial_snapshot(experiment)
+    trainer.run_final(
+        station_id="KLGA",
+        version="vexp",
+        approval=_final_approval(snapshot),
+        trial_snapshot=snapshot,
+    )
 
     version_dir = tmp_path / "checkpoints" / "vexp"
     written_config = json.loads((version_dir / "experiment_config.json").read_text())
@@ -406,10 +624,10 @@ def test_tft_trainer_uses_experiment_config_and_publishes_contract(tmp_path, mon
     assert [call[3] for call in builder.calls] == ["train", "val", "test"]
     assert FakeTFT.kwargs["hidden_size"] == 64
     assert FakeTFT.kwargs["learning_rate"] == 0.001
-    assert written_config["runtime_profile"] == "john_linux_2060"
+    assert written_config["runtime_profile"] == "john_linux_rtx2060"
     assert contract["station_id"] == "KLGA"
     assert contract["max_encoder_length"] == 72
     assert contract["max_prediction_length"] == 48
-    assert contract["quantiles"] == [0.05, 0.5, 0.95]
+    assert contract["quantiles"] == [0.1, 0.5, 0.9]
     artifact_names = {path.name for path in registry.publish_kwargs["extra_artifacts"]}
     assert {"experiment_config.json", "model_contract.json"} <= artifact_names

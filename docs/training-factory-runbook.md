@@ -158,41 +158,74 @@ Training must not start unless `audit_summary.json` contains `"ready": true`.
 An unsuccessful readiness audit also writes `failed_audit_summary.json`.
 Successful re-audit removes stale failed evidence.
 
-## 3. Train Candidate
+## 3. Register Workspace And Create Study
 
-Prefer a versioned experiment JSON for repeated experiments:
+Sync the ready workspace and Git template into the independent training
+catalog:
+
+```bash
+./.venv/bin/python -m scripts.manage_training \
+  --catalog runs/_management/training_catalog.db \
+  sync \
+  --workspace "$RUN_DIR" \
+  --template experiments/klga/tft_optuna_v1.json
+```
+
+Create a managed study. The command derives station, split ranges, data hash,
+Optuna study name, and candidate version; it generates the study ID:
+
+```bash
+./.venv/bin/python -m scripts.manage_training \
+  --catalog runs/_management/training_catalog.db \
+  create-study \
+  --workspace "$RUN_DIR" \
+  --template experiments/klga/tft_optuna_v1.json
+```
+
+Inspect catalog state:
+
+```bash
+./.venv/bin/python -m scripts.manage_training \
+  --catalog runs/_management/training_catalog.db \
+  status
+```
+
+Catalog creation re-reads `audit_summary.json` and every audited-frame
+manifest. It fails closed on station, split range, source fingerprint, row
+count, template hash, or data-hash drift. Study and candidate identifiers are
+never entered manually.
+
+## 4. Run Train/Validation Execution
+
+The managed experiment and Optuna workflow is specified in
+[`experiment-management-optuna-plan.md`](experiment-management-optuna-plan.md).
+Slices 1 and 2 are implemented: this command reads the versioned Git template,
+loads only the audited train and validation frames, writes validation evidence,
+and cannot publish a candidate.
 
 ```bash
 ./.venv/bin/python -m scripts.train_tft \
   --run-dir "$RUN_DIR" \
-  --station "$STATION" \
-  --version tft_klga_try01 \
-  --experiment-config experiments/tft_klga_try01.json
+  --station KLGA \
+  --version manual_validation_01 \
+  --experiment-config experiments/klga/tft_optuna_v1.json
 ```
 
-Inline split ranges are also supported:
+Inline split ranges are no longer accepted. The template station must match the
+ready audit, and the audited frame cache still validates each requested range
+and source fingerprint. The command writes `validation_result.json`; it does not
+write `train_result.json` or model-registry state.
 
-```bash
-./.venv/bin/python -m scripts.train_tft \
-  --run-dir "$RUN_DIR" \
-  --station "$STATION" \
-  --version tft_klga_try01 \
-  --train 2024-10-07:2026-03-31 \
-  --val 2026-04-01:2026-04-30 \
-  --test 2026-05-01:2026-05-31 \
-  --min-epochs 5 \
-  --max-epochs 20 \
-  --batch-size 32 \
-  --precision 32 \
-  --num-workers 0
-```
+Final test evaluation and inactive-candidate publication are available only
+through `TftTrainer.run_final`. `TrainingCatalog.approve_final` binds approval
+to the selected study/trial snapshot, template hash, and data hash;
+`consume_final_approval` is transactional and succeeds once per study. Do not
+package a candidate from a validation execution.
 
-Training always publishes an inactive candidate. It cannot write production
-active state. Before fitting, training validates and reuses the persisted
-audited split frames; it fails closed if their station, ranges, or source
-fingerprints no longer match the requested experiment.
+## 5. Package Candidate
 
-## 4. Package Candidate
+This step remains unavailable until an approved final execution has produced
+the required candidate artifacts.
 
 ```bash
 ./.venv/bin/python -m scripts.package_candidate_model \
@@ -204,7 +237,7 @@ The candidate archive includes the model version directory, contract, metadata,
 experiment config, audit evidence, and training result. It excludes
 `_decoder_cache`.
 
-## 5. Use john_server
+## 6. Use john_server
 
 Build a source bundle on `john_linux`:
 
@@ -224,7 +257,7 @@ Transfer both archives manually to `john_server`. On `john_server`, run only
 `scripts.train_tft` and `scripts.package_candidate_model`. Transfer the
 candidate package and evidence back to `john_linux`.
 
-## 6. Import And Promote
+## 7. Import And Promote
 
 Import does not activate:
 

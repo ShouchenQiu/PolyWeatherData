@@ -14,10 +14,11 @@ Usage (CLI):
 Usage (API):
     from training.trainer import TftTrainer
     trainer = TftTrainer(store, registry)
-    trainer.run(station_id="KLGA", version="v1")
+    trainer.run_validation(station_id="KLGA", execution_id="trial-1")
 """
 from __future__ import annotations
 
+import json
 import logging
 import pickle
 from datetime import datetime, timezone
@@ -30,8 +31,12 @@ from config.settings import Settings
 from config.stations import STATIONS
 from model.features import TARGET, TFT_KNOWN_REALS, TFT_UNKNOWN_REALS
 from training.artifacts import write_training_artifacts
-from training.config import ModelConfig, TrainerConfig, TrainingExperimentConfig
+from training.config import (
+    ExperimentTemplate,
+    ResolvedTrialSnapshot,
+)
 from training.dataset import DECODER_WEIGHT_COLUMN
+from training.experiment import FinalEvaluationApproval
 from training.workspace import TrainingWorkspace
 
 if TYPE_CHECKING:
@@ -54,52 +59,38 @@ def train_workspace(
     run_dir: Path | str,
     station_id: str,
     version: str,
-    split_ranges: dict[str, tuple[str, str] | list[str]] | None = None,
     experiment_config: Path | str | None = None,
-    min_epochs: int = 1,
-    max_epochs: int = 1,
-    batch_size: int = 16,
-    seed: int = 42,
-    deterministic: bool = True,
-    precision: str = "32",
-    num_workers: int = 0,
     train_fn: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Train one audited workspace and publish a non-active candidate."""
+    """Run one audited train/validation execution without touching test."""
     workspace = TrainingWorkspace(run_dir)
     workspace.require_ready_audit()
     workspace.ensure()
     started_at = datetime.now(timezone.utc).isoformat()
-    train = train_fn or _train_candidate
+    train = train_fn or _train_validation
     train_result = train(
         workspace=workspace,
         station_id=station_id,
         version=version,
-        split_ranges=split_ranges,
         experiment_config=experiment_config,
-        min_epochs=min_epochs,
-        max_epochs=max_epochs,
-        batch_size=batch_size,
-        seed=seed,
-        deterministic=deterministic,
-        precision=precision,
-        num_workers=num_workers,
     )
-    workspace.write_json(workspace.run_dir / "train_result.json", train_result)
+    workspace.write_json(
+        workspace.run_dir / "validation_result.json",
+        train_result,
+    )
     result = {
-        "status": "trained",
+        "status": "validated",
         "station": station_id,
         "version": version,
-        "split_ranges": split_ranges,
         "train_result": train_result,
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
-    workspace.record_stage("train", result)
+    workspace.record_stage("validation", result)
     return result
 
 
-def _train_candidate(**kwargs: Any) -> dict[str, Any]:
+def _train_validation(**kwargs: Any) -> dict[str, Any]:
     from data.manager import DataManager
     from data.storage.parquet_store import ParquetStore
     from db.schema import DbClient
@@ -112,25 +103,17 @@ def _train_candidate(**kwargs: Any) -> dict[str, Any]:
         data_store_dir=workspace.data_store_dir,
         model_store_dir=workspace.model_store_dir,
     )
-    experiment = (
-        TrainingExperimentConfig.from_json(kwargs["experiment_config"])
-        if kwargs.get("experiment_config")
-        else None
-    )
-    if experiment is not None:
-        experiment.apply_to_settings(settings)
-    else:
-        split_ranges = kwargs.get("split_ranges")
-        if not split_ranges:
-            raise ValueError(
-                "training requires --experiment-config or train/val/test ranges"
-            )
-        settings.train_start, settings.train_end = split_ranges["train"]
-        settings.val_start, settings.val_end = split_ranges["val"]
-        settings.test_start, settings.test_end = split_ranges["test"]
-        settings.tft_min_epochs = int(kwargs["min_epochs"])
-        settings.tft_max_epochs = int(kwargs["max_epochs"])
-        settings.tft_batch_size = int(kwargs["batch_size"])
+    if not kwargs.get("experiment_config"):
+        raise ValueError("validation execution requires --experiment-config")
+    experiment = ExperimentTemplate.from_json(kwargs["experiment_config"])
+    audit_summary = workspace.require_ready_audit()
+    experiment.validate_audit(audit_summary)
+    if kwargs["station_id"] != experiment.station:
+        raise ValueError(
+            f"requested station {kwargs['station_id']!r} does not match "
+            f"template station {experiment.station!r}"
+        )
+    experiment.apply_to_settings(settings)
 
     forecast_store = ParquetStore(settings.forecast_store_dir)
     obs_store = ParquetStore(settings.obs_store_dir)
@@ -150,15 +133,15 @@ def _train_candidate(**kwargs: Any) -> dict[str, Any]:
                 workspace.audit_frames_dir,
                 workspace.data_store_dir,
             ),
-            random_seed=kwargs["seed"],
-            torch_deterministic=kwargs["deterministic"],
-            precision=kwargs["precision"],
-            num_workers=kwargs["num_workers"],
+            random_seed=experiment.trainer.seed,
+            torch_deterministic=experiment.trainer.deterministic,
+            precision=experiment.trainer.precision,
+            num_workers=experiment.trainer.num_workers,
             experiment_config=experiment,
         )
-        return trainer.run(
+        return trainer.run_validation(
             station_id=kwargs["station_id"],
-            version=kwargs["version"],
+            execution_id=kwargs["version"],
         )
     finally:
         db.close()
@@ -196,7 +179,7 @@ class TftTrainer:
         torch_deterministic: bool = True,
         precision: str | int = 32,
         num_workers: int = 0,
-        experiment_config: TrainingExperimentConfig | None = None,
+        experiment_config: ExperimentTemplate | None = None,
         gradient_clip_val: float = 0.1,
     ) -> None:
         self._store     = store
@@ -229,10 +212,7 @@ class TftTrainer:
             experiment_config.trainer.gradient_clip_val
             if experiment_config is not None else gradient_clip_val
         )
-        self._experiment_config = experiment_config or self._config_from_current_settings(
-            station_id=getattr(self._station_config, "station_id", "KLGA"),
-            runtime_profile="inline_settings",
-        )
+        self._experiment_config = experiment_config
         self._out_dir   = Path(output_dir) if output_dir else Path("checkpoints")
         self._out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -248,27 +228,78 @@ class TftTrainer:
         start:       str = "2000-01-01",
         end:         str = "2100-01-01",
     ) -> dict:
-        """Load data, train the model, and publish to the registry.
+        """Reject the retired unapproved train/test/publish entry point."""
+        raise PermissionError(
+            "TftTrainer.run is locked; use run_validation or approved run_final"
+        )
 
-        Parameters
-        ----------
-        station_id:
-            Station key used to locate data in ParquetStore.
-        version:
-            Version string for the registry (auto-generated from UTC time
-            if None).
-        parquet_key:
-            Sub-directory / key hint for reading the 72-step dataset.
-        start / end:
-            Date range for data selection (ISO strings).
+    def run_validation(
+        self,
+        station_id: str,
+        execution_id: str,
+    ) -> dict[str, Any]:
+        """Fit against train/validation only and return validation evidence."""
+        return self._run(
+            station_id=station_id,
+            version=execution_id,
+            include_test=False,
+            publish_candidate=False,
+        )
 
-        Returns
-        -------
-        Dict with training results: version, best_val_loss, epochs_run,
-        checkpoint_path, train_mae, test_mae.
-        """
+    def run_final(
+        self,
+        station_id: str,
+        version: str,
+        approval: FinalEvaluationApproval | None,
+        trial_snapshot: ResolvedTrialSnapshot | None = None,
+    ) -> dict[str, Any]:
+        """Run the only test-reading path after explicit final approval."""
+        if approval is None:
+            raise PermissionError("final approval is required")
+        if not isinstance(approval, FinalEvaluationApproval):
+            raise PermissionError(
+                "final execution requires a verified final approval"
+            )
+        if not isinstance(trial_snapshot, ResolvedTrialSnapshot):
+            raise PermissionError(
+                "final execution requires the selected trial snapshot"
+            )
+        if (
+            trial_snapshot.execution_type != "trial"
+            or approval.study_id != trial_snapshot.study_id
+            or approval.selected_trial_number != trial_snapshot.trial_number
+            or approval.trial_snapshot_hash != trial_snapshot.snapshot_hash()
+        ):
+            raise PermissionError(
+                "final approval does not match selected trial snapshot"
+            )
+        if self._experiment_config is None:
+            raise PermissionError(
+                "final candidate requires a versioned experiment template"
+            )
+        if trial_snapshot.template_hash != self._experiment_config.config_hash():
+            raise PermissionError(
+                "selected trial snapshot does not match experiment template"
+            )
+        return self._run(
+            station_id=station_id,
+            version=version,
+            include_test=True,
+            publish_candidate=True,
+        )
+
+    def _run(
+        self,
+        *,
+        station_id: str,
+        version: str | None,
+        include_test: bool,
+        publish_candidate: bool,
+    ) -> dict[str, Any]:
         if version is None:
             version = datetime.now(timezone.utc).strftime("v%Y%m%d_%H%M%S")
+        if publish_candidate and not include_test:
+            raise ValueError("candidate publishing requires final test evaluation")
 
         try:
             import torch
@@ -293,7 +324,12 @@ class TftTrainer:
             torch.use_deterministic_algorithms(True)
 
         # -- Load and prepare data -------------------------------------------
-        df_train, df_val, df_test = self._build_split_frames(station_id)
+        split_frames = self._build_split_frames(
+            station_id,
+            include_test=include_test,
+        )
+        df_train, df_val = split_frames[0], split_frames[1]
+        df_test = split_frames[2] if include_test else None
 
         # Winsorise training target
         target_winsor = self._settings.tft_target_winsor
@@ -331,8 +367,12 @@ class TftTrainer:
         validation = TimeSeriesDataSet.from_dataset(
             training, df_val,  predict=False, stop_randomization=True
         )
-        testing = TimeSeriesDataSet.from_dataset(
-            training, df_test, predict=True,  stop_randomization=True
+        testing = (
+            TimeSeriesDataSet.from_dataset(
+                training, df_test, predict=True, stop_randomization=True
+            )
+            if df_test is not None
+            else None
         )
 
         train_loader = training.to_dataloader(
@@ -344,8 +384,14 @@ class TftTrainer:
         val_loader = validation.to_dataloader(
             train=False, batch_size=self._settings.tft_batch_size, num_workers=self._num_workers
         )
-        test_loader = testing.to_dataloader(
-            train=False, batch_size=self._settings.tft_batch_size, num_workers=self._num_workers
+        test_loader = (
+            testing.to_dataloader(
+                train=False,
+                batch_size=self._settings.tft_batch_size,
+                num_workers=self._num_workers,
+            )
+            if testing is not None
+            else None
         )
 
         # -- Instantiate model -----------------------------------------------
@@ -403,13 +449,10 @@ class TftTrainer:
             pickle.dump(training, fh)
 
         # -- Evaluate on test set (MAE on median quantile) -------------------
-        test_mae = self._eval_mae(trainer, tft, test_loader)
         train_mae = float("nan")
 
-        # -- Publish to registry ---------------------------------------------
         metrics = {
             "train_mae":  train_mae,
-            "test_mae":   test_mae,
             "best_val_loss": best_loss,
             "epochs_run": epochs_run,
         }
@@ -419,36 +462,57 @@ class TftTrainer:
             "epochs_run":       epochs_run,
             "checkpoint_path":  str(best_ckpt),
             "train_mae":        train_mae,
-            "test_mae":         test_mae,
         }
-        extra_artifacts = write_training_artifacts(
-            output_dir=ckpt_dir,
-            station_id=station_id,
-            version=version,
-            df_train=df_train,
-            df_val=df_val,
-            df_test=df_test,
-            known=known,
-            unknown=unk,
-            training=training,
-            result=result,
-            torch_module=torch,
-            lightning_module=pl,
-            experiment_config=self._experiment_config,
-            random_seed=self._random_seed,
-            torch_deterministic=self._torch_deterministic,
-            precision=self._precision,
-            num_workers=self._num_workers,
-            settings=self._settings,
-        )
-        self._registry.publish(
-            version      = version,
-            ckpt_path    = best_ckpt,
-            metrics      = metrics,
-            training_dataset_pkl = training_dataset_pkl,
-            activate=False,
-            extra_artifacts=extra_artifacts,
-        )
+        if include_test:
+            test_mae = self._eval_mae(trainer, tft, test_loader)
+            metrics["test_mae"] = test_mae
+            result["test_mae"] = test_mae
+        if publish_candidate:
+            if df_test is None:
+                raise RuntimeError("final candidate requires a test frame")
+            if self._experiment_config is None:
+                raise PermissionError(
+                    "final candidate requires a versioned experiment template"
+                )
+            extra_artifacts = write_training_artifacts(
+                output_dir=ckpt_dir,
+                station_id=station_id,
+                version=version,
+                df_train=df_train,
+                df_val=df_val,
+                df_test=df_test,
+                known=known,
+                unknown=unk,
+                training=training,
+                result=result,
+                torch_module=torch,
+                lightning_module=pl,
+                experiment_config=self._experiment_config,
+                random_seed=self._random_seed,
+                torch_deterministic=self._torch_deterministic,
+                precision=self._precision,
+                num_workers=self._num_workers,
+                settings=self._settings,
+            )
+            self._registry.publish(
+                version=version,
+                ckpt_path=best_ckpt,
+                metrics=metrics,
+                training_dataset_pkl=training_dataset_pkl,
+                activate=False,
+                extra_artifacts=extra_artifacts,
+            )
+        else:
+            validation_result_path = ckpt_dir / "validation_result.json"
+            validation_result_path.write_text(
+                json.dumps(
+                    result,
+                    indent=2,
+                    sort_keys=True,
+                    default=str,
+                ),
+                encoding="ascii",
+            )
         logger.info("TftTrainer finished: %s", result)
         return result
 
@@ -475,14 +539,19 @@ class TftTrainer:
     def _build_split_frames(
         self,
         station_id: str,
-    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        *,
+        include_test: bool = True,
+    ) -> tuple[pd.DataFrame, ...]:
+        ranges = [
+            ("train", self._settings.train_start, self._settings.train_end),
+            ("val", self._settings.val_start, self._settings.val_end),
+        ]
+        if include_test:
+            ranges.append(
+                ("test", self._settings.test_start, self._settings.test_end)
+            )
         if self._audited_frame_cache is not None:
             cached_frames: list[pd.DataFrame] = []
-            ranges = (
-                ("train", self._settings.train_start, self._settings.train_end),
-                ("val", self._settings.val_start, self._settings.val_end),
-                ("test", self._settings.test_start, self._settings.test_end),
-            )
             for split, start, end in ranges:
                 print(
                     f"[train data] validate audited {split} frame "
@@ -507,7 +576,7 @@ class TftTrainer:
                     flush=True,
                 )
                 cached_frames.append(frame)
-            return cached_frames[0], cached_frames[1], cached_frames[2]
+            return tuple(cached_frames)
 
         if self._dataset_builder is None:
             if self._data_mgr is None or self._decoder_cache is None:
@@ -534,17 +603,27 @@ class TftTrainer:
             self._init_times(self._settings.val_start, self._settings.val_end),
             split="val",
         )
-        test = self._dataset_builder.build_frame(
-            station,
-            self._init_times(self._settings.test_start, self._settings.test_end),
-            split="test",
-        )
-        if train.empty or val.empty or test.empty:
+        frames = [train, val]
+        if include_test:
+            frames.append(
+                self._dataset_builder.build_frame(
+                    station,
+                    self._init_times(
+                        self._settings.test_start,
+                        self._settings.test_end,
+                    ),
+                    split="test",
+                )
+            )
+        if any(frame.empty for frame in frames):
             raise ValueError(
                 "TrainingDatasetBuilder produced an empty split: "
-                f"train={len(train)} val={len(val)} test={len(test)}"
+                + " ".join(
+                    f"{name}={len(frame)}"
+                    for (name, _start, _end), frame in zip(ranges, frames)
+                )
             )
-        return train, val, test
+        return tuple(frames)
 
     @staticmethod
     def _init_times(start_date: str, end_date: str) -> list[pd.Timestamp]:
@@ -590,42 +669,3 @@ class TftTrainer:
         except Exception as exc:
             logger.warning("Could not compute test MAE: %s", exc)
             return float("nan")
-
-    def _config_from_current_settings(
-        self,
-        station_id: str,
-        runtime_profile: str,
-    ) -> TrainingExperimentConfig:
-        return TrainingExperimentConfig(
-            station=station_id,
-            splits={
-                "train": (self._settings.train_start, self._settings.train_end),
-                "val": (self._settings.val_start, self._settings.val_end),
-                "test": (self._settings.test_start, self._settings.test_end),
-            },
-            model=ModelConfig(
-                hidden_size=self._settings.tft_hidden_size,
-                attention_head_size=self._settings.tft_attention_head_size,
-                dropout=self._settings.tft_dropout,
-                hidden_continuous_size=self._settings.tft_hidden_continuous_size,
-                learning_rate=self._settings.tft_learning_rate,
-                weight_decay=self._settings.tft_weight_decay,
-                reduce_lr_patience=self._settings.tft_reduce_lr_patience,
-                quantiles=list(self._settings.tft_quantiles),
-                target_winsor=self._settings.tft_target_winsor,
-                max_encoder_length=self._settings.tft_max_encoder_length,
-                max_prediction_length=self._settings.tft_max_prediction_length,
-            ),
-            trainer=TrainerConfig(
-                min_epochs=self._settings.tft_min_epochs,
-                max_epochs=self._settings.tft_max_epochs,
-                batch_size=self._settings.tft_batch_size,
-                seed=self._random_seed,
-                deterministic=self._torch_deterministic,
-                precision=str(self._precision),
-                num_workers=self._num_workers,
-                early_stop_patience=self._settings.tft_early_stop_patience,
-                gradient_clip_val=self._gradient_clip_val,
-            ),
-            runtime_profile=runtime_profile,
-        )

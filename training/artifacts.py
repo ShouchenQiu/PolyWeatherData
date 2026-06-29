@@ -11,7 +11,7 @@ from typing import Any
 import pandas as pd
 
 from model.features import TARGET
-from training.config import TrainingExperimentConfig
+from training.config import ExperimentTemplate
 
 
 def write_training_artifacts(
@@ -28,7 +28,7 @@ def write_training_artifacts(
     result: dict[str, Any],
     torch_module: Any,
     lightning_module: Any,
-    experiment_config: TrainingExperimentConfig,
+    experiment_config: ExperimentTemplate,
     random_seed: int,
     torch_deterministic: bool,
     precision: str | int,
@@ -160,7 +160,7 @@ def build_model_contract(
     known: list[str],
     unknown: list[str],
     metadata: dict[str, Any],
-    experiment_config: TrainingExperimentConfig,
+    experiment_config: ExperimentTemplate,
     settings: Any,
 ) -> dict[str, Any]:
     return {

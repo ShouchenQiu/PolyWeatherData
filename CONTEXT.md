@@ -131,6 +131,26 @@ prepared data, audit evidence, checkpoints, candidate artifacts, and stage
 manifests for one training run.
 _Avoid_: run folder, remote run
 
+**experiment template**: A version-controlled schema-v1 JSON specification that
+fixes one station, audited data splits, TFT defaults, search space, and execution
+policy before a study is created.
+_Avoid_: run config, Optuna config
+
+**training study**: A managed collection of smoke, calibration, and optimisation
+executions that all reference one ready training workspace and one immutable
+experiment-template revision.
+_Avoid_: run, training workspace
+
+**trial snapshot**: The immutable resolved configuration and evidence for one
+managed training execution, including its exact hyperparameters, data fingerprint,
+environment, status, metrics, timings, and artifacts.
+_Avoid_: experiment config, checkpoint metadata
+
+**test lock**: The training-factory rule that smoke, calibration, and optimisation
+executions cannot load or score the test split; one approved final evaluation may
+unlock it without returning its result to the search process.
+_Avoid_: test flag, holdout option
+
 **candidate model package**: A reviewed-but-inactive model artifact archive that
 can be imported into a production model store without changing its active model.
 _Avoid_: production model, deployed model
