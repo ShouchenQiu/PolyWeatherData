@@ -33,11 +33,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     worker_id = args.worker_id or f"{socket.gethostname()}-{os.getpid()}"
 
+    stopping = False
+
     def run_search(catalog, study_id):
         OptunaEngine(
             catalog,
             storage_url=args.optuna_storage,
-        ).run(study_id)
+        ).run(study_id, pause_requested=lambda: stopping)
         return catalog.get_study(study_id)
 
     worker = TrainingWorker(
@@ -49,8 +51,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.once:
         worker.run_once()
         return 0
-
-    stopping = False
 
     def request_stop(_signum: int, _frame: object) -> None:
         nonlocal stopping

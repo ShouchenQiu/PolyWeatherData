@@ -71,7 +71,11 @@ class _NonFiniteTrialMetric(ValueError):
     pass
 
 
-class _SearchCancellation(RuntimeError):
+class _RecoverableTrialFailure(RuntimeError):
+    pass
+
+
+class _SearchCancellation(_RecoverableTrialFailure):
     pass
 
 
@@ -240,6 +244,7 @@ class OptunaEngine:
         max_trials: int | None = None,
         budget_gpu_seconds: float | None = None,
         finalize_at_trial_cap: bool = True,
+        pause_requested: Callable[[], bool] | None = None,
     ) -> SearchSummary:
         """Run serial trials until a local trial cap or cumulative GPU budget."""
         if max_trials is not None and max_trials <= 0:
@@ -365,6 +370,24 @@ class OptunaEngine:
                     error=str(exc),
                 )
                 raise
+            except BrokenPipeError as exc:
+                gpu_seconds = time.monotonic() - started
+                self._record_trial_error(
+                    study_id,
+                    execution.execution_id,
+                    trial_dir,
+                    exc,
+                )
+                self._catalog.finish_trial_execution(
+                    execution.execution_id,
+                    status="failed",
+                    metrics={
+                        "gpu_seconds": gpu_seconds,
+                        "failure_class": "infrastructure",
+                    },
+                    error=f"BrokenPipeError: {exc}",
+                )
+                raise
             except Exception as exc:
                 gpu_seconds = time.monotonic() - started
                 self._record_trial_error(
@@ -385,7 +408,7 @@ class OptunaEngine:
                     },
                     error=f"{type(exc).__name__}: {exc}",
                 )
-                raise
+                raise _RecoverableTrialFailure(str(exc)) from exc
             metrics = {
                 "best_val_loss": result.best_val_loss,
                 "final_val_loss": result.final_val_loss,
@@ -414,7 +437,17 @@ class OptunaEngine:
             current_study: optuna.Study,
             _trial: optuna.trial.FrozenTrial,
         ) -> None:
-            if self._catalog.get_study(study_id).status == "cancelled":
+            current_status = self._catalog.get_study(study_id).status
+            if pause_requested is not None and pause_requested():
+                if current_status == "running":
+                    current_status = self._catalog.request_search_pause(
+                        study_id
+                    ).status
+            if current_status == "pause_requested":
+                self._catalog.complete_search_pause(study_id)
+                current_study.stop()
+                return
+            if current_status == "cancelled":
                 current_study.stop()
                 return
             if self._gpu_seconds(study_id) >= budget_limit:
@@ -425,11 +458,13 @@ class OptunaEngine:
                 objective,
                 n_trials=max_trials,
                 n_jobs=1,
-                catch=(Exception,),
+                catch=(_RecoverableTrialFailure,),
                 callbacks=[stop_at_budget],
             )
         current_status = self._catalog.get_study(study_id).status
-        if current_status == "cancelled":
+        if current_status == "paused":
+            status = "paused"
+        elif current_status == "cancelled":
             status = "cancelled"
         elif self._gpu_seconds(study_id) >= budget_limit:
             status = "budget_exhausted"
@@ -437,7 +472,7 @@ class OptunaEngine:
             status = "completed"
         else:
             status = "running"
-        if status not in {"running", "cancelled"}:
+        if status not in {"running", "paused", "cancelled"}:
             self._catalog.finish_search(study_id, status=status)
         return self._summary(study_id, optuna_study, status=status)
 

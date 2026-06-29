@@ -475,3 +475,33 @@ def test_final_approval_can_be_issued_and_consumed_only_once(
         catalog.consume_final_approval(study.study_id)
     with pytest.raises(PermissionError, match="already approved"):
         catalog.approve_final(study.study_id, snapshot, approved_by="john")
+
+
+def test_running_search_can_pause_at_trial_boundary_and_resume(
+    tmp_path: Path,
+) -> None:
+    workspace = _ready_workspace(tmp_path)
+    catalog = TrainingCatalog(tmp_path / "training_catalog.db")
+    study = catalog.create_study(
+        workspace.run_dir,
+        "experiments/klga/tft_optuna_v1.json",
+    )
+    for status in (
+        "smoke_queued",
+        "smoke_running",
+        "smoke_passed",
+        "calibration_queued",
+        "calibration_running",
+        "gated",
+        "queued",
+        "running",
+    ):
+        catalog.transition_study(study.study_id, status)
+
+    requested = catalog.request_search_pause(study.study_id)
+    paused = catalog.complete_search_pause(study.study_id)
+    resumed = catalog.resume_search(study.study_id)
+
+    assert requested.status == "pause_requested"
+    assert paused.status == "paused"
+    assert resumed.status == "queued"

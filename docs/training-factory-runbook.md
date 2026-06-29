@@ -313,7 +313,7 @@ export STUDY_ID='replace-with-gated-study-id'
   approve-search --study "$STUDY_ID" --approved-by "$USER"
 
 tmux new-session -d -s polyweather-optuna-48h \
-  "cd /home/john/Work/PolyWeatherBot && exec ./.venv/bin/python -m scripts.training_worker --catalog runs/_management/training_catalog.db --gpu-lock runs/_management/training.gpu.lock --optuna-storage sqlite:///runs/_management/optuna.db 2>&1 | tee -a runs/_management/training_worker.log"
+  "cd /home/john/Work/PolyWeatherBot && exec ./.venv/bin/python -m scripts.training_worker --catalog runs/_management/training_catalog.db --gpu-lock runs/_management/training.gpu.lock --optuna-storage sqlite:///runs/_management/optuna.db >> runs/_management/training_worker.log 2>&1"
 
 tmux attach-session -t polyweather-optuna-48h
 ```
@@ -328,6 +328,45 @@ tmux capture-pane -pt polyweather-optuna-48h -S -80
 du -sh runs/_management runs/*/studies 2>/dev/null
 df -h .
 ```
+
+Pause is distinct from cancellation. This command records a durable request;
+the current trial finishes and no next trial is claimed:
+
+```bash
+./.venv/bin/python -m scripts.manage_training \
+  --catalog runs/_management/training_catalog.db \
+  pause-search --study "$STUDY_ID"
+```
+
+Wait until `study.status` is `paused`. Resume through the same storage:
+
+```bash
+./.venv/bin/python -m scripts.manage_training \
+  --catalog runs/_management/training_catalog.db \
+  resume-search --study "$STUDY_ID"
+```
+
+`Ctrl+C` sent directly to `scripts.training_worker` now has the same
+finish-current-trial pause semantics. Do not pipe worker output through `tee`;
+the worker already writes per-trial logs and the outer redirect avoids a broken
+output pipe.
+
+### 6 GPU-hour trend study
+
+The first 48-hour attempt established that TFT materially improves the raw
+decoder but also exposed low GPU utilisation and early convergence. Do not
+resume that study. Create a separate trend study from
+`experiments/klga/tft_trend_6h_v1.json`; it searches batch 8/16/32/64 and small
+models for 2–6 epochs under a 6 GPU-hour budget. Its purpose is coarse direction
+finding and Top-3 coverage/MC evidence, not fine-grained optimisation.
+
+`tft_trend_6h_v1` completed its batch-32 calibration but is superseded before
+search approval. Use `experiments/klga/tft_trend_6h_v2.json`: batch
+32/64/128/256, hidden size 16/32/48/64, two dataloader workers, and 2–12
+epochs. The v2 smoke deliberately uses batch 256. If it OOMs, do not edit the
+template or study in place; create a new template capped at 128. Batch 512 is
+deferred because the independent batch/hidden search could pair it with hidden
+64 and exceed the RTX 2060 memory envelope.
 
 After a crash, run the exact same worker command in a new tmux session. It
 reconciles stale RUNNING trials and resumes the persistent Optuna study. For a

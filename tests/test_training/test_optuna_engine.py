@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import optuna
+import pytest
 
 from training.catalog import TrainingCatalog
 from training.optuna_engine import OptunaEngine, TrialEvaluation
@@ -228,6 +229,29 @@ def test_oom_and_nan_trials_fail_with_explicit_classification(
     ]
 
 
+def test_broken_output_pipe_aborts_search_instead_of_spawning_failures(
+    tmp_path: Path,
+) -> None:
+    catalog, study_id = _approved_study(tmp_path)
+    engine = OptunaEngine(
+        catalog,
+        storage_url=f"sqlite:///{tmp_path / 'optuna.db'}",
+    )
+
+    def broken_output(_context):
+        raise BrokenPipeError("operator output pipe closed")
+
+    with pytest.raises(BrokenPipeError, match="output pipe"):
+        engine.run(study_id, evaluator=broken_output, max_trials=10)
+
+    executions = [
+        item
+        for item in catalog.list_executions(study_id)
+        if item.execution_type == "trial"
+    ]
+    assert len(executions) == 1
+
+
 def test_gpu_budget_counts_completed_trials_and_stops_before_new_trial(
     tmp_path: Path,
 ) -> None:
@@ -295,6 +319,40 @@ def test_running_search_resumes_from_same_storage_without_repeating_trial(
         storage_url=storage_url,
     ).prepare(study_id).trials
     assert [trial.number for trial in trials] == [0, 1]
+
+
+def test_search_pause_finishes_current_trial_and_resume_starts_next(
+    tmp_path: Path,
+) -> None:
+    catalog, study_id = _approved_study(tmp_path)
+    storage_url = f"sqlite:///{tmp_path / 'optuna.db'}"
+    engine = OptunaEngine(catalog, storage_url=storage_url)
+
+    def evaluate(context):
+        return TrialEvaluation(
+            best_val_loss=0.5 + context.trial.number,
+            final_val_loss=0.5 + context.trial.number,
+            epochs_run=1,
+            gpu_seconds=1.0,
+            gpu_peak_memory_allocated_bytes=100,
+            checkpoint_path=None,
+        )
+
+    paused = engine.run(
+        study_id,
+        evaluator=evaluate,
+        max_trials=3,
+        pause_requested=lambda: True,
+    )
+    assert paused.status == "paused"
+    assert catalog.get_study(study_id).status == "paused"
+    assert paused.completed_trials == 1
+
+    catalog.resume_search(study_id)
+    resumed = engine.run(study_id, evaluator=evaluate, max_trials=1)
+
+    assert resumed.status == "completed"
+    assert [trial.number for trial in engine.prepare(study_id).trials] == [0, 1]
 
 
 def test_default_tft_adapter_reports_epoch_and_indexes_runtime_artifacts(

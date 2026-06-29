@@ -126,14 +126,17 @@ _STUDY_TRANSITIONS = {
         "interrupted",
     },
     "gated": {"queued"},
-    "queued": {"running", "cancel_requested"},
+    "queued": {"running", "paused", "cancel_requested"},
     "running": {
         "budget_exhausted",
         "completed",
         "failed",
+        "pause_requested",
         "cancel_requested",
         "interrupted",
     },
+    "pause_requested": {"paused", "failed"},
+    "paused": {"queued", "cancelled"},
     "budget_exhausted": {"awaiting_selection"},
     "completed": {"awaiting_selection"},
     "awaiting_selection": {"final_approved"},
@@ -751,6 +754,49 @@ class TrainingCatalog:
             self._conn.execute("ROLLBACK")
             raise
         return self.get_study(row["study_id"])
+
+    def request_search_pause(self, study_id: str) -> StudyRecord:
+        """Request a stop after the current trial, without cancelling study."""
+        study = self.validate_study(study_id)
+        if study.status in {"pause_requested", "paused"}:
+            return study
+        if study.status == "queued":
+            return self.transition_study(
+                study_id,
+                "paused",
+                message="search paused before worker claim",
+            )
+        if study.status != "running":
+            raise PermissionError("only queued or running search can pause")
+        return self.transition_study(
+            study_id,
+            "pause_requested",
+            message="search pause requested; current trial may finish",
+        )
+
+    def complete_search_pause(self, study_id: str) -> StudyRecord:
+        """Acknowledge a pause request at an Optuna trial boundary."""
+        study = self.validate_study(study_id)
+        if study.status == "paused":
+            return study
+        if study.status != "pause_requested":
+            raise PermissionError("search has no pending pause request")
+        return self.transition_study(
+            study_id,
+            "paused",
+            message="search paused at trial boundary",
+        )
+
+    def resume_search(self, study_id: str) -> StudyRecord:
+        """Queue a paused study for continuation from its Optuna storage."""
+        study = self.validate_study(study_id)
+        if study.status != "paused":
+            raise PermissionError("only a paused search can resume")
+        return self.transition_study(
+            study_id,
+            "queued",
+            message="paused search queued for resume",
+        )
 
     def start_trial_execution(
         self,

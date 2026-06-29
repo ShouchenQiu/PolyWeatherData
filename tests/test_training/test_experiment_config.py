@@ -70,11 +70,34 @@ def test_experiment_template_rejects_workspace_for_another_station() -> None:
         )
 
 
-def test_schema_v1_rejects_unproven_batch_sizes_in_search_space() -> None:
+def test_schema_v1_allows_smoke_proven_batch_sizes_up_to_256() -> None:
     payload = _minimal_template()
-    payload["study"]["search_space"]["batch_size"]["choices"] = [4, 16]
+    payload["study"]["search_space"]["batch_size"]["choices"] = [
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+    ]
 
-    with pytest.raises(ValueError, match=r"batch_size.*4 and 8"):
+    template = ExperimentTemplate.from_dict(payload)
+
+    assert template.study.search_space["batch_size"].choices == (
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+    )
+
+
+def test_schema_v1_rejects_batch_size_above_local_gpu_envelope() -> None:
+    payload = _minimal_template()
+    payload["study"]["search_space"]["batch_size"]["choices"] = [256, 512]
+
+    with pytest.raises(ValueError, match=r"batch_size.*256"):
         ExperimentTemplate.from_dict(payload)
 
 

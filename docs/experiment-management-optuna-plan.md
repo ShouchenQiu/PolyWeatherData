@@ -463,6 +463,28 @@ epoch GPU 秒、max epochs 和预算内预计完整 trial 数。当前真实 cal
 
 **实施状态：代码与运维文档已完成（2026-06-29）；真实 48 小时运行明确留给操作者）**
 
+### 运行期修订：6 GPU-hour 趋势搜索
+
+首次实测显示 batch 4/8 仅使用约 33–38% SM、约 207 MiB framebuffer，且
+validation loss 通常在 epoch 0–1 达到最佳。原定 48 GPU-hour study 因此停止，
+不再恢复或用于 final。后续使用独立 `tft_trend_6h_v1`：
+
+- 预算 6 GPU-hours；目标仍为 validation quantile loss，test lock 不变。
+- batch size 粗搜 8/16/32/64；hidden size 仅保留 16/32。
+- 训练 2–6 epochs，early-stop patience 1，startup trials 2，warmup 1。
+- Top-3 重点比较 p50 MAE、按 fxx coverage、daily-high 和 McSampler evidence。
+- 本轮只确认趋势，不把微小 objective 差异解释成稳定最优。
+
+第二次 calibration 证明 batch 32 将完整 epoch 从 771 秒降至 81 秒，但
+SM 仍约 35%、framebuffer 约 207 MiB。因此 `tft_trend_6h_v1` 在 gated 状态
+停止，不进入搜索；由 `tft_trend_6h_v2` 替代：
+
+- batch size 32/64/128/256，hidden size 16/32/48/64。
+- smoke 与 calibration 使用 batch 256、hidden 32，先验证 5.6 GiB 显存安全。
+- dataloader workers 固定为 2；学习率扩大到 5e-4–1e-2。
+- 训练 2–12 epochs，弥补大 batch 每 epoch optimizer steps 减少。
+- batch 512 不与 hidden 64 无条件组合；只有 256 实测仍充分富余时才开独立 study。
+
 - 更新 training runbook、故障恢复、磁盘/日志清理和 systemd user service。
 - 完成真实 smoke 与 baseline 报告，人工确认搜索空间。
 - 启动 48 GPU-hour study，结束后完成 Top-K 评审和一次 final。

@@ -151,6 +151,11 @@ executions cannot load or score the test split; one approved final evaluation ma
 unlock it without returning its result to the search process.
 _Avoid_: test flag, holdout option
 
+**search pause**: A durable training-study request that lets the current Optuna
+trial finish, prevents another trial from being claimed, and leaves the study
+resumable from the same catalog and Optuna storage.
+_Avoid_: cancellation, process suspension
+
 **candidate model package**: A reviewed-but-inactive model artifact archive that
 can be imported into a production model store without changing its active model.
 _Avoid_: production model, deployed model

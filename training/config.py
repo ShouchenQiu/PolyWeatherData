@@ -419,11 +419,13 @@ class ExperimentTemplate:
             batch_space is not None
             and (
                 batch_space.kind != "categorical"
-                or not set(batch_space.choices) <= {4, 8}
+                or not set(batch_space.choices)
+                <= {4, 8, 16, 32, 64, 128, 256}
             )
         ):
             raise ValueError(
-                "study.search_space.batch_size choices must be limited to 4 and 8"
+                "study.search_space.batch_size choices must be powers of two "
+                "no larger than 256"
             )
 
     def to_dict(self) -> dict[str, Any]:

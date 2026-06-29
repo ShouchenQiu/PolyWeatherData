@@ -48,6 +48,12 @@ def _parser() -> argparse.ArgumentParser:
     approve_search.add_argument("--study", required=True)
     approve_search.add_argument("--approved-by", required=True)
 
+    pause_search = subparsers.add_parser("pause-search")
+    pause_search.add_argument("--study", required=True)
+
+    resume_search = subparsers.add_parser("resume-search")
+    resume_search.add_argument("--study", required=True)
+
     approve = subparsers.add_parser("approve-final")
     approve.add_argument("--study", required=True)
     approve.add_argument("--trial-snapshot", required=True)
@@ -77,6 +83,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     approved_by=args.approved_by,
                 )
             )
+        elif args.command == "pause-search":
+            payload = asdict(catalog.request_search_pause(args.study))
+        elif args.command == "resume-search":
+            payload = asdict(catalog.resume_search(args.study))
         elif args.command == "status":
             payload = (
                 {
