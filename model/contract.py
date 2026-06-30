@@ -5,10 +5,16 @@ import json
 from pathlib import Path
 from typing import Any
 
-from model.features import TARGET, TFT_KNOWN_REALS, TFT_UNKNOWN_REALS
+from model.features import (
+    OBS_UNKNOWN_REALS,
+    TARGET,
+    TFT_KNOWN_REALS,
+    TFT_UNKNOWN_REALS,
+)
 
 
-SUPPORTED_CONTRACT_SCHEMA = 1
+CURRENT_CONTRACT_SCHEMA = 2
+SUPPORTED_CONTRACT_SCHEMAS = {1, CURRENT_CONTRACT_SCHEMA}
 SUPPORTED_ENCODER_LENGTH = 72
 SUPPORTED_PREDICTION_LENGTH = 48
 SUPPORTED_QUANTILES = [0.1, 0.5, 0.9]
@@ -20,10 +26,21 @@ def validate_model_contract(path: Path | str) -> dict[str, Any]:
     if not contract_path.exists():
         raise FileNotFoundError(f"model_contract.json not found at {contract_path}")
     contract = json.loads(contract_path.read_text(encoding="ascii"))
-    _require_equal(contract, "schema_version", SUPPORTED_CONTRACT_SCHEMA)
+    schema_version = contract.get("schema_version")
+    if schema_version not in SUPPORTED_CONTRACT_SCHEMAS:
+        raise ValueError(
+            "model_contract.json schema_version mismatch: "
+            f"expected one of {sorted(SUPPORTED_CONTRACT_SCHEMAS)!r}, "
+            f"got {schema_version!r}"
+        )
     _require_equal(contract, "target", TARGET)
     _require_equal(contract, "known_reals", list(TFT_KNOWN_REALS))
-    _require_equal(contract, "unknown_reals", list(TFT_UNKNOWN_REALS))
+    expected_unknown = (
+        list(OBS_UNKNOWN_REALS)
+        if schema_version == 1
+        else list(TFT_UNKNOWN_REALS)
+    )
+    _require_equal(contract, "unknown_reals", expected_unknown)
     _require_equal(contract, "max_encoder_length", SUPPORTED_ENCODER_LENGTH)
     _require_equal(contract, "max_prediction_length", SUPPORTED_PREDICTION_LENGTH)
     _require_equal(contract, "quantiles", SUPPORTED_QUANTILES)

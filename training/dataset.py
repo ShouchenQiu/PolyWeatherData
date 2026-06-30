@@ -17,7 +17,11 @@ import pandas as pd
 from data.forecast.hrrr_fill import HrrrFill, MAJOR_HOURS, nearest_prior_major
 from data.manager import InsufficientEncoderData
 from data.storage.cleaner import Cleaner
-from model.features import add_model_features
+from model.features import (
+    add_decoder_history_features,
+    add_encoder_history_features,
+    add_model_features,
+)
 from model.tft import MAX_ENCODER_LENGTH
 
 DECODER_WEIGHT_COLUMN = "decoder_weight"
@@ -630,6 +634,8 @@ class TrainingDatasetBuilder:
                 decoder, start_idx=self._encoder_hours, init_utc=init_utc,
                 station_id=station.station_id,
             )
+            encoder = add_encoder_history_features(encoder)
+            decoder = add_decoder_history_features(decoder)
             encoder[DECODER_WEIGHT_COLUMN] = 1.0
             extrapolated = (
                 decoder["is_extrapolated"].fillna(False).astype(bool)

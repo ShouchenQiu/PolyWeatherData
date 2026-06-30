@@ -297,6 +297,43 @@ def test_bot_calls_set_cov_when_covariance_present(tmp_path, monkeypatch):
     np.testing.assert_array_equal(bot.mc._cov, cov)
 
 
+def test_bot_prefers_versioned_mc_calibration(tmp_path, monkeypatch):
+    import numpy as np
+
+    from model.mc_calibration import McCalibration
+    from model.store.registry import ModelRegistry
+
+    calibration = McCalibration(
+        correlation=np.eye(48),
+        sigma_scales=np.full(5, 1.2),
+        max_bias_f=0.4,
+        model_sha256="a" * 64,
+        fit_split="val",
+        fit_start="2026-04-01",
+        fit_end="2026-04-30",
+        sample_count=100,
+    )
+    monkeypatch.setattr(
+        ModelRegistry,
+        "load_mc_calibration",
+        lambda self, version=None: calibration,
+    )
+    monkeypatch.setattr(
+        ModelRegistry,
+        "load_covariance",
+        lambda self, version=None: (_ for _ in ()).throw(
+            AssertionError("legacy covariance must not load for v2")
+        ),
+    )
+
+    bot = BotManager(
+        Settings(data_store_dir=tmp_path / "data"),
+        db_path=str(tmp_path / "bot.db"),
+    )
+
+    assert bot.mc._calibration is calibration
+
+
 # ---------------------------------------------------------------------------
 # V2V12 -- RedeemLoop wiring
 # ---------------------------------------------------------------------------

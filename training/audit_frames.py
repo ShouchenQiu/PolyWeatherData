@@ -14,7 +14,7 @@ from model.features import TFT_KNOWN_REALS, TFT_UNKNOWN_REALS
 from model.tft import MAX_ENCODER_LENGTH, MAX_PREDICTION_LENGTH
 
 
-_CACHE_SCHEMA_VERSION = 1
+_CACHE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)

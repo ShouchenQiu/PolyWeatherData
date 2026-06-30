@@ -16,6 +16,8 @@ from loguru import logger
 from model.features import (
     REQUIRED_DECODER_SOURCE_COLUMNS,
     REQUIRED_ENCODER_SOURCE_COLUMNS,
+    add_decoder_history_features,
+    add_encoder_history_features,
     add_model_features,
 )
 
@@ -160,6 +162,8 @@ class ModelPipeline:
             decoder_df, start_idx=self._N_ENC, init_utc=init_utc,
             station_id=station.station_id,
         )
+        encoder_df = add_encoder_history_features(encoder_df)
+        decoder_df = add_decoder_history_features(decoder_df)
 
         # 4b. Pre-predict source column validation (before superset fill).
         missing_enc = set(REQUIRED_ENCODER_SOURCE_COLUMNS) - set(encoder_df.columns)
@@ -259,11 +263,13 @@ class ModelPipeline:
 
         # 7. Load per-station max_bias from registry (if available) then
         #    run MC -> (n_samp,) daily high in degF
-        max_bias = (
-            self.registry.load_max_bias(station.station_id)
-            if self.registry is not None
-            else 0.0
-        )
+        max_bias = None
+        if not self.mc.has_calibration:
+            max_bias = (
+                self.registry.load_max_bias(station.station_id)
+                if self.registry is not None
+                else 0.0
+            )
         daily_highs = self.mc.sample_daily_high(
             mu_vec, sigma_vec, max_bias=max_bias,
             hour_indices=[f - 1 for f in target_fxx],

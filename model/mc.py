@@ -18,6 +18,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from config.settings import Settings
+    from model.mc_calibration import McCalibration
 
 
 class McSampler:
@@ -40,6 +41,8 @@ class McSampler:
         self.rng_seed  = rng_seed
         self._rng      = np.random.default_rng(rng_seed)
         self._cov: np.ndarray | None = None
+        self._corr: np.ndarray | None = None
+        self._calibration: "McCalibration | None" = None
 
     @classmethod
     def from_settings(cls, settings: "Settings") -> "McSampler":
@@ -66,6 +69,33 @@ class McSampler:
                 f"set_cov requires a square matrix, got shape {cov_matrix.shape}"
             )
         self._cov = cov_matrix
+
+    def set_correlation(self, correlation: np.ndarray) -> None:
+        """Load an empirical error correlation for dynamic-sigma sampling."""
+        matrix = np.asarray(correlation, dtype=float)
+        if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+            raise ValueError(
+                "set_correlation requires a square matrix, "
+                f"got shape {matrix.shape}"
+            )
+        if not np.all(np.isfinite(matrix)):
+            raise ValueError("set_correlation requires finite values")
+        if not np.allclose(matrix, matrix.T, atol=1e-8):
+            raise ValueError("set_correlation requires a symmetric matrix")
+        if not np.allclose(np.diag(matrix), 1.0, atol=1e-6):
+            raise ValueError("set_correlation requires a unit diagonal")
+        if np.linalg.eigvalsh(matrix).min() <= 0:
+            raise ValueError("set_correlation requires a positive-definite matrix")
+        self._corr = matrix
+
+    def set_calibration(self, calibration: "McCalibration") -> None:
+        """Load one checkpoint-bound production calibration."""
+        self.set_correlation(calibration.correlation)
+        self._calibration = calibration
+
+    @property
+    def has_calibration(self) -> bool:
+        return self._calibration is not None
 
     def fit_cov(self, residuals: np.ndarray) -> None:
         """Estimate empirical covariance from historical forecast residuals.
@@ -151,7 +181,16 @@ class McSampler:
                 )
         n = len(mu_vec)
 
-        if self._cov is not None:
+        if self._corr is not None:
+            if hour_indices is not None:
+                idx = list(hour_indices)
+                correlation = self._corr[np.ix_(idx, idx)].copy()
+            elif self._corr.shape == (n, n):
+                correlation = self._corr.copy()
+            else:
+                correlation = np.eye(n)
+            Sigma = np.diag(sigma_vec) @ correlation @ np.diag(sigma_vec)
+        elif self._cov is not None:
             if hour_indices is not None:
                 idx = list(hour_indices)
                 Sigma = self._cov[np.ix_(idx, idx)].copy()
@@ -177,7 +216,7 @@ class McSampler:
         self,
         mu_vec: np.ndarray,
         sigma_vec: np.ndarray,
-        max_bias: float = 0.0,
+        max_bias: float | None = None,
         hour_indices: "list[int] | None" = None,
     ) -> np.ndarray:
         """Sample daily high temperatures (degF) with max_bias correction.
@@ -202,6 +241,14 @@ class McSampler:
         -------
         (n_samp,) daily high temperature samples in degF, bias-corrected.
         """
+        if self._calibration is not None:
+            sigma_vec = self._calibration.scale_sigma(
+                sigma_vec, hour_indices=hour_indices
+            )
+            if max_bias is None:
+                max_bias = self._calibration.max_bias_f
+        if max_bias is None:
+            max_bias = 0.0
         sigma_safe   = np.clip(sigma_vec, 0.01, None)
         samples_c    = self._mc_sample(mu_vec, sigma_safe,
                                        hour_indices=hour_indices)
@@ -262,4 +309,3 @@ class McSampler:
         probs["p50_f"] = float(np.percentile(daily_highs, 50))
         probs["p90_f"] = float(np.percentile(daily_highs, 90))
         return probs
-

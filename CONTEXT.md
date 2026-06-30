@@ -97,12 +97,17 @@ _Avoid_: transformer, the model
 forecast for the same hour; what TFT is trained to predict.
 _Avoid_: error, delta
 
-**empirical covariance**: The 48x48 covariance matrix estimated from historical
-residuals across decoder time steps; used by McSampler to capture inter-hour correlations.
-_Avoid_: AR(1), correlation matrix
+**historical residual (hist_temp_error)**: An encoder-only copy of canonical
+temp_error. It is never a decoder input and remains separate from the winsorised target.
+_Avoid_: future error, decoder residual
+
+**empirical error correlation**: The 48x48 correlation matrix estimated from
+standardized validation errors. McSampler combines it with each forecast's calibrated
+dynamic sigma.
+_Avoid_: AR(1), fixed covariance
 
 **McSampler**: The Monte Carlo module that draws n_samp joint residual samples from
-TFT quantiles using the empirical covariance matrix, then maps samples to bucket
+TFT quantiles using empirical error correlation, then maps samples to bucket
 probabilities via temperature reconstruction.
 _Avoid_: MC, sampler
 

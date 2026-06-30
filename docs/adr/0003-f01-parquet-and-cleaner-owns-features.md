@@ -20,6 +20,11 @@ exclusively in `data/storage/cleaner.py`. No other module (model, loop, pipeline
 any feature transform. This enforces the layer boundary: `model/` never touches raw units
 or raw column names.
 
+The model adapter may copy canonical encoder `temp_error` to the explicitly
+encoder-only `hist_temp_error` input and add a decoder placeholder. This is feature-role
+assignment, not meteorological transformation. The target and history-input columns stay
+separate so target winsorisation cannot mutate encoder history.
+
 **Considered option**: Compute features inside `model/pipeline.py` (as in the original
 `tft_step9` script). Rejected because it couples model code to raw data units and makes
 it impossible to validate features independently of the model.

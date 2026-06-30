@@ -399,6 +399,8 @@ def test_training_builder_uses_bootstrap_stores_to_build_one_sample(tmp_path):
     assert frame["Node_ID"].unique().tolist() == ["KLGA"]
     assert frame["local_idx"].tolist() == list(range(120))
     assert frame.iloc[:72]["temp_error"].notna().all()
+    assert frame.iloc[:72]["hist_temp_error"].eq(1.0).all()
+    assert frame.iloc[72:]["hist_temp_error"].eq(0.0).all()
     assert set(frame.iloc[72:]["fxx"].astype(int)) == set(range(1, 49))
     assert frame["decoder_weight"].eq(1.0).all()
 

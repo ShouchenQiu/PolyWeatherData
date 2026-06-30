@@ -16,6 +16,42 @@ def test_max_encoder_length():
     assert MAX_ENCODER_LENGTH == 72
 
 
+def test_history_target_is_not_a_tft_decoder_variable():
+    pf = pytest.importorskip("pytorch_forecasting")
+    values = np.linspace(-1.0, 1.0, 120)
+    frame = pd.DataFrame(
+        {
+            "time_idx": range(120),
+            "group": ["sample"] * 120,
+            "temp_error": values,
+            "hist_temp_error": [
+                float(value) if index < 72 else 0.0
+                for index, value in enumerate(values)
+            ],
+            "known": np.arange(120, dtype=float),
+        }
+    )
+    dataset = pf.TimeSeriesDataSet(
+        frame,
+        time_idx="time_idx",
+        target="temp_error",
+        group_ids=["group"],
+        max_encoder_length=72,
+        max_prediction_length=48,
+        time_varying_known_reals=["known"],
+        time_varying_unknown_reals=["hist_temp_error"],
+    )
+    model = pf.TemporalFusionTransformer.from_dataset(
+        dataset,
+        hidden_size=4,
+        attention_head_size=1,
+        hidden_continuous_size=2,
+    )
+
+    assert "hist_temp_error" in model.encoder_variables
+    assert "hist_temp_error" not in model.decoder_variables
+
+
 # ---------------------------------------------------------------------------
 # TftModel.predict() -- un-residualise regression test
 # ---------------------------------------------------------------------------

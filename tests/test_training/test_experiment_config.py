@@ -55,6 +55,20 @@ def test_versioned_klga_template_has_stable_canonical_hash() -> None:
     assert first.config_hash() == second.config_hash()
 
 
+def test_schema_v2_can_enable_history_target_without_changing_v1_default() -> None:
+    v1_payload = _minimal_template()
+    v1 = ExperimentTemplate.from_dict(v1_payload)
+    v2_payload = _minimal_template()
+    v2_payload["schema_version"] = 2
+    v2_payload["model"]["use_history_target"] = True
+    v2 = ExperimentTemplate.from_dict(v2_payload)
+
+    assert v1.model.use_history_target is False
+    assert "use_history_target" not in v1.to_dict()["model"]
+    assert v2.model.use_history_target is True
+    assert v2.to_dict()["model"]["use_history_target"] is True
+
+
 def test_experiment_template_rejects_workspace_for_another_station() -> None:
     template = ExperimentTemplate.from_json(
         "experiments/klga/tft_optuna_v1.json"

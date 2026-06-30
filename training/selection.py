@@ -16,6 +16,7 @@ from model.mc import McSampler
 from training.catalog import TrainingCatalog
 from training.audit_frames import AuditedFrameCache
 from training.config import ExperimentTemplate, ResolvedTrialSnapshot
+from training.predictions import build_quantile_prediction_frame
 
 
 @dataclass(frozen=True)
@@ -99,11 +100,19 @@ def compute_validation_evidence(
                     (group["p50"] - group["target"]).abs(),
                     group_weights,
                 ),
+                "p50_bias": weighted_mean(
+                    group["p50"] - group["target"],
+                    group_weights,
+                ),
                 "coverage_p10_p90": weighted_mean(
                     (
                         (group["target"] >= group["p10"])
                         & (group["target"] <= group["p90"])
                     ).astype(float),
+                    group_weights,
+                ),
+                "interval_width": weighted_mean(
+                    group["p90"] - group["p10"],
                     group_weights,
                 ),
             }
@@ -112,6 +121,9 @@ def compute_validation_evidence(
     trusted["init_hour"] = trusted["init_time"].dt.hour
     trusted["init_month"] = trusted["init_time"].dt.month
     daily_errors_f: list[float] = []
+    daily_biases_f: list[float] = []
+    raw_daily_errors_f: list[float] = []
+    daily_beats_raw: list[float] = []
     mc_p50_errors_f: list[float] = []
     mc_covered: list[float] = []
     trusted_horizons: list[int] = []
@@ -123,7 +135,13 @@ def compute_validation_evidence(
         actual_c = group["base_temp_c"] + group["target"]
         predicted_high_f = float(predicted_c.max() * 1.8 + 32.0)
         actual_high_f = float(actual_c.max() * 1.8 + 32.0)
-        daily_errors_f.append(abs(predicted_high_f - actual_high_f))
+        daily_error = abs(predicted_high_f - actual_high_f)
+        raw_high_f = float(group["base_temp_c"].max() * 1.8 + 32.0)
+        raw_error = abs(raw_high_f - actual_high_f)
+        daily_errors_f.append(daily_error)
+        daily_biases_f.append(predicted_high_f - actual_high_f)
+        raw_daily_errors_f.append(raw_error)
+        daily_beats_raw.append(float(daily_error < raw_error))
         sigma = (
             (group["p90"] - group["p10"]).to_numpy(dtype=float)
             / (2.0 * 1.2815515655446004)
@@ -140,6 +158,10 @@ def compute_validation_evidence(
 
     return {
         "p50_mae": weighted_mean(p50_error, weights),
+        "p50_bias": weighted_mean(
+            trusted["p50"] - trusted["target"],
+            weights,
+        ),
         "pinball": pinball,
         "coverage_p10_p90": weighted_mean(
             (
@@ -164,6 +186,9 @@ def compute_validation_evidence(
         "daily_high": {
             "cycles": len(daily_errors_f),
             "p50_mae_f": float(np.mean(daily_errors_f)),
+            "p50_bias_f": float(np.mean(daily_biases_f)),
+            "raw_mae_f": float(np.mean(raw_daily_errors_f)),
+            "beats_raw_cycle_fraction": float(np.mean(daily_beats_raw)),
         },
         "mc_calibration": {
             "sample_count": mc_samples,
@@ -320,12 +345,6 @@ class TopKEvidenceBuilder:
         context: ValidationEvidenceContext,
     ) -> dict[str, object]:
         """Reload a trial checkpoint and evaluate only the audited val frame."""
-        import torch
-        from pytorch_forecasting import (
-            TemporalFusionTransformer,
-            TimeSeriesDataSet,
-        )
-
         study = self._catalog.get_study(context.study_id)
         workspace = Path(study.workspace_path)
         dataset_artifact = next(
@@ -359,71 +378,12 @@ class TopKEvidenceBuilder:
         if cached is None:
             raise RuntimeError("audited validation frame is missing or stale")
         frame = cached[0].copy()
-        validation = TimeSeriesDataSet.from_dataset(
-            training,
-            frame,
-            predict=True,
-            stop_randomization=True,
-        )
-        loader = validation.to_dataloader(
-            train=False,
+        prediction_frame = build_quantile_prediction_frame(
+            checkpoint_path=context.checkpoint_path,
+            training_dataset=training,
+            frame=frame,
             batch_size=int(
                 context.trial_snapshot.parameters.get("batch_size", 4)
             ),
-            num_workers=0,
         )
-        model = TemporalFusionTransformer.load_from_checkpoint(
-            context.checkpoint_path
-        )
-        prediction = model.predict(
-            loader,
-            mode="quantiles",
-            return_y=True,
-            return_index=True,
-            trainer_kwargs={
-                "accelerator": "gpu" if torch.cuda.is_available() else "cpu",
-                "devices": 1,
-                "logger": False,
-                "enable_progress_bar": True,
-            },
-        )
-        quantiles = prediction.output.detach().cpu().numpy()
-        targets = prediction.y[0].detach().cpu().numpy()
-        weights = prediction.y[1].detach().cpu().numpy()
-        if quantiles.ndim != 3 or quantiles.shape[-1] != 3:
-            raise RuntimeError(
-                f"unexpected quantile prediction shape: {quantiles.shape}"
-            )
-        groups = {
-            str(key): group.sort_values("local_idx").tail(quantiles.shape[1])
-            for key, group in frame.groupby("init_time_str", sort=True)
-        }
-        index = prediction.index
-        group_keys = (
-            [str(value) for value in index["init_time_str"].tolist()]
-            if index is not None and "init_time_str" in index
-            else sorted(groups)
-        )
-        rows: list[pd.DataFrame] = []
-        for position, group_key in enumerate(group_keys):
-            metadata = groups.get(group_key)
-            if metadata is None or len(metadata) != quantiles.shape[1]:
-                raise RuntimeError(
-                    f"cannot align validation prediction group {group_key}"
-                )
-            rows.append(
-                pd.DataFrame(
-                    {
-                        "init_time": pd.to_datetime(group_key, utc=True),
-                        "valid_time": metadata["valid_time"].to_numpy(),
-                        "fxx": metadata["fxx"].to_numpy(),
-                        "target": targets[position],
-                        "p10": quantiles[position, :, 0],
-                        "p50": quantiles[position, :, 1],
-                        "p90": quantiles[position, :, 2],
-                        "base_temp_c": metadata["TMP_2m"].to_numpy(),
-                        "weight": weights[position],
-                    }
-                )
-            )
-        return compute_validation_evidence(pd.concat(rows, ignore_index=True))
+        return compute_validation_evidence(prediction_frame)

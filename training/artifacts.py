@@ -10,7 +10,7 @@ from typing import Any
 
 import pandas as pd
 
-from model.features import TARGET
+from model.features import HISTORICAL_TARGET_FEATURE, TARGET
 from training.config import ExperimentTemplate
 
 
@@ -164,7 +164,9 @@ def build_model_contract(
     settings: Any,
 ) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": (
+            2 if HISTORICAL_TARGET_FEATURE in unknown else 1
+        ),
         "station_id": station_id,
         "target": TARGET,
         "known_reals": list(known),

@@ -22,6 +22,10 @@ _CANDIDATE_FILES = (
     "model_contract.json",
     "candidate_lineage.json",
 )
+_V2_CALIBRATION_FILES = (
+    "mc_calibration.npz",
+    "mc_calibration.json",
+)
 
 
 def import_candidate_model(
@@ -49,6 +53,18 @@ def import_candidate_model(
                 )
             source_version_dir = version_dirs[0]
             _require_candidate_files(source_version_dir)
+            contract = json.loads(
+                (source_version_dir / "model_contract.json").read_text(
+                    encoding="ascii"
+                )
+            )
+            if int(contract.get("schema_version", 0)) >= 2:
+                from model.mc_calibration import McCalibration
+
+                McCalibration.load(
+                    source_version_dir,
+                    source_version_dir / "model.ckpt",
+                )
             lineage = json.loads(
                 (source_version_dir / "candidate_lineage.json").read_text(
                     encoding="ascii"
@@ -115,7 +131,13 @@ def promote_model_version(
 
 
 def _require_candidate_files(version_dir: Path) -> None:
-    for name in _CANDIDATE_FILES:
+    required_files = list(_CANDIDATE_FILES)
+    contract_path = version_dir / "model_contract.json"
+    if contract_path.exists():
+        contract = json.loads(contract_path.read_text(encoding="ascii"))
+        if int(contract.get("schema_version", 0)) >= 2:
+            required_files.extend(_V2_CALIBRATION_FILES)
+    for name in required_files:
         if not (version_dir / name).exists():
             raise FileNotFoundError(f"candidate package missing {name}")
 

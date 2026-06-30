@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from model.mc import McSampler
+from model.mc_calibration import McCalibration
 
 
 # -----------------------------------------------------------------------
@@ -59,6 +60,52 @@ def test_fit_cov_known_values():
     s.fit_cov(residuals)
     expected = np.cov(residuals.T)
     np.testing.assert_allclose(s._cov, expected)
+
+
+def test_empirical_correlation_preserves_dynamic_sigma():
+    corr = np.array([[1.0, 0.75], [0.75, 1.0]])
+    sampler = McSampler(n_samp=80_000, rng_seed=7)
+    sampler.set_correlation(corr)
+
+    samples = sampler._mc_sample(
+        np.zeros(2),
+        np.array([0.5, 2.0]),
+    )
+    observed = np.cov(samples.T)
+
+    assert observed[0, 0] == pytest.approx(0.25, rel=0.04)
+    assert observed[1, 1] == pytest.approx(4.0, rel=0.04)
+    assert np.corrcoef(samples.T)[0, 1] == pytest.approx(0.75, abs=0.02)
+
+
+def test_versioned_calibration_applies_sigma_scale_and_default_max_bias():
+    calibration = McCalibration(
+        correlation=np.eye(48),
+        sigma_scales=np.full(5, 2.0),
+        max_bias_f=1.5,
+        model_sha256="a" * 64,
+        fit_split="val",
+        fit_start="2026-04-01",
+        fit_end="2026-04-30",
+        sample_count=100,
+    )
+    calibrated = McSampler(n_samp=50_000, rng_seed=11)
+    calibrated.set_calibration(calibration)
+    uncalibrated = McSampler(n_samp=50_000, rng_seed=11)
+
+    calibrated_samples = calibrated.sample_daily_high(
+        np.array([10.0]), np.array([1.0]), hour_indices=[0]
+    )
+    uncalibrated_samples = uncalibrated.sample_daily_high(
+        np.array([10.0]), np.array([1.0]), hour_indices=[0]
+    )
+
+    assert calibrated_samples.std() == pytest.approx(
+        2.0 * uncalibrated_samples.std(), rel=0.02
+    )
+    assert np.median(calibrated_samples) == pytest.approx(
+        np.median(uncalibrated_samples) - 1.5, abs=0.08
+    )
 
 
 # -----------------------------------------------------------------------
@@ -421,4 +468,3 @@ def test_mc_sample_raises_when_hour_indices_has_duplicates():
     sigma = np.ones(3)
     with pytest.raises(ValueError, match="hour_indices"):
         s._mc_sample(mu, sigma, hour_indices=[0, 1, 1])
-

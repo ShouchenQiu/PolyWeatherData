@@ -28,6 +28,8 @@ def test_build_remote_training_bundle_includes_training_code_and_excludes_produc
     assert "training/config.py" in members
     assert "training/dataset.py" in members
     assert "training/package.py" in members
+    assert "training/mc_calibration.py" in members
+    assert "training/predictions.py" in members
     assert "training/trainer.py" in members
     assert "training/workspace.py" in members
     assert "model/contract.py" in members
@@ -52,6 +54,7 @@ def test_build_remote_training_bundle_includes_training_code_and_excludes_produc
     assert manifest["bundle_kind"] == "training_factory_lab"
     assert manifest["supported_commands"] == [
         "python -m scripts.train_tft",
+        "python -m scripts.evaluate_validation_checkpoint",
         "python -m scripts.package_candidate_model",
     ]
     assert "training/trainer.py" in manifest["source_files"]

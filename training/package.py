@@ -20,6 +20,10 @@ _CANDIDATE_FILES = (
     "model_contract.json",
     "candidate_lineage.json",
 )
+_V2_CALIBRATION_FILES = (
+    "mc_calibration.npz",
+    "mc_calibration.json",
+)
 
 
 def package_candidate_model(
@@ -31,7 +35,13 @@ def package_candidate_model(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     package_path = artifact_dir / f"{version}.tar.gz"
     version_dir = root / "model_store" / version
-    for name in _CANDIDATE_FILES:
+    contract_path = version_dir / "model_contract.json"
+    required_files = list(_CANDIDATE_FILES)
+    if contract_path.exists():
+        contract = json.loads(contract_path.read_text(encoding="ascii"))
+        if int(contract.get("schema_version", 0)) >= 2:
+            required_files.extend(_V2_CALIBRATION_FILES)
+    for name in required_files:
         path = version_dir / name
         if not path.exists():
             raise FileNotFoundError(

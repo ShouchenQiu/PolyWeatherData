@@ -77,6 +77,27 @@ def test_target_is_temp_error() -> None:
     assert TARGET == "temp_error"
 
 
+def test_history_target_feature_is_encoder_only_copy() -> None:
+    import pandas as pd
+
+    from model.features import (
+        HISTORICAL_TARGET_FEATURE,
+        add_decoder_history_features,
+        add_encoder_history_features,
+    )
+
+    encoder = add_encoder_history_features(
+        pd.DataFrame({"temp_error": [1.25, -0.5]})
+    )
+    decoder = add_decoder_history_features(
+        pd.DataFrame({"temp_error": [99.0, -99.0]})
+    )
+
+    assert HISTORICAL_TARGET_FEATURE == "hist_temp_error"
+    assert encoder[HISTORICAL_TARGET_FEATURE].tolist() == [1.25, -0.5]
+    assert decoder[HISTORICAL_TARGET_FEATURE].tolist() == [0.0, 0.0]
+
+
 # ---------------------------------------------------------------------------
 # Derived column sets
 # ---------------------------------------------------------------------------
@@ -124,10 +145,16 @@ def test_tft_known_reals_starts_with_time_encoding_then_hrrr() -> None:
         assert col in TFT_KNOWN_REALS, f"{col} missing from TFT_KNOWN_REALS"
 
 
-def test_tft_unknown_reals_equals_obs_unknown_reals() -> None:
-    from model.features import OBS_UNKNOWN_REALS, TFT_UNKNOWN_REALS
-    assert TFT_UNKNOWN_REALS == OBS_UNKNOWN_REALS
+def test_tft_unknown_reals_adds_history_target_to_observations() -> None:
+    from model.features import (
+        HISTORICAL_TARGET_FEATURE,
+        OBS_UNKNOWN_REALS,
+        TARGET,
+        TFT_UNKNOWN_REALS,
+    )
+    assert TFT_UNKNOWN_REALS == OBS_UNKNOWN_REALS + [HISTORICAL_TARGET_FEATURE]
     assert TFT_UNKNOWN_REALS is not OBS_UNKNOWN_REALS
+    assert TARGET not in TFT_UNKNOWN_REALS
 
 
 def test_tft_known_reals_has_no_duplicates() -> None:

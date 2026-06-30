@@ -32,6 +32,8 @@ _SOURCE_FILES = (
     "model/__init__.py",
     "model/features.py",
     "model/contract.py",
+    "model/mc.py",
+    "model/mc_calibration.py",
     "model/tft.py",
     "model/store/__init__.py",
     "model/store/registry.py",
@@ -41,6 +43,9 @@ _SOURCE_FILES = (
     "training/config.py",
     "training/dataset.py",
     "training/package.py",
+    "training/mc_calibration.py",
+    "training/predictions.py",
+    "training/selection.py",
     "training/trainer.py",
     "training/workspace.py",
     "scripts/__init__.py",
@@ -49,6 +54,7 @@ _SOURCE_FILES = (
     "scripts/run_final_training.py",
     "scripts/validate_training_study.py",
     "scripts/train_tft.py",
+    "scripts/evaluate_validation_checkpoint.py",
 )
 
 
@@ -79,6 +85,7 @@ def build_training_bundle(
             "git_status_short": _git_output(root, ["git", "status", "--short"]),
             "supported_commands": [
                 "python -m scripts.train_tft",
+                "python -m scripts.evaluate_validation_checkpoint",
                 "python -m scripts.package_candidate_model",
             ],
             "included_roots": [

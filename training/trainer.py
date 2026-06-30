@@ -32,7 +32,12 @@ import pandas as pd
 
 from config.settings import Settings
 from config.stations import STATIONS
-from model.features import TARGET, TFT_KNOWN_REALS, TFT_UNKNOWN_REALS
+from model.features import (
+    OBS_UNKNOWN_REALS,
+    TARGET,
+    TFT_KNOWN_REALS,
+    TFT_UNKNOWN_REALS,
+)
 from training.artifacts import write_training_artifacts
 from training.config import (
     ExperimentTemplate,
@@ -40,6 +45,11 @@ from training.config import (
 )
 from training.dataset import DECODER_WEIGHT_COLUMN
 from training.experiment import FinalEvaluationApproval, ValidationExecutionLimits
+from training.mc_calibration import (
+    cross_validate_mc_calibration,
+    fit_mc_calibration,
+)
+from training.predictions import build_quantile_prediction_frame
 from training.workspace import TrainingWorkspace
 
 if TYPE_CHECKING:
@@ -63,6 +73,7 @@ def train_workspace(
     station_id: str,
     version: str,
     experiment_config: Path | str | None = None,
+    trial_parameters: dict[str, Any] | None = None,
     train_fn: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run one audited train/validation execution without touching test."""
@@ -76,6 +87,7 @@ def train_workspace(
         station_id=station_id,
         version=version,
         experiment_config=experiment_config,
+        trial_parameters=trial_parameters,
     )
     workspace.write_json(
         workspace.run_dir / "validation_result.json",
@@ -563,7 +575,12 @@ class TftTrainer:
 
         # -- Build TimeSeriesDataSet -----------------------------------------
         known  = [c for c in _KNOWN_REALS  if c in df_train.columns]
-        unk    = [c for c in _UNKNOWN_REALS if c in df_train.columns]
+        unknown_contract = (
+            _UNKNOWN_REALS
+            if self._settings.tft_use_history_target
+            else OBS_UNKNOWN_REALS
+        )
+        unk    = [c for c in unknown_contract if c in df_train.columns]
         training = TimeSeriesDataSet(
             df_train,
             time_idx                          = "local_idx",
@@ -766,6 +783,54 @@ class TftTrainer:
                 raise PermissionError(
                     "final candidate requires a versioned experiment template"
                 )
+            calibration_artifacts: list[Path] = []
+            if self._settings.tft_use_history_target:
+                prediction_frame = self._validation_prediction_frame(
+                    best_ckpt,
+                    training,
+                    df_val,
+                    batch_size,
+                )
+                prediction_path = ckpt_dir / "validation_predictions.parquet"
+                prediction_frame.to_parquet(prediction_path, index=False)
+                calibration = fit_mc_calibration(
+                    prediction_frame,
+                    best_ckpt,
+                )
+                calibration_paths = list(calibration.save(ckpt_dir))
+                validation_cycles = int(
+                    prediction_frame["init_time"].nunique()
+                )
+                if validation_cycles >= 4:
+                    calibration_evidence: dict[str, Any] = (
+                        cross_validate_mc_calibration(
+                            prediction_frame,
+                            best_ckpt,
+                            folds=4,
+                        )
+                    )
+                else:
+                    calibration_evidence = {
+                        "status": "insufficient_cycles",
+                        "cycles": validation_cycles,
+                        "required_cycles": 4,
+                    }
+                calibration_evidence_path = (
+                    ckpt_dir / "mc_calibration_evidence.json"
+                )
+                calibration_evidence_path.write_text(
+                    json.dumps(
+                        calibration_evidence,
+                        indent=2,
+                        sort_keys=True,
+                    ),
+                    encoding="ascii",
+                )
+                result["mc_calibration_evidence"] = calibration_evidence
+                calibration_artifacts = calibration_paths + [
+                    calibration_evidence_path,
+                    prediction_path,
+                ]
             extra_artifacts = write_training_artifacts(
                 output_dir=ckpt_dir,
                 station_id=station_id,
@@ -786,6 +851,7 @@ class TftTrainer:
                 num_workers=self._num_workers,
                 settings=self._settings,
             )
+            extra_artifacts.extend(calibration_artifacts)
             if final_approval is None or final_snapshot is None:
                 raise PermissionError(
                     "candidate lineage requires final approval and snapshot"
@@ -949,6 +1015,20 @@ class TftTrainer:
                 )
             )
         return tuple(frames)
+
+    def _validation_prediction_frame(
+        self,
+        checkpoint_path: Path,
+        training_dataset: Any,
+        frame: pd.DataFrame,
+        batch_size: int,
+    ) -> pd.DataFrame:
+        return build_quantile_prediction_frame(
+            checkpoint_path=checkpoint_path,
+            training_dataset=training_dataset,
+            frame=frame,
+            batch_size=batch_size,
+        )
 
     @staticmethod
     def _init_times(start_date: str, end_date: str) -> list[pd.Timestamp]:

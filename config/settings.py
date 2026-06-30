@@ -119,6 +119,7 @@ class Settings:
     tft_target_winsor: float = 8.0
     tft_max_encoder_length: int = 72
     tft_max_prediction_length: int = 48
+    tft_use_history_target: bool = False
 
     # Risk
     max_exit_fraction:  float = 1.0

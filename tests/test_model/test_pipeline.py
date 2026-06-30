@@ -234,6 +234,21 @@ def test_run_encoder_df_has_time_idx_column():
     assert "time_idx" in enc_df_arg.columns, "encoder_df must have time_idx column"
 
 
+def test_run_passes_history_target_only_as_encoder_signal():
+    mc = McSampler(n_samp=200, rng_seed=0)
+    tft = _make_tft_mock()
+    dm = _make_data_mgr(_INIT_TIME)
+    dm.build_encoder_obs_window.return_value["temp_error"] = np.arange(72)
+
+    ModelPipeline(tft=tft, mc=mc, data_mgr=dm).run(
+        KLGA, _INIT_TIME, _BUCKETS
+    )
+
+    encoder, decoder = tft.predict.call_args.args
+    assert encoder["hist_temp_error"].tolist() == list(range(72))
+    assert decoder["hist_temp_error"].eq(0.0).all()
+
+
 def test_run_encoder_df_has_seasonal_columns():
     """encoder_df passed to tft.predict must have month, day_of_year, hour_of_day."""
     mc       = McSampler(n_samp=200, rng_seed=0)

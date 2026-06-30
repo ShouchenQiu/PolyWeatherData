@@ -111,9 +111,13 @@ class BotManager:
             ) from exc
         self.mc       = McSampler(n_samp=settings.mc_n_samp,
                                   rng_seed=settings.mc_rng_seed)
-        cov = registry.load_covariance()
-        if cov is not None:
-            self.mc.set_cov(cov)
+        calibration = registry.load_mc_calibration()
+        if calibration is not None:
+            self.mc.set_calibration(calibration)
+        else:
+            cov = registry.load_covariance()
+            if cov is not None:
+                self.mc.set_cov(cov)
         self.pipeline = ModelPipeline(tft=tft, mc=self.mc,
                                       data_mgr=self.data_mgr, registry=registry)
 

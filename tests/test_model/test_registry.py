@@ -8,6 +8,7 @@ from loguru import logger
 
 from db.schema import DbClient
 from model.store.registry import ModelRegistry
+from model.mc_calibration import McCalibration
 
 
 # -----------------------------------------------------------------------
@@ -113,6 +114,47 @@ def test_load_covariance_returns_none_when_no_active_version(registry):
         logger.remove(sink_id)
     assert result is None
     assert any("covariance" in m.lower() for m in messages)
+
+
+def test_load_mc_calibration_requires_and_loads_v2_bundle(registry, tmp_path):
+    ckpt = tmp_path / "model.ckpt"
+    ckpt.write_bytes(b"model")
+    registry.publish("v2", ckpt, {"train_mae": 0.5, "test_mae": 0.6})
+    version_dir = registry.store_dir / "v2"
+    (version_dir / "model_contract.json").write_text(
+        '{"schema_version": 2}',
+        encoding="ascii",
+    )
+    stored_checkpoint = version_dir / "model.ckpt"
+    McCalibration(
+        correlation=np.eye(48),
+        sigma_scales=np.ones(5),
+        max_bias_f=0.5,
+        model_sha256=McCalibration.sha256(stored_checkpoint),
+        fit_split="val",
+        fit_start="2026-04-01",
+        fit_end="2026-04-30",
+        sample_count=100,
+    ).save(version_dir)
+
+    calibration = registry.load_mc_calibration()
+
+    assert calibration is not None
+    assert calibration.max_bias_f == pytest.approx(0.5)
+
+
+def test_load_mc_calibration_fails_closed_for_incomplete_v2(registry, tmp_path):
+    ckpt = tmp_path / "model.ckpt"
+    ckpt.write_bytes(b"model")
+    registry.publish("v2", ckpt, {"train_mae": 0.5, "test_mae": 0.6})
+    version_dir = registry.store_dir / "v2"
+    (version_dir / "model_contract.json").write_text(
+        '{"schema_version": 2}',
+        encoding="ascii",
+    )
+
+    with pytest.raises(FileNotFoundError, match="mc_calibration"):
+        registry.load_mc_calibration()
 
 
 def test_load_covariance_returns_none_when_file_absent(registry, db, tmp_path):

@@ -36,6 +36,7 @@ class FakeBuilder:
                     "fxx": max(1, i - 71),
                     "TMP_2m": 5.0,
                     "temp_error": 1.0,
+                    "hist_temp_error": 1.0 if i < 72 else 0.0,
                     "decoder_weight": 1.0,
                     "split": split,
                 }
@@ -176,6 +177,31 @@ def _install_training_fakes(monkeypatch):
     monkeypatch.setitem(sys.modules, "pytorch_forecasting.data", data_mod)
     monkeypatch.setitem(sys.modules, "pytorch_forecasting.data.encoders", encoders_mod)
 
+    def prediction_frame(_self, _checkpoint, _training, frame, _batch_size):
+        decoder = frame.sort_values("local_idx").tail(48)
+        return pd.DataFrame(
+            {
+                "init_time": pd.to_datetime(
+                    decoder["init_time_str"], utc=True
+                ),
+                "valid_time": decoder["valid_time"].to_numpy(),
+                "fxx": decoder["fxx"].to_numpy(),
+                "target": decoder["temp_error"].to_numpy(),
+                "p10": decoder["temp_error"].to_numpy() - 1.0,
+                "p50": decoder["temp_error"].to_numpy(),
+                "p90": decoder["temp_error"].to_numpy() + 1.0,
+                "base_temp_c": decoder["TMP_2m"].to_numpy(),
+                "weight": decoder["decoder_weight"].to_numpy(),
+            }
+        )
+
+    monkeypatch.setattr(
+        TftTrainer,
+        "_validation_prediction_frame",
+        prediction_frame,
+        raising=False,
+    )
+
 
 def _final_approval(
     snapshot: ResolvedTrialSnapshot | None = None,
@@ -220,7 +246,10 @@ def _trial_snapshot(
     )
 
 
-def _experiment_template(**model_overrides) -> ExperimentTemplate:
+def _experiment_template(
+    use_history_target: bool = False,
+    **model_overrides,
+) -> ExperimentTemplate:
     payload = json.loads(
         Path("experiments/klga/tft_optuna_v1.json").read_text(encoding="ascii")
     )
@@ -229,6 +258,9 @@ def _experiment_template(**model_overrides) -> ExperimentTemplate:
         "val": ["2026-01-02", "2026-01-02"],
         "test": ["2026-01-03", "2026-01-03"],
     }
+    if use_history_target:
+        payload["schema_version"] = 2
+        payload["model"]["use_history_target"] = True
     payload["model"].update(model_overrides)
     return ExperimentTemplate.from_dict(payload)
 
@@ -448,6 +480,75 @@ def test_validation_execution_never_loads_test_or_publishes_candidate(
     assert "test_mae" not in result
     assert result["best_val_loss"] == 0.25
     assert registry.publish_kwargs is None
+
+
+def test_target_winsor_does_not_mutate_history_target_feature(
+    tmp_path,
+    monkeypatch,
+):
+    _install_training_fakes(monkeypatch)
+
+    class ExtremeBuilder(FakeBuilder):
+        def build_frame(self, station, init_times, split):
+            frame = super().build_frame(station, init_times, split)
+            frame["temp_error"] = 12.0
+            frame["hist_temp_error"] = 12.0
+            return frame
+
+    trainer = TftTrainer(
+        store=None,
+        registry=FakeRegistry(),
+        output_dir=tmp_path / "checkpoints",
+        settings=Settings(
+            data_store_dir=tmp_path / "data",
+            tft_target_winsor=8.0,
+        ),
+        dataset_builder=ExtremeBuilder(),
+        station_config=STATIONS["KLGA"],
+    )
+
+    trainer.run_validation(station_id="KLGA", execution_id="winsor")
+
+    training_frame = FakeTimeSeriesDataSet.created_train_frames[0]
+    assert training_frame["temp_error"].eq(8.0).all()
+    assert training_frame["hist_temp_error"].eq(12.0).all()
+
+
+def test_history_target_experiment_flag_controls_tft_inputs(
+    tmp_path,
+    monkeypatch,
+):
+    _install_training_fakes(monkeypatch)
+    baseline = TftTrainer(
+        store=None,
+        registry=FakeRegistry(),
+        output_dir=tmp_path / "baseline",
+        settings=Settings(data_store_dir=tmp_path / "data-a"),
+        dataset_builder=FakeBuilder(),
+        station_config=STATIONS["KLGA"],
+        experiment_config=_experiment_template(use_history_target=False),
+    )
+    baseline.run_validation(station_id="KLGA", execution_id="a")
+    baseline_unknown = FakeTimeSeriesDataSet.created_train_kwargs[-1][
+        "time_varying_unknown_reals"
+    ]
+
+    residual = TftTrainer(
+        store=None,
+        registry=FakeRegistry(),
+        output_dir=tmp_path / "residual",
+        settings=Settings(data_store_dir=tmp_path / "data-b"),
+        dataset_builder=FakeBuilder(),
+        station_config=STATIONS["KLGA"],
+        experiment_config=_experiment_template(use_history_target=True),
+    )
+    residual.run_validation(station_id="KLGA", execution_id="b")
+    residual_unknown = FakeTimeSeriesDataSet.created_train_kwargs[-1][
+        "time_varying_unknown_reals"
+    ]
+
+    assert "hist_temp_error" not in baseline_unknown
+    assert "hist_temp_error" in residual_unknown
 
 
 def test_smoke_execution_applies_hard_training_limits(
@@ -681,6 +782,8 @@ def test_approved_final_evaluates_test_and_publishes_inactive_candidate(
     )
     builder = FakeBuilder()
     registry = FakeRegistry()
+    experiment = _experiment_template(use_history_target=True)
+    snapshot = _trial_snapshot(experiment)
     monkeypatch.setattr(TftTrainer, "_eval_mae", lambda *args, **kwargs: 1.23)
     trainer = TftTrainer(
         store=None,
@@ -689,20 +792,29 @@ def test_approved_final_evaluates_test_and_publishes_inactive_candidate(
         settings=settings,
         dataset_builder=builder,
         station_config=STATIONS["KLGA"],
-        experiment_config=_experiment_template(),
+        experiment_config=experiment,
     )
-    approval = _final_approval()
+    approval = _final_approval(snapshot)
 
     result = trainer.run_final(
         station_id="KLGA",
         version="candidate-v1",
         approval=approval,
-        trial_snapshot=_trial_snapshot(),
+        trial_snapshot=snapshot,
     )
 
     assert [call[3] for call in builder.calls] == ["train", "val", "test"]
     assert result["test_mae"] == 1.23
     assert registry.publish_kwargs["activate"] is False
+    artifact_names = {
+        path.name for path in registry.publish_kwargs["extra_artifacts"]
+    }
+    assert {
+        "mc_calibration.npz",
+        "mc_calibration.json",
+        "mc_calibration_evidence.json",
+        "validation_predictions.parquet",
+    } <= artifact_names
 
 
 def test_final_replays_the_selected_trial_parameters(tmp_path, monkeypatch):

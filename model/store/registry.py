@@ -214,6 +214,31 @@ class ModelRegistry:
     # Max-bias calibration
     # ------------------------------------------------------------------
 
+    def load_mc_calibration(self, version: str | None = None):
+        """Load a v2 checkpoint-bound MC calibration; v1 returns None."""
+        from model.mc_calibration import McCalibration
+
+        if version is None:
+            version = self._read_active_version()
+            if version is None:
+                row = self._db_latest_row()
+                version = row["version"] if row else None
+        if version is None:
+            return None
+        version_dir = self.store_dir / version
+        contract_path = version_dir / "model_contract.json"
+        if not contract_path.exists():
+            raise FileNotFoundError(
+                f"model_contract.json not found for version {version!r}"
+            )
+        contract = json.loads(contract_path.read_text(encoding="ascii"))
+        if int(contract.get("schema_version", 0)) < 2:
+            return None
+        return McCalibration.load(
+            version_dir,
+            version_dir / "model.ckpt",
+        )
+
     def store_max_bias(self, station_id: str, max_bias: float) -> None:
         """Persist per-station max_bias correction."""
         self.db.execute(

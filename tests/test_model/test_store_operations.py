@@ -4,11 +4,19 @@ import json
 import tarfile
 from pathlib import Path
 
+import pytest
+import numpy as np
+
 from db.schema import DbClient
+from model.mc_calibration import McCalibration
 from model.store.operations import import_candidate_model, promote_model_version
 
 
-def _make_candidate_package(tmp_path: Path, version: str = "candidate_v1") -> Path:
+def _make_candidate_package(
+    tmp_path: Path,
+    version: str = "candidate_v1",
+    contract_schema: int = 1,
+) -> Path:
     root = tmp_path / "src"
     version_dir = root / "model_store" / version
     version_dir.mkdir(parents=True)
@@ -17,7 +25,7 @@ def _make_candidate_package(tmp_path: Path, version: str = "candidate_v1") -> Pa
     (version_dir / "training_metadata.json").write_text("{}", encoding="ascii")
     (version_dir / "experiment_config.json").write_text("{}", encoding="ascii")
     (version_dir / "model_contract.json").write_text(
-        json.dumps({"schema_version": 1}),
+        json.dumps({"schema_version": contract_schema}),
         encoding="ascii",
     )
     (version_dir / "candidate_lineage.json").write_text(
@@ -50,6 +58,67 @@ def _make_candidate_package(tmp_path: Path, version: str = "candidate_v1") -> Pa
         for path in sorted(version_dir.rglob("*")):
             tar.add(path, arcname=path.relative_to(root).as_posix())
     return package
+
+
+def test_import_rejects_v2_candidate_without_mc_calibration(tmp_path):
+    package = _make_candidate_package(
+        tmp_path,
+        version="candidate_v2",
+        contract_schema=2,
+    )
+
+    with pytest.raises(FileNotFoundError, match="mc_calibration"):
+        import_candidate_model(
+            package,
+            tmp_path / "model_store",
+            tmp_path / "polyweather.db",
+        )
+
+
+def test_import_rejects_v2_calibration_checkpoint_mismatch(tmp_path):
+    root = tmp_path / "src"
+    version_dir = root / "model_store" / "candidate_v2"
+    version_dir.mkdir(parents=True)
+    for name in (
+        "training_dataset.pkl",
+        "training_metadata.json",
+        "experiment_config.json",
+    ):
+        (version_dir / name).write_text(name, encoding="ascii")
+    (version_dir / "model.ckpt").write_bytes(b"actual-checkpoint")
+    (version_dir / "model_contract.json").write_text(
+        json.dumps({"schema_version": 2}),
+        encoding="ascii",
+    )
+    (version_dir / "candidate_lineage.json").write_text(
+        json.dumps({"state": "inactive/review_required"}),
+        encoding="ascii",
+    )
+    (version_dir / "meta.json").write_text(
+        json.dumps({"metrics": {}, "created_at": ""}),
+        encoding="ascii",
+    )
+    McCalibration(
+        correlation=np.eye(48),
+        sigma_scales=np.ones(5),
+        max_bias_f=0.0,
+        model_sha256="0" * 64,
+        fit_split="val",
+        fit_start="2026-04-01",
+        fit_end="2026-04-30",
+        sample_count=100,
+    ).save(version_dir)
+    package = tmp_path / "candidate_v2.tar.gz"
+    with tarfile.open(package, "w:gz") as tar:
+        for path in sorted(version_dir.rglob("*")):
+            tar.add(path, arcname=path.relative_to(root).as_posix())
+
+    with pytest.raises(ValueError, match="checkpoint hash mismatch"):
+        import_candidate_model(
+            package,
+            tmp_path / "model_store",
+            tmp_path / "polyweather.db",
+        )
 
 
 def test_import_candidate_model_copies_version_and_writes_local_db_without_active(tmp_path):
