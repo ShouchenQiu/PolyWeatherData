@@ -9,9 +9,10 @@ from pathlib import Path
 from training.audit_frames import AuditedFrameCache
 from training.config import ExperimentTemplate
 from training.mc_calibration import (
-    cross_validate_mc_calibration,
+    evaluate_mc_calibration_oof,
     fit_mc_calibration,
 )
+from config.stations import STATIONS
 from training.predictions import build_quantile_prediction_frame
 from training.selection import compute_validation_evidence
 from training.workspace import TrainingWorkspace
@@ -28,6 +29,7 @@ def _cli() -> None:
 
     workspace = TrainingWorkspace(args.run_dir)
     template = ExperimentTemplate.from_json(args.experiment_config)
+    station_timezone = STATIONS[template.station].timezone
     version_dir = workspace.checkpoints_dir / args.version
     checkpoints = sorted(version_dir.glob("tft_best*.ckpt"))
     if len(checkpoints) != 1:
@@ -61,18 +63,28 @@ def _cli() -> None:
         "version": args.version,
         "checkpoint_path": str(checkpoints[0]),
         "prediction_path": str(prediction_path),
-        "raw_validation": compute_validation_evidence(prediction_frame),
+        "raw_validation": compute_validation_evidence(
+            prediction_frame,
+            station_timezone=station_timezone,
+        ),
     }
     if args.fit_mc:
-        result["cross_validated_mc"] = cross_validate_mc_calibration(
+        cross_validated, mc_predictions = evaluate_mc_calibration_oof(
             prediction_frame,
             checkpoints[0],
+            station_timezone=station_timezone,
             folds=4,
             mc_samples=args.mc_samples,
+        )
+        result["cross_validated_mc"] = cross_validated
+        mc_predictions.to_parquet(
+            version_dir / "mc_calibration_predictions.parquet",
+            index=False,
         )
         calibration = fit_mc_calibration(
             prediction_frame,
             checkpoints[0],
+            station_timezone=station_timezone,
             mc_samples=args.mc_samples,
         )
         calibration.save(version_dir)

@@ -36,7 +36,6 @@ class FakeBuilder:
                     "fxx": max(1, i - 71),
                     "TMP_2m": 5.0,
                     "temp_error": 1.0,
-                    "hist_temp_error": 1.0 if i < 72 else 0.0,
                     "decoder_weight": 1.0,
                     "split": split,
                 }
@@ -246,10 +245,7 @@ def _trial_snapshot(
     )
 
 
-def _experiment_template(
-    use_history_target: bool = False,
-    **model_overrides,
-) -> ExperimentTemplate:
+def _experiment_template(**model_overrides) -> ExperimentTemplate:
     payload = json.loads(
         Path("experiments/klga/tft_optuna_v1.json").read_text(encoding="ascii")
     )
@@ -258,9 +254,6 @@ def _experiment_template(
         "val": ["2026-01-02", "2026-01-02"],
         "test": ["2026-01-03", "2026-01-03"],
     }
-    if use_history_target:
-        payload["schema_version"] = 2
-        payload["model"]["use_history_target"] = True
     payload["model"].update(model_overrides)
     return ExperimentTemplate.from_dict(payload)
 
@@ -482,7 +475,7 @@ def test_validation_execution_never_loads_test_or_publishes_candidate(
     assert registry.publish_kwargs is None
 
 
-def test_target_winsor_does_not_mutate_history_target_feature(
+def test_target_winsor_clips_training_target(
     tmp_path,
     monkeypatch,
 ):
@@ -492,7 +485,6 @@ def test_target_winsor_does_not_mutate_history_target_feature(
         def build_frame(self, station, init_times, split):
             frame = super().build_frame(station, init_times, split)
             frame["temp_error"] = 12.0
-            frame["hist_temp_error"] = 12.0
             return frame
 
     trainer = TftTrainer(
@@ -511,44 +503,6 @@ def test_target_winsor_does_not_mutate_history_target_feature(
 
     training_frame = FakeTimeSeriesDataSet.created_train_frames[0]
     assert training_frame["temp_error"].eq(8.0).all()
-    assert training_frame["hist_temp_error"].eq(12.0).all()
-
-
-def test_history_target_experiment_flag_controls_tft_inputs(
-    tmp_path,
-    monkeypatch,
-):
-    _install_training_fakes(monkeypatch)
-    baseline = TftTrainer(
-        store=None,
-        registry=FakeRegistry(),
-        output_dir=tmp_path / "baseline",
-        settings=Settings(data_store_dir=tmp_path / "data-a"),
-        dataset_builder=FakeBuilder(),
-        station_config=STATIONS["KLGA"],
-        experiment_config=_experiment_template(use_history_target=False),
-    )
-    baseline.run_validation(station_id="KLGA", execution_id="a")
-    baseline_unknown = FakeTimeSeriesDataSet.created_train_kwargs[-1][
-        "time_varying_unknown_reals"
-    ]
-
-    residual = TftTrainer(
-        store=None,
-        registry=FakeRegistry(),
-        output_dir=tmp_path / "residual",
-        settings=Settings(data_store_dir=tmp_path / "data-b"),
-        dataset_builder=FakeBuilder(),
-        station_config=STATIONS["KLGA"],
-        experiment_config=_experiment_template(use_history_target=True),
-    )
-    residual.run_validation(station_id="KLGA", execution_id="b")
-    residual_unknown = FakeTimeSeriesDataSet.created_train_kwargs[-1][
-        "time_varying_unknown_reals"
-    ]
-
-    assert "hist_temp_error" not in baseline_unknown
-    assert "hist_temp_error" in residual_unknown
 
 
 def test_smoke_execution_applies_hard_training_limits(
@@ -782,7 +736,7 @@ def test_approved_final_evaluates_test_and_publishes_inactive_candidate(
     )
     builder = FakeBuilder()
     registry = FakeRegistry()
-    experiment = _experiment_template(use_history_target=True)
+    experiment = _experiment_template()
     snapshot = _trial_snapshot(experiment)
     monkeypatch.setattr(TftTrainer, "_eval_mae", lambda *args, **kwargs: 1.23)
     trainer = TftTrainer(
@@ -1008,7 +962,12 @@ def test_tft_trainer_uses_experiment_config_and_publishes_contract(tmp_path, mon
     assert FakeTFT.kwargs["hidden_size"] == 64
     assert FakeTFT.kwargs["learning_rate"] == 0.001
     assert written_config["runtime_profile"] == "john_linux_rtx2060"
+    assert contract["schema_version"] == 2
     assert contract["station_id"] == "KLGA"
+    assert contract["unknown_reals"] == FakeTimeSeriesDataSet.created_train_kwargs[-1][
+        "time_varying_unknown_reals"
+    ]
+    assert "hist_temp_error" not in contract["unknown_reals"]
     assert contract["max_encoder_length"] == 72
     assert contract["max_prediction_length"] == 48
     assert contract["quantiles"] == [0.1, 0.5, 0.9]

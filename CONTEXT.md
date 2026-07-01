@@ -97,14 +97,14 @@ _Avoid_: transformer, the model
 forecast for the same hour; what TFT is trained to predict.
 _Avoid_: error, delta
 
-**historical residual (hist_temp_error)**: An encoder-only copy of canonical
-temp_error. It is never a decoder input and remains separate from the winsorised target.
-_Avoid_: future error, decoder residual
-
 **empirical error correlation**: The 48x48 correlation matrix estimated from
 standardized validation errors. McSampler combines it with each forecast's calibrated
 dynamic sigma.
 _Avoid_: AR(1), fixed covariance
+
+**calibrated model contract**: A contract-v2 TFT artifact with the baseline observation
+and HRRR inputs plus a checkpoint-bound MC calibration bundle.
+_Avoid_: residual-input model, B model
 
 **McSampler**: The Monte Carlo module that draws n_samp joint residual samples from
 TFT quantiles using empirical error correlation, then maps samples to bucket

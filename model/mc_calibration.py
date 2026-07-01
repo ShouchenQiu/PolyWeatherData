@@ -9,7 +9,8 @@ from pathlib import Path
 import numpy as np
 
 
-CALIBRATION_SCHEMA_VERSION = 1
+CALIBRATION_SCHEMA_VERSION = 2
+CALIBRATION_TARGET_WINDOW = "local_calendar_day"
 FXX_BANDS: tuple[tuple[int, int], ...] = (
     (1, 6),
     (7, 12),
@@ -33,6 +34,8 @@ class McCalibration:
     fit_start: str
     fit_end: str
     sample_count: int
+    station_timezone: str = "UTC"
+    target_window: str = CALIBRATION_TARGET_WINDOW
 
     def __post_init__(self) -> None:
         correlation = np.asarray(self.correlation, dtype=float)
@@ -67,6 +70,12 @@ class McCalibration:
             raise ValueError("MC calibration model_sha256 must be a SHA-256 hex digest")
         if self.sample_count <= 0:
             raise ValueError("MC calibration sample_count must be positive")
+        if not self.station_timezone:
+            raise ValueError("MC calibration station_timezone must be non-empty")
+        if self.target_window != CALIBRATION_TARGET_WINDOW:
+            raise ValueError(
+                "MC calibration target_window must be local_calendar_day"
+            )
         object.__setattr__(self, "correlation", correlation)
         object.__setattr__(self, "sigma_scales", sigma_scales)
 
@@ -91,6 +100,8 @@ class McCalibration:
                     "fit_start": self.fit_start,
                     "fit_end": self.fit_end,
                     "sample_count": self.sample_count,
+                    "station_timezone": self.station_timezone,
+                    "target_window": self.target_window,
                 },
                 indent=2,
                 sort_keys=True,
@@ -138,6 +149,8 @@ class McCalibration:
             fit_start=str(metadata["fit_start"]),
             fit_end=str(metadata["fit_end"]),
             sample_count=int(metadata["sample_count"]),
+            station_timezone=str(metadata["station_timezone"]),
+            target_window=str(metadata["target_window"]),
         )
 
     @staticmethod

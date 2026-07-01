@@ -12,11 +12,13 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
+from config.stations import STATIONS
 from model.mc import McSampler
 from training.catalog import TrainingCatalog
 from training.audit_frames import AuditedFrameCache
 from training.config import ExperimentTemplate, ResolvedTrialSnapshot
 from training.predictions import build_quantile_prediction_frame
+from training.mc_calibration import local_calendar_day_groups
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,7 @@ EvidenceProvider = Callable[
 def compute_validation_evidence(
     frame: pd.DataFrame,
     *,
+    station_timezone: str,
     mc_samples: int = 2_000,
 ) -> dict[str, object]:
     """Compute validation-only quantile, strata, daily-high, and MC evidence."""
@@ -127,9 +130,10 @@ def compute_validation_evidence(
     mc_p50_errors_f: list[float] = []
     mc_covered: list[float] = []
     trusted_horizons: list[int] = []
-    for index, (_init_time, group) in enumerate(
-        trusted.groupby("init_time", sort=True)
-    ):
+    day_groups = local_calendar_day_groups(trusted, station_timezone)
+    if not day_groups:
+        raise ValueError("validation evidence has no complete local calendar days")
+    for index, group in enumerate(day_groups):
         group = group.sort_values("fxx")
         predicted_c = group["base_temp_c"] + group["p50"]
         actual_c = group["base_temp_c"] + group["target"]
@@ -386,4 +390,7 @@ class TopKEvidenceBuilder:
                 context.trial_snapshot.parameters.get("batch_size", 4)
             ),
         )
-        return compute_validation_evidence(prediction_frame)
+        return compute_validation_evidence(
+            prediction_frame,
+            station_timezone=STATIONS[context.station_id].timezone,
+        )

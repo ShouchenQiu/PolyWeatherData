@@ -5,7 +5,9 @@ import pandas as pd
 
 from training.mc_calibration import (
     cross_validate_mc_calibration,
+    evaluate_mc_calibration_oof,
     fit_mc_calibration,
+    local_calendar_day_groups,
 )
 
 
@@ -35,6 +37,20 @@ def _prediction_frame(cycles: int = 80) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def test_local_calendar_days_exclude_partial_days_and_respect_timezone() -> None:
+    frame = _prediction_frame(cycles=1)
+
+    groups = local_calendar_day_groups(frame, "America/New_York")
+
+    assert len(groups) == 1
+    group = groups[0]
+    local = pd.to_datetime(group["valid_time"], utc=True).dt.tz_convert(
+        "America/New_York"
+    )
+    assert local.dt.hour.tolist() == list(range(24))
+    assert local.dt.date.nunique() == 1
+
+
 def test_fit_mc_calibration_produces_dynamic_sigma_correlation(tmp_path) -> None:
     checkpoint = tmp_path / "model.ckpt"
     checkpoint.write_bytes(b"model")
@@ -42,6 +58,7 @@ def test_fit_mc_calibration_produces_dynamic_sigma_correlation(tmp_path) -> None
     calibration = fit_mc_calibration(
         _prediction_frame(),
         checkpoint,
+        station_timezone="UTC",
         mc_samples=300,
     )
 
@@ -59,12 +76,43 @@ def test_cross_validation_holds_out_each_cycle_once(tmp_path) -> None:
     evidence = cross_validate_mc_calibration(
         _prediction_frame(),
         checkpoint,
+        station_timezone="UTC",
         folds=4,
         mc_samples=200,
     )
 
     assert evidence["folds"] == 4
-    assert evidence["cycles"] == 80
+    assert evidence["cycles"] == len(
+        local_calendar_day_groups(_prediction_frame(), "UTC")
+    )
     assert 0.0 <= evidence["p10_p90_coverage"] <= 1.0
     assert evidence["mean_interval_width_f"] > 0
     assert evidence["daily_high_mae_f"] >= 0
+
+
+def test_oof_evidence_includes_one_row_per_complete_cycle_day(tmp_path) -> None:
+    checkpoint = tmp_path / "model.ckpt"
+    checkpoint.write_bytes(b"model")
+
+    summary, predictions = evaluate_mc_calibration_oof(
+        _prediction_frame(),
+        checkpoint,
+        station_timezone="UTC",
+        folds=4,
+        mc_samples=100,
+    )
+
+    assert len(predictions) == summary["cycles"] == len(
+        local_calendar_day_groups(_prediction_frame(), "UTC")
+    )
+    assert not predictions.duplicated(["init_time", "target_date"]).any()
+    assert {
+        "actual_high_f",
+        "hrrr_high_f",
+        "tft_high_f",
+        "mc_p10_f",
+        "mc_p50_f",
+        "mc_p90_f",
+        "min_fxx",
+        "max_fxx",
+    } <= set(predictions)

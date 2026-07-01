@@ -14,6 +14,7 @@ from model.mc_calibration import FXX_BANDS, McCalibration
 _NORMAL_P90 = 1.2815515655446004
 _REQUIRED_COLUMNS = {
     "init_time",
+    "valid_time",
     "fxx",
     "target",
     "p10",
@@ -24,10 +25,39 @@ _REQUIRED_COLUMNS = {
 }
 
 
+def local_calendar_day_groups(
+    frame: pd.DataFrame,
+    station_timezone: str,
+) -> list[pd.DataFrame]:
+    """Return complete trusted local-calendar-day windows per forecast cycle."""
+    work = _validated_frame(frame)
+    local = work["valid_time"].dt.tz_convert(station_timezone)
+    work["target_date"] = local.dt.date.astype(str)
+    groups: list[pd.DataFrame] = []
+    for (_init_time, target_date), group in work.groupby(
+        ["init_time", "target_date"],
+        sort=True,
+    ):
+        start = pd.Timestamp(target_date, tz=station_timezone)
+        end = start + pd.DateOffset(days=1)
+        expected = pd.date_range(
+            start,
+            end,
+            freq="h",
+            inclusive="left",
+        ).tz_convert("UTC")
+        actual = pd.DatetimeIndex(group["valid_time"].sort_values().unique())
+        if len(actual) != len(expected) or not actual.equals(expected):
+            continue
+        groups.append(group.sort_values("valid_time").reset_index(drop=True))
+    return groups
+
+
 def fit_mc_calibration(
     frame: pd.DataFrame,
     checkpoint_path: Path | str,
     *,
+    station_timezone: str,
     mc_samples: int = 2_000,
     shrinkage: float = 0.1,
 ) -> McCalibration:
@@ -79,8 +109,14 @@ def fit_mc_calibration(
         fit_start=work["init_time"].min().date().isoformat(),
         fit_end=work["init_time"].max().date().isoformat(),
         sample_count=int(work["init_time"].nunique()),
+        station_timezone=station_timezone,
     )
-    max_bias_f = _fit_max_bias(work, provisional, mc_samples)
+    max_bias_f = _fit_max_bias(
+        work,
+        provisional,
+        mc_samples,
+        station_timezone=station_timezone,
+    )
     return McCalibration(
         correlation=correlation,
         sigma_scales=sigma_scales,
@@ -90,6 +126,7 @@ def fit_mc_calibration(
         fit_start=provisional.fit_start,
         fit_end=provisional.fit_end,
         sample_count=provisional.sample_count,
+        station_timezone=station_timezone,
     )
 
 
@@ -97,19 +134,35 @@ def cross_validate_mc_calibration(
     frame: pd.DataFrame,
     checkpoint_path: Path | str,
     *,
+    station_timezone: str,
     folds: int = 4,
     mc_samples: int = 2_000,
 ) -> dict[str, float | int]:
     """Evaluate calibration with contiguous cycle folds held out once each."""
+    return evaluate_mc_calibration_oof(
+        frame,
+        checkpoint_path,
+        station_timezone=station_timezone,
+        folds=folds,
+        mc_samples=mc_samples,
+    )[0]
+
+
+def evaluate_mc_calibration_oof(
+    frame: pd.DataFrame,
+    checkpoint_path: Path | str,
+    *,
+    station_timezone: str,
+    folds: int = 4,
+    mc_samples: int = 2_000,
+) -> tuple[dict[str, float | int], pd.DataFrame]:
+    """Return contiguous-fold local-day MC summary and cycle-day predictions."""
     work = _validated_frame(frame)
     init_times = np.array(sorted(work["init_time"].unique()))
     if folds < 2 or folds > len(init_times):
         raise ValueError("folds must be between 2 and the number of cycles")
 
-    covered: list[float] = []
-    widths: list[float] = []
-    errors: list[float] = []
-    evaluated_cycles = 0
+    rows: list[dict[str, Any]] = []
     for held_out in np.array_split(init_times, folds):
         held_set = set(held_out.tolist())
         train = work[~work["init_time"].isin(held_set)]
@@ -117,24 +170,52 @@ def cross_validate_mc_calibration(
         calibration = fit_mc_calibration(
             train,
             checkpoint_path,
+            station_timezone=station_timezone,
             mc_samples=mc_samples,
         )
         sampler = McSampler(n_samp=mc_samples, rng_seed=42)
         sampler.set_calibration(calibration)
-        for _init_time, group in validation.groupby("init_time", sort=True):
+        for group in local_calendar_day_groups(
+            validation,
+            station_timezone,
+        ):
             actual_high_f, samples = _sample_cycle(group, sampler)
             p10, p50, p90 = np.quantile(samples, [0.1, 0.5, 0.9])
-            covered.append(float(p10 <= actual_high_f <= p90))
-            widths.append(float(p90 - p10))
-            errors.append(abs(float(p50) - actual_high_f))
-            evaluated_cycles += 1
-    return {
+            base = group["base_temp_c"].to_numpy(dtype=float)
+            tft = base + group["p50"].to_numpy(dtype=float)
+            rows.append(
+                {
+                    "init_time": group["init_time"].iloc[0],
+                    "target_date": group["target_date"].iloc[0],
+                    "actual_high_f": actual_high_f,
+                    "hrrr_high_f": float(base.max() * 1.8 + 32.0),
+                    "tft_high_f": float(tft.max() * 1.8 + 32.0),
+                    "mc_p10_f": float(p10),
+                    "mc_p50_f": float(p50),
+                    "mc_p90_f": float(p90),
+                    "min_fxx": int(group["fxx"].min()),
+                    "max_fxx": int(group["fxx"].max()),
+                }
+            )
+    predictions = pd.DataFrame(rows)
+    if predictions.empty:
+        raise ValueError("MC calibration has no complete local calendar days")
+    covered = (
+        (predictions["actual_high_f"] >= predictions["mc_p10_f"])
+        & (predictions["actual_high_f"] <= predictions["mc_p90_f"])
+    )
+    summary = {
         "folds": folds,
-        "cycles": evaluated_cycles,
-        "p10_p90_coverage": float(np.mean(covered)),
-        "mean_interval_width_f": float(np.mean(widths)),
-        "daily_high_mae_f": float(np.mean(errors)),
+        "cycles": len(predictions),
+        "p10_p90_coverage": float(covered.mean()),
+        "mean_interval_width_f": float(
+            (predictions["mc_p90_f"] - predictions["mc_p10_f"]).mean()
+        ),
+        "daily_high_mae_f": float(
+            (predictions["mc_p50_f"] - predictions["actual_high_f"]).abs().mean()
+        ),
     }
+    return summary, predictions
 
 
 def _validated_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -146,6 +227,7 @@ def _validated_frame(frame: pd.DataFrame) -> pd.DataFrame:
         )
     work = frame.copy()
     work["init_time"] = pd.to_datetime(work["init_time"], utc=True)
+    work["valid_time"] = pd.to_datetime(work["valid_time"], utc=True)
     work["fxx"] = work["fxx"].astype(int)
     work = work[work["weight"].astype(float) > 0].copy()
     if work.empty:
@@ -195,17 +277,21 @@ def _fit_max_bias(
     frame: pd.DataFrame,
     calibration: McCalibration,
     mc_samples: int,
+    *,
+    station_timezone: str,
 ) -> float:
     sampler = McSampler(n_samp=mc_samples, rng_seed=42)
     sampler.set_correlation(calibration.correlation)
     offsets = []
-    for _init_time, group in frame.groupby("init_time", sort=True):
+    for group in local_calendar_day_groups(frame, station_timezone):
         actual_high_f, samples = _sample_cycle(
             group,
             sampler,
             sigma_scales=calibration.sigma_scales,
         )
         offsets.append(float(np.median(samples)) - actual_high_f)
+    if not offsets:
+        raise ValueError("MC calibration has no complete local calendar days")
     return float(np.median(offsets))
 
 

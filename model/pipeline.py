@@ -16,8 +16,6 @@ from loguru import logger
 from model.features import (
     REQUIRED_DECODER_SOURCE_COLUMNS,
     REQUIRED_ENCODER_SOURCE_COLUMNS,
-    add_decoder_history_features,
-    add_encoder_history_features,
     add_model_features,
 )
 
@@ -162,9 +160,6 @@ class ModelPipeline:
             decoder_df, start_idx=self._N_ENC, init_utc=init_utc,
             station_id=station.station_id,
         )
-        encoder_df = add_encoder_history_features(encoder_df)
-        decoder_df = add_decoder_history_features(decoder_df)
-
         # 4b. Pre-predict source column validation (before superset fill).
         missing_enc = set(REQUIRED_ENCODER_SOURCE_COLUMNS) - set(encoder_df.columns)
         if missing_enc:

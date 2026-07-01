@@ -9,6 +9,7 @@ Sidebar navigation:
     Polymarket        -- events, markets, tokens, latest prices
     Signals & Orders  -- decision funnel and order lifecycle
     Forecast & Model  -- forecast snapshots, TFT quantiles, MC buckets
+    Model Evaluation  -- offline HRRR/TFT/MC validation diagnostics
     PNL & Risk        -- PnL and exposure
     Backtest & Replay -- backtest result analysis
 """
@@ -71,6 +72,7 @@ PAGES = [
     "Polymarket",
     "Signals & Orders",
     "Forecast & Model",
+    "Model Evaluation",
     "PNL & Risk",
     "Backtest & Replay",
 ]
@@ -115,6 +117,10 @@ elif page == "Signals & Orders":
 elif page == "Forecast & Model":
     from ui.pages import forecast_model
     forecast_model.render(db)
+
+elif page == "Model Evaluation":
+    from ui.pages import model_evaluation
+    model_evaluation.render()
 
 elif page == "PNL & Risk":
     from ui.pages import pnl_risk

@@ -11,7 +11,7 @@ from typing import Any, Mapping
 
 
 _TEMPLATE_SCHEMA_VERSION = 1
-_SUPPORTED_TEMPLATE_SCHEMA_VERSIONS = {1, 2}
+_SUPPORTED_TEMPLATE_SCHEMA_VERSIONS = {_TEMPLATE_SCHEMA_VERSION}
 _FIXED_QUANTILES = (0.1, 0.5, 0.9)
 _SEARCHABLE_PARAMETERS = {
     "hidden_size",
@@ -38,7 +38,6 @@ class ModelConfig:
     target_winsor: float = 8.0
     max_encoder_length: int = 72
     max_prediction_length: int = 48
-    use_history_target: bool = False
 
 
 @dataclass(frozen=True)
@@ -431,15 +430,12 @@ class ExperimentTemplate:
             )
 
     def to_dict(self) -> dict[str, Any]:
-        model_payload = asdict(self.model)
-        if self.schema_version == 1:
-            model_payload.pop("use_history_target")
         return {
             "schema_version": self.schema_version,
             "template_id": self.template_id,
             "station": self.station,
             "splits": {key: list(value) for key, value in self.splits.items()},
-            "model": model_payload,
+            "model": asdict(self.model),
             "trainer": asdict(self.trainer),
             "runtime_profile": self.runtime_profile,
             "study": self.study.to_dict(),
@@ -654,7 +650,6 @@ def _apply_to_settings(config: Any, settings: Any) -> None:
     settings.tft_target_winsor = config.model.target_winsor
     settings.tft_max_encoder_length = config.model.max_encoder_length
     settings.tft_max_prediction_length = config.model.max_prediction_length
-    settings.tft_use_history_target = config.model.use_history_target
     settings.tft_min_epochs = config.trainer.min_epochs
     settings.tft_max_epochs = config.trainer.max_epochs
     settings.tft_batch_size = config.trainer.batch_size

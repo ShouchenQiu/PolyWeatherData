@@ -9,7 +9,6 @@ from model.features import (
     OBS_UNKNOWN_REALS,
     TARGET,
     TFT_KNOWN_REALS,
-    TFT_UNKNOWN_REALS,
 )
 
 
@@ -35,12 +34,7 @@ def validate_model_contract(path: Path | str) -> dict[str, Any]:
         )
     _require_equal(contract, "target", TARGET)
     _require_equal(contract, "known_reals", list(TFT_KNOWN_REALS))
-    expected_unknown = (
-        list(OBS_UNKNOWN_REALS)
-        if schema_version == 1
-        else list(TFT_UNKNOWN_REALS)
-    )
-    _require_equal(contract, "unknown_reals", expected_unknown)
+    _require_equal(contract, "unknown_reals", list(OBS_UNKNOWN_REALS))
     _require_equal(contract, "max_encoder_length", SUPPORTED_ENCODER_LENGTH)
     _require_equal(contract, "max_prediction_length", SUPPORTED_PREDICTION_LENGTH)
     _require_equal(contract, "quantiles", SUPPORTED_QUANTILES)

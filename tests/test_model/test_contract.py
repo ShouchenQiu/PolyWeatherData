@@ -5,7 +5,7 @@ import json
 import pytest
 
 from model.contract import validate_model_contract
-from model.features import OBS_UNKNOWN_REALS, TFT_KNOWN_REALS, TFT_UNKNOWN_REALS
+from model.features import OBS_UNKNOWN_REALS, TFT_KNOWN_REALS
 
 
 def _write_contract(tmp_path, schema_version: int, unknown_reals: list[str]):
@@ -35,16 +35,22 @@ def test_contract_validator_keeps_v1_models_loadable(tmp_path) -> None:
     assert contract["schema_version"] == 1
 
 
-def test_contract_validator_accepts_history_feature_in_v2(tmp_path) -> None:
+def test_contract_validator_accepts_baseline_features_in_calibrated_v2(
+    tmp_path,
+) -> None:
     contract = validate_model_contract(
-        _write_contract(tmp_path, 2, list(TFT_UNKNOWN_REALS))
+        _write_contract(tmp_path, 2, list(OBS_UNKNOWN_REALS))
     )
 
     assert contract["schema_version"] == 2
 
 
-def test_contract_validator_rejects_v2_without_history_feature(tmp_path) -> None:
+def test_contract_validator_rejects_retired_history_feature_in_v2(tmp_path) -> None:
     with pytest.raises(ValueError, match="unknown_reals mismatch"):
         validate_model_contract(
-            _write_contract(tmp_path, 2, list(OBS_UNKNOWN_REALS))
+            _write_contract(
+                tmp_path,
+                2,
+                list(OBS_UNKNOWN_REALS) + ["hist_temp_error"],
+            )
         )

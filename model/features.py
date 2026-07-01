@@ -49,7 +49,6 @@ OBS_UNKNOWN_REALS: list[str] = [
 # ---------------------------------------------------------------------------
 
 TARGET: str = "temp_error"
-HISTORICAL_TARGET_FEATURE: str = "hist_temp_error"
 
 # ---------------------------------------------------------------------------
 # Derived column sets
@@ -73,9 +72,7 @@ _TFT_TIME_ENCODING: list[str] = [
 ]
 
 TFT_KNOWN_REALS: list[str] = _TFT_TIME_ENCODING + HRRR_KNOWN_REALS
-TFT_UNKNOWN_REALS: list[str] = (
-    list(OBS_UNKNOWN_REALS) + [HISTORICAL_TARGET_FEATURE]
-)
+TFT_UNKNOWN_REALS: list[str] = list(OBS_UNKNOWN_REALS)
 
 # ---------------------------------------------------------------------------
 # Model-generated columns (added by the pipeline, not sourced from raw data)
@@ -132,21 +129,3 @@ def add_model_features(
     )
     df["Node_ID"] = station_id
     return df
-
-
-def add_encoder_history_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Copy the canonical residual into its encoder-only model input."""
-    if TARGET not in df.columns:
-        raise ValueError(
-            f"encoder DataFrame must have a {TARGET!r} column"
-        )
-    result = df.copy()
-    result[HISTORICAL_TARGET_FEATURE] = result[TARGET].astype("float32")
-    return result
-
-
-def add_decoder_history_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add a non-informative placeholder for an encoder-only model input."""
-    result = df.copy()
-    result[HISTORICAL_TARGET_FEATURE] = np.float32(0.0)
-    return result

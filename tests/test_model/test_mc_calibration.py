@@ -44,6 +44,21 @@ def test_mc_calibration_rejects_checkpoint_hash_mismatch(tmp_path) -> None:
         McCalibration.load(tmp_path, checkpoint)
 
 
+def test_mc_calibration_rejects_legacy_window_semantics(tmp_path) -> None:
+    checkpoint = tmp_path / "model.ckpt"
+    checkpoint.write_bytes(b"checkpoint")
+    _calibration(McCalibration.sha256(checkpoint)).save(tmp_path)
+    metadata_path = tmp_path / "mc_calibration.json"
+    metadata = json.loads(metadata_path.read_text(encoding="ascii"))
+    metadata["schema_version"] = 1
+    metadata.pop("station_timezone")
+    metadata.pop("target_window")
+    metadata_path.write_text(json.dumps(metadata), encoding="ascii")
+
+    with pytest.raises(ValueError, match="schema_version"):
+        McCalibration.load(tmp_path, checkpoint)
+
+
 def test_mc_calibration_rejects_non_positive_definite_matrix(tmp_path) -> None:
     checkpoint = tmp_path / "model.ckpt"
     checkpoint.write_bytes(b"checkpoint")
