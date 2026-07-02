@@ -1,0 +1,4 @@
+[server]
+# Avoid exhausting the host's shared inotify quota while retaining automatic
+# source reloads during local development.
+fileWatcherType = "poll"

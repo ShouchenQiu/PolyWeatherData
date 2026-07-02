@@ -124,6 +124,63 @@ def evaluation_metrics(data: EvaluationData) -> dict[str, float]:
     }
 
 
+def daily_target_summary(daily: pd.DataFrame) -> pd.DataFrame:
+    """Collapse cycle-day forecasts to one median forecast per target day."""
+    summary = (
+        daily.groupby("target_date", as_index=False)
+        .agg(
+            actual_high_f=("actual_high_f", "first"),
+            hrrr_high_f=("hrrr_high_f", "median"),
+            tft_high_f=("tft_high_f", "median"),
+            mc_p10_f=("mc_p10_f", "median"),
+            mc_p50_f=("mc_p50_f", "median"),
+            mc_p90_f=("mc_p90_f", "median"),
+            cycle_count=("actual_high_f", "size"),
+        )
+        .sort_values("target_date")
+        .reset_index(drop=True)
+    )
+    summary["target_date"] = pd.to_datetime(summary["target_date"])
+    return summary
+
+
+def model_performance_table(data: EvaluationData) -> pd.DataFrame:
+    """Return a compact TFT/MC comparison using each model's direct baseline."""
+    metrics = evaluation_metrics(data)
+    tft_high_mae = metrics["tft_high_mae_f"]
+    mc_skill = (
+        (1.0 - metrics["mc_high_mae_f"] / tft_high_mae) * 100.0
+        if tft_high_mae > 0
+        else float("nan")
+    )
+    return pd.DataFrame(
+        [
+            {
+                "Model": "TFT",
+                "Target": "Hourly temperature",
+                "Baseline": "HRRR",
+                "MAE (°F)": metrics["tft_hourly_mae_f"],
+                "Baseline MAE (°F)": metrics["hrrr_hourly_mae_f"],
+                "Skill vs baseline (%)": metrics["hourly_skill_pct"],
+                "P10–P90 coverage (%)": metrics["hourly_coverage"] * 100.0,
+                "Mean interval width (°F)": metrics["hourly_interval_width_f"],
+                "Samples": len(data.hourly),
+            },
+            {
+                "Model": "MC",
+                "Target": "Daily high (OOF cycle-day)",
+                "Baseline": "TFT",
+                "MAE (°F)": metrics["mc_high_mae_f"],
+                "Baseline MAE (°F)": tft_high_mae,
+                "Skill vs baseline (%)": mc_skill,
+                "P10–P90 coverage (%)": metrics["mc_coverage"] * 100.0,
+                "Mean interval width (°F)": metrics["mc_interval_width_f"],
+                "Samples": len(data.daily),
+            },
+        ]
+    )
+
+
 def horizon_metrics(data: EvaluationData) -> pd.DataFrame:
     return (
         data.hourly.groupby("fxx", as_index=False)

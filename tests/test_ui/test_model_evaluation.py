@@ -10,9 +10,11 @@ import pytest
 
 from model.mc_calibration import McCalibration
 from ui.model_evaluation import (
+    daily_target_summary,
     discover_evaluations,
     evaluation_metrics,
     load_evaluation,
+    model_performance_table,
 )
 from ui.pages import model_evaluation
 
@@ -90,6 +92,50 @@ def test_discovers_complete_evaluation_and_computes_hrrr_tft_mc_metrics(
     assert metrics["mc_coverage"] == 1.0
 
 
+def test_daily_target_summary_collapses_cycles_to_one_row_per_target_day() -> None:
+    daily = pd.DataFrame(
+        {
+            "target_date": ["2026-04-02", "2026-04-02", "2026-04-03"],
+            "actual_high_f": [70.0, 70.0, 72.0],
+            "hrrr_high_f": [68.0, 72.0, 71.0],
+            "tft_high_f": [69.0, 73.0, 72.0],
+            "mc_p10_f": [66.0, 68.0, 69.0],
+            "mc_p50_f": [69.0, 71.0, 72.0],
+            "mc_p90_f": [72.0, 74.0, 75.0],
+        }
+    )
+
+    summary = daily_target_summary(daily)
+
+    assert summary["target_date"].tolist() == list(
+        pd.to_datetime(["2026-04-02", "2026-04-03"])
+    )
+    assert summary["cycle_count"].tolist() == [2, 1]
+    assert summary.loc[0, "actual_high_f"] == 70.0
+    assert summary.loc[0, "hrrr_high_f"] == 70.0
+    assert summary.loc[0, "tft_high_f"] == 71.0
+    assert summary.loc[0, "mc_p50_f"] == 70.0
+
+
+def test_model_performance_table_compares_tft_and_mc_with_their_baselines(
+    tmp_path,
+) -> None:
+    version_dir = _complete_evaluation(tmp_path)
+    data = load_evaluation(discover_evaluations(tmp_path / "runs")[0])
+
+    table = model_performance_table(data)
+
+    assert table["Model"].tolist() == ["TFT", "MC"]
+    assert table["Target"].tolist() == [
+        "Hourly temperature",
+        "Daily high (OOF cycle-day)",
+    ]
+    assert table["Baseline"].tolist() == ["HRRR", "TFT"]
+    assert table["MAE (°F)"].tolist() == pytest.approx([0.9, 0.5])
+    assert table["Skill vs baseline (%)"].tolist() == pytest.approx([50.0, 50.0])
+    assert table["Samples"].tolist() == [2, 1]
+
+
 def test_model_evaluation_page_renders_complete_artifacts(tmp_path) -> None:
     _complete_evaluation(tmp_path)
 
@@ -100,9 +146,9 @@ def test_model_evaluation_page_renders_complete_artifacts(tmp_path) -> None:
             "info",
             "warning",
             "subheader",
-            "dataframe",
         ):
             stack.enter_context(patch(f"streamlit.{name}"))
+        dataframe = stack.enter_context(patch("streamlit.dataframe"))
         stack.enter_context(
             patch(
                 "streamlit.selectbox",
@@ -126,3 +172,27 @@ def test_model_evaluation_page_renders_complete_artifacts(tmp_path) -> None:
         model_evaluation.render(runs_root=tmp_path / "runs")
 
     assert chart.call_count >= 7
+    figures = [call.args[0] for call in chart.call_args_list]
+    figures_by_title = {
+        figure.layout.title.text: figure
+        for figure in figures
+        if figure.layout.title.text
+    }
+    assert "Daily high forecasts by target day" in figures_by_title
+    assert "Daily MC interval and actual high" in figures_by_title
+    assert "Daily absolute error by target day" in figures_by_title
+    assert "Daily-high absolute-error CDF" not in figures_by_title
+    daily_forecasts = figures_by_title["Daily high forecasts by target day"]
+    assert {trace.name for trace in daily_forecasts.data} == {
+        "Actual",
+        "HRRR",
+        "TFT",
+        "MC",
+    }
+    performance_tables = [
+        call.args[0]
+        for call in dataframe.call_args_list
+        if isinstance(call.args[0], pd.DataFrame)
+        and "Model" in call.args[0].columns
+    ]
+    assert performance_tables[0]["Model"].tolist() == ["TFT", "MC"]
