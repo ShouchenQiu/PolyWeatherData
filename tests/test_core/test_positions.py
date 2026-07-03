@@ -109,6 +109,26 @@ def test_mark_filled_accepts_explicit_filled_at(tracker, db):
     assert row["filled_at"] == "2026-07-04T12:05:00+00:00"
 
 
+def test_mark_filled_includes_taker_fee_in_cash_flow(tracker, db):
+    tracker.record_order(
+        "ord-fee",
+        "tok-yes",
+        "cid-1",
+        "BUY",
+        50.0,
+        0.50,
+        fee_usd=1.25,
+    )
+
+    tracker.mark_filled("ord-fee", 0.50)
+
+    row = db._conn.execute(
+        "SELECT fee_usd, cash_flow_usd FROM orders WHERE order_id='ord-fee'"
+    ).fetchone()
+    assert row["fee_usd"] == 1.25
+    assert row["cash_flow_usd"] == -51.25
+
+
 # ---------------------------------------------------------------------------
 # mark_closed
 # ---------------------------------------------------------------------------

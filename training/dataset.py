@@ -645,6 +645,97 @@ class TrainingDatasetBuilder:
             return pd.DataFrame()
         return pd.concat(frames, ignore_index=True)
 
+    def build_inference_frame(
+        self,
+        station: Any,
+        init_times: list[pd.Timestamp],
+        split: str = "inference",
+        progress_callback: Callable[[int, int, int, int], None] | None = None,
+        progress_every: int = 100,
+    ) -> pd.DataFrame:
+        """Build model inputs without reading observations after init time."""
+        frames: list[pd.DataFrame] = []
+        self.skipped = []
+        total = len(init_times)
+        report_every = max(1, int(progress_every))
+
+        def report(completed: int) -> None:
+            if progress_callback is not None and (
+                completed == 1
+                or completed % report_every == 0
+                or completed == total
+            ):
+                progress_callback(
+                    completed,
+                    total,
+                    len(frames),
+                    len(self.skipped),
+                )
+
+        for completed, init_time in enumerate(init_times, start=1):
+            init_utc = _to_utc(init_time)
+            status = self._data_manager.inference_readiness(
+                station,
+                init_utc,
+                self._encoder_hours,
+            )
+            if not status.ready:
+                self.skipped.append(
+                    {
+                        "init_time": init_utc,
+                        "split": split,
+                        "reason": status.reason,
+                        "first_eligible_init": status.first_eligible_init,
+                    }
+                )
+                report(completed)
+                continue
+            try:
+                encoder = self._data_manager.build_encoder_obs_window(
+                    station,
+                    init_utc,
+                    n_hours=self._encoder_hours,
+                )
+                decoder = self._decoder_cache.get(station, init_utc)
+            except InsufficientEncoderData as exc:
+                self.skipped.append(
+                    {
+                        "init_time": init_utc,
+                        "split": split,
+                        "reason": type(exc).__name__,
+                        "first_eligible_init": None,
+                    }
+                )
+                report(completed)
+                continue
+
+            encoder = add_model_features(
+                encoder,
+                start_idx=0,
+                init_utc=init_utc,
+                station_id=station.station_id,
+            )
+            decoder = add_model_features(
+                decoder,
+                start_idx=self._encoder_hours,
+                init_utc=init_utc,
+                station_id=station.station_id,
+            )
+            encoder[DECODER_WEIGHT_COLUMN] = 1.0
+            decoder[DECODER_WEIGHT_COLUMN] = 0.0
+            all_columns = set(encoder.columns) | set(decoder.columns)
+            for column in all_columns - set(encoder.columns):
+                encoder[column] = 0.0
+            for column in all_columns - set(decoder.columns):
+                decoder[column] = 0.0
+            combined = pd.concat([encoder, decoder], ignore_index=True)
+            combined["split"] = split
+            frames.append(combined)
+            report(completed)
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
 
 def _to_utc(ts: pd.Timestamp) -> pd.Timestamp:
     stamp = pd.Timestamp(ts)

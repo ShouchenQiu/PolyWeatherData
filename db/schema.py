@@ -58,6 +58,10 @@ class DbClient:
                 bucket_lo_f       REAL,
                 bucket_hi_f       REAL,
                 outcome           TEXT,
+                fees_enabled      INTEGER NOT NULL DEFAULT 0,
+                fee_rate          REAL,
+                fee_exponent      REAL,
+                fee_taker_only    INTEGER NOT NULL DEFAULT 1,
                 discovery_status  TEXT NOT NULL DEFAULT 'parsed'
                                   CHECK (discovery_status IN ('parsed', 'unrecognized_slug', 'invalid_market'))
             );
@@ -99,7 +103,8 @@ class DbClient:
                 executable_price REAL,
                 filled_shares    REAL,
                 signed_shares    REAL,
-                cash_flow_usd    REAL
+                cash_flow_usd    REAL,
+                fee_usd         REAL NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS model_versions (
@@ -226,8 +231,13 @@ class DbClient:
             "ALTER TABLE orders ADD COLUMN filled_shares    REAL",
             "ALTER TABLE orders ADD COLUMN signed_shares    REAL",
             "ALTER TABLE orders ADD COLUMN cash_flow_usd    REAL",
+            "ALTER TABLE orders ADD COLUMN fee_usd REAL NOT NULL DEFAULT 0",
             "ALTER TABLE markets ADD COLUMN discovery_status TEXT NOT NULL DEFAULT 'parsed'",
             "ALTER TABLE markets ADD COLUMN market_id TEXT",
+            "ALTER TABLE markets ADD COLUMN fees_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE markets ADD COLUMN fee_rate REAL",
+            "ALTER TABLE markets ADD COLUMN fee_exponent REAL",
+            "ALTER TABLE markets ADD COLUMN fee_taker_only INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE redeem_tasks ADD COLUMN market_id TEXT",
         ]
         for stmt in _additive:
@@ -274,13 +284,14 @@ class DbClient:
                     executable_price REAL,
                     filled_shares    REAL,
                     signed_shares    REAL,
-                    cash_flow_usd    REAL
+                    cash_flow_usd    REAL,
+                    fee_usd         REAL NOT NULL DEFAULT 0
                 );
                 INSERT INTO orders_v2 SELECT
                     order_id, token_id, condition_id, side, size_usd, price, fill_price,
                     status, created_at, filled_at, closed_at, cancelled_at, settled_payout,
                     COALESCE(is_paper, 0), executable_price, filled_shares,
-                    signed_shares, cash_flow_usd
+                    signed_shares, cash_flow_usd, COALESCE(fee_usd, 0)
                 FROM orders;
                 DROP TABLE orders;
                 ALTER TABLE orders_v2 RENAME TO orders;
@@ -298,11 +309,17 @@ class DbClient:
                     bucket_lo_f       REAL,
                     bucket_hi_f       REAL,
                     outcome           TEXT,
+                    fees_enabled      INTEGER NOT NULL DEFAULT 0,
+                    fee_rate          REAL,
+                    fee_exponent      REAL,
+                    fee_taker_only    INTEGER NOT NULL DEFAULT 1,
                     discovery_status  TEXT NOT NULL DEFAULT 'parsed'
                                       CHECK (discovery_status IN ('parsed', 'unrecognized_slug', 'invalid_market'))
                 );
                 INSERT INTO markets_v2 SELECT
                     token_id, condition_id, market_id, market_slug, bucket_lo_f, bucket_hi_f, outcome,
+                    COALESCE(fees_enabled, 0), fee_rate, fee_exponent,
+                    COALESCE(fee_taker_only, 1),
                     COALESCE(discovery_status, 'parsed')
                 FROM markets;
                 DROP TABLE markets;
@@ -504,13 +521,18 @@ class DbClient:
         outcome: str,
         discovery_status: str = "parsed",
         market_id: str | None = None,
+        fees_enabled: bool = False,
+        fee_rate: float | None = None,
+        fee_exponent: float | None = None,
+        fee_taker_only: bool = True,
     ) -> None:
         self._conn.execute(
             """
             INSERT INTO markets
-                (token_id, condition_id, market_id, market_slug, bucket_lo_f, bucket_hi_f, outcome,
-                 discovery_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (token_id, condition_id, market_id, market_slug, bucket_lo_f,
+                 bucket_hi_f, outcome, fees_enabled, fee_rate, fee_exponent,
+                 fee_taker_only, discovery_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(token_id) DO UPDATE SET
                 condition_id=excluded.condition_id,
                 market_id=excluded.market_id,
@@ -518,10 +540,17 @@ class DbClient:
                 bucket_lo_f=excluded.bucket_lo_f,
                 bucket_hi_f=excluded.bucket_hi_f,
                 outcome=excluded.outcome,
+                fees_enabled=excluded.fees_enabled,
+                fee_rate=excluded.fee_rate,
+                fee_exponent=excluded.fee_exponent,
+                fee_taker_only=excluded.fee_taker_only,
                 discovery_status=excluded.discovery_status
             """,
-            (token_id, condition_id, market_id, market_slug, bucket_lo_f, bucket_hi_f, outcome,
-             discovery_status),
+            (
+                token_id, condition_id, market_id, market_slug, bucket_lo_f,
+                bucket_hi_f, outcome, int(fees_enabled), fee_rate,
+                fee_exponent, int(fee_taker_only), discovery_status,
+            ),
         )
         self._conn.commit()
 

@@ -37,11 +37,11 @@ def _hi_bound(m: re.Match) -> tuple[float, float]:
 
 
 def _lo_bound(m: re.Match) -> tuple[float, float]:
-    return (float("-inf"), float(m.group(1)))
+    return (float("-inf"), float(m.group(1)) + 1.0)
 
 
 def _range_bound(m: re.Match) -> tuple[float, float]:
-    return (float(m.group(1)), float(m.group(2)))
+    return (float(m.group(1)), float(m.group(2)) + 1.0)
 
 
 # Each entry: (compiled pattern, handler).  First match wins.
@@ -71,8 +71,12 @@ def parse_slug(slug: str) -> tuple[float, float] | None:
     Patterns handled (case-insensitive):
     - ``70f-or-higher`` / ``70forhigher`` / ``be-70f-or-higher`` -> (70, +inf)
     - ``70f-or-above``  / ``70forabove``  / ``be-70f-or-above``  -> (70, +inf)
-    - ``55f-or-below``  / ``55forbelow``  / ``be-55f-or-below``  -> (-inf, 55)
-    - ``60-70f``  (range)                                        -> (60, 70)
+    - ``55f-or-below``  / ``55forbelow``  / ``be-55f-or-below``  -> (-inf, 56)
+    - ``60-70f``  (inclusive whole-degree range)                 -> (60, 71)
+
+    The returned upper bound is exclusive. Polymarket resolves these markets
+    from whole-degree Fahrenheit observations, so inclusive labels gain one
+    degree at the upper edge.
 
     V2V01: returns None unless the slug also contains a recognizable station
     token (ICAO identifier or alias from config.stations.STATIONS).  Slugs
@@ -363,6 +367,31 @@ class EventDiscovery:
                 token_ids = [tid for tid in (yes_tid, no_tid) if tid is not None]
                 mkt_dict["clobTokenIds"] = json.dumps(token_ids)
                 mkt_dict["outcomes"] = json.dumps(["Yes", "No"])
+            fees_enabled = getattr(mkt, "fees_enabled", None)
+            if fees_enabled is not None:
+                mkt_dict["feesEnabled"] = bool(fees_enabled)
+            fee_details = (
+                getattr(mkt, "fee_details", None)
+                or getattr(mkt, "fee_schedule", None)
+            )
+            if fee_details is not None:
+                mkt_dict["feeSchedule"] = {
+                    "rate": getattr(
+                        fee_details,
+                        "rate",
+                        getattr(fee_details, "r", None),
+                    ),
+                    "exponent": getattr(
+                        fee_details,
+                        "exponent",
+                        getattr(fee_details, "e", None),
+                    ),
+                    "takerOnly": getattr(
+                        fee_details,
+                        "taker_only",
+                        getattr(fee_details, "to", True),
+                    ),
+                }
             markets_raw.append(mkt_dict)
 
         event_id = getattr(ev, "id", "")
@@ -433,6 +462,14 @@ class EventDiscovery:
             result           = parse_slug(market_slug)
             lo_f, hi_f       = result if result is not None else (None, None)
             discovery_status = "parsed" if result is not None else "unrecognized_slug"
+            fee_schedule = mkt.get("feeSchedule") or {}
+            if isinstance(fee_schedule, str):
+                try:
+                    fee_schedule = json.loads(fee_schedule)
+                except json.JSONDecodeError:
+                    fee_schedule = {}
+            if not isinstance(fee_schedule, dict):
+                fee_schedule = {}
 
             if result is None:
                 self._emit_discovery_warn(market_slug, condition_id)
@@ -445,6 +482,12 @@ class EventDiscovery:
                 "token_ids":        token_ids,
                 "outcomes":         outcomes,
                 "discovery_status": discovery_status,
+                "fees_enabled":     bool(mkt.get("feesEnabled", False)),
+                "fee_rate":         fee_schedule.get("rate"),
+                "fee_exponent":     fee_schedule.get("exponent"),
+                "fee_taker_only":   bool(
+                    fee_schedule.get("takerOnly", True)
+                ),
             })
         return rows
 
@@ -477,6 +520,10 @@ class EventDiscovery:
                     outcome          = str(outcome),
                     discovery_status = row["discovery_status"],
                     market_id        = row["market_id"] or None,
+                    fees_enabled     = row["fees_enabled"],
+                    fee_rate         = row["fee_rate"],
+                    fee_exponent     = row["fee_exponent"],
+                    fee_taker_only   = row["fee_taker_only"],
                 )
                 added.append({"token_id": str(token_id), "outcome": str(outcome)})
 
@@ -508,6 +555,10 @@ class EventDiscovery:
                     outcome          = str(outcome),
                     discovery_status = row["discovery_status"],
                     market_id        = row["market_id"] or None,
+                    fees_enabled     = row["fees_enabled"],
+                    fee_rate         = row["fee_rate"],
+                    fee_exponent     = row["fee_exponent"],
+                    fee_taker_only   = row["fee_taker_only"],
                 )
 
         return rows, unrecog_count

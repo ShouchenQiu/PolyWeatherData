@@ -26,6 +26,37 @@ class OrderbookReader(Protocol):
     def get_book(self, token_id: str) -> dict: ...
 
 
+class ClobRestClient:
+    """Minimal client for Polymarket's public ``GET /book`` endpoint."""
+
+    def __init__(
+        self,
+        *,
+        host: str = "https://clob.polymarket.com",
+        session: Any | None = None,
+        timeout_seconds: int = 30,
+    ) -> None:
+        if session is None:
+            import requests
+
+            session = requests.Session()
+        self._host = host.rstrip("/")
+        self._session = session
+        self._timeout_seconds = int(timeout_seconds)
+
+    def get_order_book(self, *, token_id: str) -> dict:
+        response = self._session.get(
+            f"{self._host}/book",
+            params={"token_id": str(token_id)},
+            timeout=self._timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise TypeError("CLOB /book response must be an object")
+        return payload
+
+
 def _order_list(entries: list | None) -> list[dict]:
     """Normalise a list of book-level objects to plain dicts with float fields."""
     if not entries:
@@ -93,4 +124,3 @@ class OrderbookFetcher:
             "best_ask":  best_ask,
             "mid_price": mid_price,
         }
-

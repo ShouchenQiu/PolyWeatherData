@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -56,24 +57,36 @@ class DiscoveryLoop:
     async def run(self) -> None:
         """Poll Gamma API on a fixed interval until cancelled."""
         logger.info("DiscoveryLoop started (interval={}s)", self._interval_seconds)
-        while True:
-            logger.debug("DiscoveryLoop: running discover()")
-            try:
-                await asyncio.to_thread(self._discovery.discover)
-                logger.debug("DiscoveryLoop: discover() completed")
-            except Exception:
-                logger.exception("DiscoveryLoop: unhandled error in discover()")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            while True:
+                logger.debug("DiscoveryLoop: running discover()")
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        executor,
+                        self._discovery.discover,
+                    )
+                    logger.debug("DiscoveryLoop: discover() completed")
+                except Exception:
+                    logger.exception("DiscoveryLoop: unhandled error in discover()")
 
-            if self._db is not None and self._lifecycle is not None:
-                await self._advance_lifecycle()
+                if self._db is not None and self._lifecycle is not None:
+                    await self._advance_lifecycle(executor)
 
-            await asyncio.sleep(self._interval_seconds)
+                # A zero interval is useful in tests but must still yield for
+                # cancellation before another worker call is submitted.
+                await asyncio.sleep(max(self._interval_seconds, 0.01))
 
-    async def _advance_lifecycle(self) -> None:
+    async def _advance_lifecycle(
+        self,
+        executor: ThreadPoolExecutor,
+    ) -> None:
         """Advance lifecycle state for all non-terminal events in the DB."""
         now_utc = pd.Timestamp(datetime.now(timezone.utc))
         try:
-            events = await asyncio.to_thread(self._db.get_non_terminal_events)
+            events = await asyncio.get_running_loop().run_in_executor(
+                executor,
+                self._db.get_non_terminal_events,
+            )
         except Exception:
             logger.exception("DiscoveryLoop: failed to query non-terminal events")
             return

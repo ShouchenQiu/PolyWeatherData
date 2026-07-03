@@ -39,17 +39,19 @@ class PositionTracker:
         created_at: str | None = None,
         is_paper: bool = False,
         executable_price: float | None = None,
+        fee_usd: float = 0.0,
     ) -> None:
         """Insert a pending order row. All nullable columns are NULL."""
         self._db.execute(
             """
             INSERT INTO orders
                 (order_id, token_id, condition_id, side, size_usd, price,
-                 status, created_at, is_paper, executable_price)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                 status, created_at, is_paper, executable_price, fee_usd)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
             """,
             (order_id, token_id, condition_id, side, size_usd, price,
-             created_at or _utc_now(), int(is_paper), executable_price),
+             created_at or _utc_now(), int(is_paper), executable_price,
+             fee_usd),
         )
 
     def mark_filled(
@@ -65,21 +67,22 @@ class PositionTracker:
         SELL fills: negative signed_shares, positive cash_flow_usd (inflow).
         """
         rows = self._db.query(
-            "SELECT side, size_usd FROM orders WHERE order_id=?",
+            "SELECT side, size_usd, fee_usd FROM orders WHERE order_id=?",
             (order_id,),
         )
         if not rows:
             return
         side     = rows[0]["side"]
         size_usd = float(rows[0]["size_usd"])
+        fee_usd = float(rows[0]["fee_usd"] or 0.0)
 
         filled_shares = size_usd / fill_price if fill_price > 0 else 0.0
         if side == "BUY":
             signed_shares = filled_shares
-            cash_flow_usd = -size_usd
+            cash_flow_usd = -(size_usd + fee_usd)
         else:
             signed_shares = -filled_shares
-            cash_flow_usd = size_usd
+            cash_flow_usd = size_usd - fee_usd
 
         self._db.execute(
             "UPDATE orders SET status='filled', fill_price=?, filled_at=?,"
@@ -144,6 +147,18 @@ class PositionTracker:
         )
         return float(rows[0][0])
 
+    def net_cash_flow_usd(self, is_paper: bool | None = None) -> float:
+        """Return cumulative filled-order cash flow for one execution mode."""
+        paper_sql = "" if is_paper is None else " AND is_paper=?"
+        params: tuple = () if is_paper is None else (int(is_paper),)
+        rows = self._db.query(
+            "SELECT COALESCE(SUM(cash_flow_usd), 0.0) FROM orders"
+            " WHERE status='filled' AND cash_flow_usd IS NOT NULL"
+            f"{paper_sql}",
+            params,
+        )
+        return float(rows[0][0])
+
     def exposure_by_condition(self, condition_id: str) -> float:
         """Sum of size_usd for pending|filled orders matching condition_id."""
         rows = self._db.query(
@@ -199,5 +214,3 @@ class PositionTracker:
             params,
         )
         return float(rows[0][0])
-
-

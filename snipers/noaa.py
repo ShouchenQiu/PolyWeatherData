@@ -9,6 +9,7 @@ Polling strategy:
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -103,9 +104,19 @@ class NoaaSniper(BaseSniperSource):
         self._running = True
         idle_session  = requests.Session()
         idle_session.headers.update(_HEADERS)
+        executor = ThreadPoolExecutor(max_workers=1)
+
+        async def _blocking(function, *args):
+            if self.IDLE_INTERVAL <= 0 or self.SNIPER_INTERVAL <= 0:
+                return function(*args)
+            return await asyncio.get_running_loop().run_in_executor(
+                executor,
+                function,
+                *args,
+            )
 
         try:
-            last_mod = await asyncio.to_thread(self._head, idle_session)
+            last_mod = await _blocking(self._head, idle_session)
             while self._running:
                 now      = datetime.now(timezone.utc)
                 ws, we   = self._sniper_window(now)
@@ -113,9 +124,9 @@ class NoaaSniper(BaseSniperSource):
                 if now < ws:
                     # ---- Idle mode: low-frequency polling ----
                     try:
-                        cur_mod = await asyncio.to_thread(self._head, idle_session)
+                        cur_mod = await _blocking(self._head, idle_session)
                         if cur_mod and cur_mod != last_mod:
-                            content = await asyncio.to_thread(self._get, idle_session)
+                            content = await _blocking(self._get, idle_session)
                             if content:
                                 on_observation(
                                     content, "NOAA", datetime.now(timezone.utc)
@@ -135,9 +146,9 @@ class NoaaSniper(BaseSniperSource):
                 try:
                     # TCP warm-up HEAD before tight polling loop
                     try:
-                        warm_mod = await asyncio.to_thread(self._head, session)
+                        warm_mod = await _blocking(self._head, session)
                         if warm_mod and warm_mod != last_mod:
-                            content = await asyncio.to_thread(self._get, session)
+                            content = await _blocking(self._get, session)
                             if content:
                                 on_observation(
                                     content, "NOAA", datetime.now(timezone.utc)
@@ -160,9 +171,9 @@ class NoaaSniper(BaseSniperSource):
                         and not captured
                     ):
                         try:
-                            cur_mod = await asyncio.to_thread(self._head, session)
+                            cur_mod = await _blocking(self._head, session)
                             if cur_mod and cur_mod != last_mod:
-                                content = await asyncio.to_thread(self._get, session)
+                                content = await _blocking(self._get, session)
                                 if content:
                                     on_observation(
                                         content, "NOAA", datetime.now(timezone.utc)
@@ -197,6 +208,7 @@ class NoaaSniper(BaseSniperSource):
                     )
         finally:
             idle_session.close()
+            executor.shutdown(wait=True, cancel_futures=True)
 
     async def stop(self) -> None:
         """Signal the polling loop to exit on the next iteration."""

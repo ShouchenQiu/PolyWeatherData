@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from data.clob.orderbook import OrderbookFetcher
+from data.clob.orderbook import ClobRestClient, OrderbookFetcher
 
 
 # ---------------------------------------------------------------------------
@@ -123,3 +123,41 @@ def test_orderbook_module_has_no_py_clob_client_import():
     import data.clob.orderbook as mod
     src = inspect.getsource(mod)
     assert "py_clob_client" not in src
+
+
+class _Response:
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return {
+            "asset_id": "tok-rest",
+            "bids": [{"price": "0.40", "size": "10"}],
+            "asks": [{"price": "0.42", "size": "12"}],
+        }
+
+
+class _Session:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def get(self, url, *, params, timeout):
+        self.calls.append((url, params, timeout))
+        return _Response()
+
+
+def test_rest_client_reads_public_clob_book_without_optional_sdk() -> None:
+    session = _Session()
+    client = ClobRestClient(session=session)
+
+    book = OrderbookFetcher(client).get_book("tok-rest")
+
+    assert session.calls == [
+        (
+            "https://clob.polymarket.com/book",
+            {"token_id": "tok-rest"},
+            30,
+        )
+    ]
+    assert book["best_bid"] == 0.40
+    assert book["best_ask"] == 0.42

@@ -32,6 +32,11 @@ from core.pricing.quote import compute_quote
 from core.probability_store import ProbabilitySnapshot, ProbabilityStore
 from core.risk.pipeline import RiskPipeline
 from core.strategy.multi import MultiStrategy
+from core.trading.decision import (
+    FeeSchedule,
+    PortfolioState,
+    TradingDecisionKernel,
+)
 from core.types import OrderIntent
 from data.clob.orderbook import OrderbookReader
 
@@ -81,6 +86,7 @@ class TradingLoop:
         db: "DbClient",
         orderbook: OrderbookReader | None = None,
         is_paper: bool = False,
+        decision_kernel: TradingDecisionKernel | None = None,
     ) -> None:
         if not isinstance(strategy, MultiStrategy):
             raise TypeError(
@@ -100,6 +106,7 @@ class TradingLoop:
         self._db         = db
         self._orderbook  = orderbook
         self._is_paper   = is_paper
+        self._decision_kernel = decision_kernel
         self._observability = ObservabilityRecorder(db)
 
     @property
@@ -309,6 +316,132 @@ class TradingLoop:
                     tick_utc        = tick_utc_str,
                 )
 
+                if self._decision_kernel is not None:
+                    token_ids = [str(market["token_id"]) for market in markets]
+                    portfolio = PortfolioState(
+                        cash_usd=(
+                            self._settings.starting_cash_usd
+                            + self._positions.net_cash_flow_usd(
+                                is_paper=self._is_paper
+                            )
+                        ),
+                        shares_by_token={
+                            token_id: self._positions.position_shares(
+                                token_id,
+                                is_paper=self._is_paper,
+                            )
+                            for token_id in token_ids
+                        },
+                        notional_by_token={
+                            token_id: self._positions.position_size_usd(
+                                token_id,
+                                is_paper=self._is_paper,
+                            )
+                            for token_id in token_ids
+                        },
+                        event_by_token={
+                            token_id: condition_id for token_id in token_ids
+                        },
+                        gross_exposure_usd=current_exposure,
+                        event_exposure_by_id={
+                            condition_id: self._positions.exposure_by_condition(
+                                condition_id
+                            )
+                        },
+                    )
+                    decision = self._decision_kernel.decide(
+                        signal,
+                        books,
+                        portfolio,
+                        fee_schedule=_fee_schedule_for_signal(
+                            signal,
+                            markets,
+                        ),
+                    )
+                    if not decision.approved:
+                        self._reject_signal(
+                            signal_id,
+                            decision.token_id,
+                            decision.side,
+                            decision.executable_price or 0.0,
+                            decision.size_usd,
+                            decision.reason or "kernel_rejected",
+                        )
+                        continue
+                    intent_token_id = str(decision.token_id)
+                    intent_side = str(decision.side)
+                    size_usd = float(decision.size_usd)
+                    executable_price = float(decision.executable_price)
+                    self._db.update_signal_decision(
+                        signal_id=signal_id,
+                        final_token_id=intent_token_id,
+                        final_side=intent_side,
+                        executable_price=executable_price,
+                        approved=1,
+                        reject_reason=None,
+                        computed_size=size_usd,
+                    )
+                    try:
+                        order_id = self._exchange.place_order(
+                            token_id=intent_token_id,
+                            side=intent_side,
+                            size_usd=size_usd,
+                            price=executable_price,
+                        )
+                        if not order_id:
+                            self._reject_signal(
+                                signal_id,
+                                intent_token_id,
+                                intent_side,
+                                executable_price,
+                                size_usd,
+                                "order_submission_failed",
+                            )
+                            continue
+                        self._positions.record_order(
+                            order_id=order_id,
+                            token_id=intent_token_id,
+                            condition_id=condition_id,
+                            side=intent_side,
+                            size_usd=size_usd,
+                            price=executable_price,
+                            is_paper=self._is_paper,
+                            executable_price=executable_price,
+                            fee_usd=decision.fee_usd,
+                        )
+                        if self._is_paper:
+                            self._positions.mark_filled(
+                                order_id,
+                                executable_price,
+                            )
+                        self._db.update_signal_order_id(
+                            signal_id=signal_id,
+                            order_id=order_id,
+                        )
+                        submitted.append(order_id)
+                        if intent_side == "BUY":
+                            current_exposure += size_usd
+                            if intent_token_id == signal.yes_token_id:
+                                local_yes_buys.add(intent_token_id)
+                        else:
+                            current_exposure = max(
+                                0.0,
+                                current_exposure - size_usd,
+                            )
+                    except Exception:
+                        logger.exception(
+                            "TradingLoop: shared-kernel order submission failed"
+                        )
+                        self._reject_signal(
+                            signal_id,
+                            intent_token_id,
+                            intent_side,
+                            executable_price,
+                            size_usd,
+                            "order_submission_failed",
+                        )
+                    continue
+
                 # 2. Directional arbitration: resolve intent token and side
                 result = self._arbitrate(signal, local_yes_buys)
                 if result is None:
@@ -515,3 +648,23 @@ class TradingLoop:
         while True:
             await self.tick()
             await asyncio.sleep(self.interval_s)
+
+
+def _fee_schedule_for_signal(
+    signal: "DirectionalSignal",
+    markets: list[dict],
+) -> FeeSchedule:
+    tokens = {signal.yes_token_id, signal.no_token_id}
+    market = next(
+        (
+            row
+            for row in markets
+            if str(row.get("token_id")) in tokens
+        ),
+        {},
+    )
+    return FeeSchedule(
+        enabled=bool(market.get("fees_enabled", False)),
+        rate=market.get("fee_rate"),
+        exponent=market.get("fee_exponent", 1.0),
+    )

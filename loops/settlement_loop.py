@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -269,20 +270,25 @@ class SettlementLoop:
     async def run(self) -> None:
         """Periodically confirm settlement for all pending_settle events."""
         logger.info("SettlementLoop started (interval={}s)", self._interval_seconds)
-        while True:
-            try:
-                events = self._db.get_pending_settlement_events()
-                for event in events:
-                    cid        = event["condition_id"]
-                    station_id = event.get("station_id")
-                    try:
-                        await asyncio.to_thread(
-                            self.confirm_settlement, event, station_id
-                        )
-                    except Exception:
-                        logger.exception(
-                            "SettlementLoop: confirm_settlement failed for {}", cid
-                        )
-            except Exception:
-                logger.exception("SettlementLoop: unhandled error in run()")
-            await asyncio.sleep(self._interval_seconds)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            while True:
+                try:
+                    events = self._db.get_pending_settlement_events()
+                    for event in events:
+                        cid        = event["condition_id"]
+                        station_id = event.get("station_id")
+                        try:
+                            await asyncio.get_running_loop().run_in_executor(
+                                executor,
+                                self.confirm_settlement,
+                                event,
+                                station_id,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "SettlementLoop: confirm_settlement failed for {}",
+                                cid,
+                            )
+                except Exception:
+                    logger.exception("SettlementLoop: unhandled error in run()")
+                await asyncio.sleep(self._interval_seconds)

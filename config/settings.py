@@ -43,6 +43,8 @@ class Settings:
     min_edge: float = 0.04
     max_position_usd: float = 50.0
     max_total_usd: float = 500.0
+    max_event_usd: float = 150.0
+    starting_cash_usd: float = 500.0
 
     # HRRR source
     hrrr_s3_bucket: str = field(

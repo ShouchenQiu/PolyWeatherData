@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -65,21 +66,27 @@ class RedeemLoop:
             "RedeemLoop started (interval={}s)",
             self._interval_seconds,
         )
-        while True:
-            try:
-                tasks = self._db.get_pending_redeem_tasks()
-                for task in tasks:
-                    cid = task["condition_id"]
-                    market_id = task.get("market_id")
-                    try:
-                        await asyncio.to_thread(self._process_one, cid, market_id)
-                    except Exception:
-                        logger.exception(
-                            "RedeemLoop: process_one failed for {}", cid
-                        )
-            except Exception:
-                logger.exception("RedeemLoop: unhandled error in run()")
-            await asyncio.sleep(self._interval_seconds)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            while True:
+                try:
+                    tasks = self._db.get_pending_redeem_tasks()
+                    for task in tasks:
+                        cid = task["condition_id"]
+                        market_id = task.get("market_id")
+                        try:
+                            await asyncio.get_running_loop().run_in_executor(
+                                executor,
+                                self._process_one,
+                                cid,
+                                market_id,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "RedeemLoop: process_one failed for {}", cid
+                            )
+                except Exception:
+                    logger.exception("RedeemLoop: unhandled error in run()")
+                await asyncio.sleep(self._interval_seconds)
 
     # ------------------------------------------------------------------
     # Internal

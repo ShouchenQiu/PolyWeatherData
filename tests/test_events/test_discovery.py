@@ -24,15 +24,15 @@ from events.discovery import EventDiscovery, parse_slug
     ("klga-high-70forabove", (70.0, float("inf"))),
     ("klga-be-70f-or-above-daily-high", (70.0, float("inf"))),
     # open low end -- or-below variants
-    ("klga-high-55forbelow", (float("-inf"), 55.0)),
-    ("klga-high-55f-or-below", (float("-inf"), 55.0)),
-    ("klga-be-55f-or-below", (float("-inf"), 55.0)),
+    ("klga-high-55forbelow", (float("-inf"), 56.0)),
+    ("klga-high-55f-or-below", (float("-inf"), 56.0)),
+    ("klga-be-55f-or-below", (float("-inf"), 56.0)),
     # range
-    ("klga-high-temperature-60-70f-nyc", (60.0, 70.0)),
-    ("klga-daily-high-46-47f", (46.0, 47.0)),
+    ("klga-high-temperature-60-70f-nyc", (60.0, 71.0)),
+    ("klga-daily-high-46-47f", (46.0, 48.0)),
     # Current NYC weather event format resolves against KLGA.
-    ("highest-temperature-in-nyc-on-june-5-2026-81forbelow", (float("-inf"), 81.0)),
-    ("highest-temperature-in-nyc-on-june-5-2026-82-83f", (82.0, 83.0)),
+    ("highest-temperature-in-nyc-on-june-5-2026-81forbelow", (float("-inf"), 82.0)),
+    ("highest-temperature-in-nyc-on-june-5-2026-82-83f", (82.0, 84.0)),
     ("highest-temperature-in-nyc-on-june-5-2026-100forhigher", (100.0, float("inf"))),
 ])
 def test_parse_slug(slug, expected):
@@ -65,7 +65,7 @@ def test_parse_slug_case_insensitive():
     assert result is not None
     lo, hi = result
     assert lo == 50.0
-    assert hi == 60.0
+    assert hi == 61.0
 
 
 def test_parse_slug_no_station_returns_none():
@@ -182,6 +182,35 @@ def test_discover_persists_market_id(mem_db):
     assert row["market_id"] == "mkt-60-70"
 
 
+def test_discover_persists_current_market_fee_schedule(mem_db):
+    response = _gamma_response()
+    response[0]["markets"][0].update(
+        {
+            "feesEnabled": True,
+            "feeSchedule": {
+                "rate": 0.05,
+                "exponent": 1,
+                "takerOnly": True,
+            },
+        }
+    )
+    disc = EventDiscovery(db=mem_db, settings=_make_settings())
+
+    with patch.object(disc, "_fetch_events", return_value=response):
+        disc.discover()
+
+    row = mem_db._conn.execute(
+        "SELECT fees_enabled, fee_rate, fee_exponent, fee_taker_only "
+        "FROM markets WHERE token_id='tok-yes-1'"
+    ).fetchone()
+    assert dict(row) == {
+        "fees_enabled": 1,
+        "fee_rate": 0.05,
+        "fee_exponent": 1.0,
+        "fee_taker_only": 1,
+    }
+
+
 def test_discover_parses_buckets(mem_db):
     settings = _make_settings()
     disc     = EventDiscovery(db=mem_db, settings=settings)
@@ -197,7 +226,7 @@ def test_discover_parses_buckets(mem_db):
     key70 = "klga-highest-temperature-70f-or-higher-2025-03-20"
 
     assert key60 in slugs_to_buckets
-    assert slugs_to_buckets[key60] == (60.0, 70.0)
+    assert slugs_to_buckets[key60] == (60.0, 71.0)
 
     assert key70 in slugs_to_buckets
     assert slugs_to_buckets[key70] == (70.0, float("inf"))
@@ -243,7 +272,7 @@ def test_discover_parses_current_nyc_temperature_event(mem_db):
     }
     assert slugs_to_buckets[
         "highest-temperature-in-nyc-on-june-5-2026-81forbelow"
-    ] == (float("-inf"), 81.0)
+    ] == (float("-inf"), 82.0)
     assert slugs_to_buckets[
         "highest-temperature-in-nyc-on-june-5-2026-100forhigher"
     ] == (100.0, float("inf"))

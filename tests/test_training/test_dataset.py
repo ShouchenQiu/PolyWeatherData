@@ -404,6 +404,48 @@ def test_training_builder_uses_bootstrap_stores_to_build_one_sample(tmp_path):
     assert frame["decoder_weight"].eq(1.0).all()
 
 
+def test_inference_builder_does_not_require_future_observations(tmp_path):
+    station = STATIONS["KLGA"]
+    init = pd.Timestamp("2026-01-10 12:00:00", tz="UTC")
+    first_row = init - pd.Timedelta(hours=144)
+    forecast_store = ParquetStore(tmp_path / "forecast")
+    obs_store = ParquetStore(tmp_path / "obs")
+    _append_bootstrap_windows(
+        forecast_store,
+        obs_store,
+        station.station_id,
+        first_row,
+        145,
+    )
+    data_manager = DataManager(
+        [],
+        [],
+        forecast_store,
+        obs_store,
+        settings=Settings(),
+    )
+    cache = TrainingDecoderCache(
+        tmp_path / "decoder-cache",
+        source=FakeDecoderSource(),
+    )
+
+    frame = TrainingDatasetBuilder(
+        data_manager,
+        cache,
+    ).build_inference_frame(
+        station,
+        [init],
+        split="holdout",
+    )
+
+    assert len(frame) == 120
+    assert frame["split"].unique().tolist() == ["holdout"]
+    assert frame.iloc[:72]["temp_error"].notna().all()
+    assert frame.iloc[72:]["temp_error"].eq(0.0).all()
+    assert frame.iloc[:72]["decoder_weight"].eq(1.0).all()
+    assert frame.iloc[72:]["decoder_weight"].eq(0.0).all()
+
+
 def test_training_builder_reports_incremental_progress(tmp_path):
     station = STATIONS["KLGA"]
     init = pd.Timestamp("2026-01-10 12:00:00", tz="UTC")

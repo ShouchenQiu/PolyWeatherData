@@ -52,6 +52,7 @@ class BotManager:
         from core.exchange.paper import PaperExchange
         from data.clob.orderbook import OrderbookFetcher
         from core.positions import PositionTracker
+        from core.trading.decision import TradingDecisionKernel
         from core.probability_store import ProbabilityStore
         from core.risk.fixed_fraction import FixedFraction
         from core.risk.pipeline import RiskPipeline
@@ -193,6 +194,12 @@ class BotManager:
             db         = self.db,
             orderbook  = self.orderbook,
             is_paper   = (settings.trading_mode != "live"),
+            decision_kernel = TradingDecisionKernel(
+                min_edge=settings.min_edge,
+                buy_size_usd=settings.max_position_usd,
+                max_gross_usd=settings.max_total_usd,
+                max_event_usd=settings.max_event_usd,
+            ),
         )
         self.discovery_loop  = DiscoveryLoop(
             self.discovery,

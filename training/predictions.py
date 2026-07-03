@@ -1,6 +1,8 @@
 """Build aligned quantile prediction frames for offline evidence."""
 from __future__ import annotations
 
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,7 @@ def build_quantile_prediction_frame(
     """Reload a TFT checkpoint and align its quantiles with one audited split."""
     import torch
     from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
+    from pytorch_forecasting.metrics import MAE, MAPE, RMSE, SMAPE, QuantileLoss
 
     dataset = TimeSeriesDataSet.from_dataset(
         training_dataset,
@@ -29,9 +32,18 @@ def build_quantile_prediction_frame(
         batch_size=int(batch_size),
         num_workers=0,
     )
-    model = TemporalFusionTransformer.load_from_checkpoint(
-        str(checkpoint_path)
-    )
+    with _portable_checkpoint(
+        checkpoint_path,
+        torch=torch,
+        loss=QuantileLoss(quantiles=[0.1, 0.5, 0.9]),
+        logging_metrics=torch.nn.ModuleList(
+            [SMAPE(), MAE(), RMSE(), MAPE()]
+        ),
+    ) as portable_checkpoint:
+        model = TemporalFusionTransformer.load_from_checkpoint(
+            str(portable_checkpoint),
+            map_location="cpu",
+        )
     prediction = model.predict(
         loader,
         mode="quantiles",
@@ -86,3 +98,28 @@ def build_quantile_prediction_frame(
     if not rows:
         raise RuntimeError("quantile prediction produced no aligned rows")
     return pd.concat(rows, ignore_index=True)
+
+
+@contextmanager
+def _portable_checkpoint(
+    checkpoint_path: Path | str,
+    *,
+    torch: Any,
+    loss: Any,
+    logging_metrics: Any,
+):
+    """Replace pickled CUDA-bound metric objects without changing weights."""
+    payload = torch.load(
+        str(checkpoint_path),
+        map_location="cpu",
+        weights_only=False,
+    )
+    hyperparameters = payload.get("hyper_parameters", {})
+    hyperparameters["loss"] = loss
+    hyperparameters["logging_metrics"] = logging_metrics
+    special = payload.get("__special_save__", {})
+    special["loss"] = loss
+    special["logging_metrics"] = logging_metrics
+    with tempfile.NamedTemporaryFile(suffix=".ckpt") as handle:
+        torch.save(payload, handle.name)
+        yield Path(handle.name)

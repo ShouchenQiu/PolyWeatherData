@@ -17,6 +17,7 @@ from core.risk.pipeline import RiskPipeline
 from core.strategy.edge import EdgeStrategy
 from core.strategy.multi import MultiStrategy
 from core.types import DirectionalSignal
+from core.trading.decision import TradingDecisionKernel
 from db.schema import DbClient
 from loops.trading_loop import TradingLoop
 
@@ -889,6 +890,76 @@ def test_tick_requote_skips_when_stale_edge(db) -> None:
     result = asyncio.run(run())
     assert result == []
     exchange.place_order.assert_not_called()
+
+
+def test_shared_kernel_path_sells_held_no_before_buying_yes(db) -> None:
+    prob_store = ProbabilityStore()
+    station_id = next(iter(STATIONS))
+    now = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+    db.upsert_event(
+        "cid-kernel", "q", "slug", "2026-07-04",
+        station_id, status="active",
+    )
+    db.upsert_market(
+        "tok-yes-kernel", "cid-kernel", "yes", 60.0, 70.0, "YES"
+    )
+    db.upsert_market(
+        "tok-no-kernel", "cid-kernel", "no", 60.0, 70.0, "NO"
+    )
+    db._conn.execute(
+        "INSERT INTO orders(order_id,token_id,condition_id,side,size_usd,"
+        "price,status,is_paper,signed_shares,cash_flow_usd)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (
+            "seed-no", "tok-no-kernel", "cid-kernel", "BUY", 3.0,
+            0.30, "filled", 1, 10.0, -3.0,
+        ),
+    )
+    db._conn.commit()
+    signal = DirectionalSignal(
+        yes_token_id="tok-yes-kernel",
+        no_token_id="tok-no-kernel",
+        direction="bullish",
+        model_prob=0.70,
+        reference_price=0.50,
+        edge=0.20,
+        condition_id="cid-kernel",
+    )
+    strategy = MagicMock(spec=MultiStrategy)
+    strategy.compute_signals.return_value = [signal]
+    risk = MagicMock(spec=RiskPipeline)
+    exchange = MagicMock()
+    exchange.place_order.return_value = "kernel-exit"
+    loop = TradingLoop(
+        prob_store=prob_store,
+        alert_bus=AlertBus(),
+        settings=Settings(),
+        strategy=strategy,
+        risk=risk,
+        exchange=exchange,
+        positions=PositionTracker(db),
+        db=db,
+        orderbook=_make_orderbook(ask=0.50),
+        is_paper=True,
+        decision_kernel=TradingDecisionKernel(),
+    )
+
+    async def run() -> list[str]:
+        await prob_store.write(
+            "cid-kernel",
+            0,
+            ProbabilitySnapshot(
+                buckets={(60.0, 70.0): 0.70},
+                quantiles_by_fxx={},
+                last_tick_utc=now - timedelta(minutes=5),
+            ),
+        )
+        return await loop.tick(now=now)
+
+    assert asyncio.run(run()) == ["kernel-exit"]
+    assert exchange.place_order.call_args.kwargs["token_id"] == "tok-no-kernel"
+    assert exchange.place_order.call_args.kwargs["side"] == "SELL"
+    risk.approve_signal.assert_not_called()
 
 
 def test_tick_requote_skips_when_insufficient_depth(db) -> None:

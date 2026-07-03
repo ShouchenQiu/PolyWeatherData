@@ -10,6 +10,7 @@ Polling strategy:
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 from datetime import datetime, timezone
 from typing import Callable
@@ -86,8 +87,18 @@ class AwcSniper(BaseSniperSource):
         self._running = True
         session       = requests.Session()
         session.headers.update(_HEADERS)
+        executor = ThreadPoolExecutor(max_workers=1)
         seen_obs: set[str] = set()
         seen_order: deque[str] = deque()
+
+        async def _blocking(function, *args):
+            if self.NORMAL_INTERVAL <= 0 or self.SNIPER_INTERVAL <= 0:
+                return function(*args)
+            return await asyncio.get_running_loop().run_in_executor(
+                executor,
+                function,
+                *args,
+            )
 
         def _mark_seen(obs: str) -> None:
             if obs in seen_obs:
@@ -100,7 +111,7 @@ class AwcSniper(BaseSniperSource):
         # Baseline: pre-seed seen_obs so the current observation is not
         # forwarded as a new capture on the first poll.
         try:
-            warmup = await asyncio.to_thread(self._get, session)
+            warmup = await _blocking(self._get, session)
             if warmup:
                 _mark_seen(warmup)
         except Exception as exc:
@@ -111,7 +122,7 @@ class AwcSniper(BaseSniperSource):
                 now = datetime.now(timezone.utc)
                 sniper = self._in_sniper_window(now)
                 try:
-                    raw = await asyncio.to_thread(self._get, session)
+                    raw = await _blocking(self._get, session)
                     if raw and raw not in seen_obs:
                         on_observation(raw, "AWC", datetime.now(timezone.utc))
                         _mark_seen(raw)
@@ -124,6 +135,7 @@ class AwcSniper(BaseSniperSource):
             raise
         finally:
             session.close()
+            executor.shutdown(wait=True, cancel_futures=True)
 
     async def stop(self) -> None:
         """Signal the polling loop to exit on the next iteration."""
