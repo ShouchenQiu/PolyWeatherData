@@ -7,6 +7,7 @@ Sidebar navigation:
     Overview          -- production monitoring summary
     Data Health       -- ingestion and forecast freshness
     Polymarket        -- events, markets, tokens, latest prices
+    Historical CLOB   -- immutable historical market-data audit
     Signals & Orders  -- decision funnel and order lifecycle
     Forecast & Model  -- forecast snapshots, TFT quantiles, MC buckets
     Model Evaluation  -- offline HRRR/TFT/MC validation diagnostics
@@ -70,6 +71,7 @@ PAGES = [
     "Overview",
     "Data Health",
     "Polymarket",
+    "Historical CLOB",
     "Signals & Orders",
     "Forecast & Model",
     "Model Evaluation",
@@ -109,6 +111,10 @@ elif page == "Data Health":
 elif page == "Polymarket":
     from ui.pages import polymarket
     polymarket.render(db)
+
+elif page == "Historical CLOB":
+    from ui.pages import historical_clob
+    historical_clob.render()
 
 elif page == "Signals & Orders":
     from ui.pages import signals_orders

@@ -201,13 +201,13 @@ class HistoricalClobSource:
         transport: JsonTransport | None = None,
         gamma_api: str = "https://gamma-api.polymarket.com",
         data_api: str = "https://data-api.polymarket.com",
-        trade_page_size: int = 10_000,
+        trade_page_size: int = 1_000,
         max_trade_offset: int = 10_000,
         cache_dir: Path | str | None = None,
         progress_callback: Callable[[int, int, str, int, int], None] | None = None,
     ) -> None:
-        if not 1 <= trade_page_size <= 10_000:
-            raise ValueError("trade_page_size must be between 1 and 10,000")
+        if not 1 <= trade_page_size <= 1_000:
+            raise ValueError("trade_page_size must be between 1 and 1,000")
         if max_trade_offset < 0:
             raise ValueError("max_trade_offset must be non-negative")
         self._transport = transport or RequestsJsonTransport()
@@ -377,8 +377,14 @@ class HistoricalClobSource:
 
     def _fetch_trades(self, condition_id: str) -> list[dict]:
         cached = self._read_cache("trades", condition_id)
-        if cached is not None:
-            return list(cached) if isinstance(cached, list) else []
+        if isinstance(cached, dict) and cached.get("complete") is True:
+            cached_rows = cached.get("rows", [])
+            return list(cached_rows) if isinstance(cached_rows, list) else []
+        if isinstance(cached, list) and len(cached) % self._trade_page_size:
+            # Legacy cache files did not persist pagination completeness.
+            # A short final page proves completion; an exact page boundary
+            # must be fetched again because the API silently caps at 1,000.
+            return list(cached)
         rows: list[dict] = []
         offset = 0
         while offset <= self._max_trade_offset:
@@ -394,7 +400,15 @@ class HistoricalClobSource:
             page = list(payload) if isinstance(payload, list) else []
             rows.extend(page)
             if len(page) < self._trade_page_size:
-                self._write_cache("trades", condition_id, rows)
+                self._write_cache(
+                    "trades",
+                    condition_id,
+                    {
+                        "complete": True,
+                        "page_size": self._trade_page_size,
+                        "rows": rows,
+                    },
+                )
                 return rows
             offset += self._trade_page_size
         raise HistoricalDataIncomplete(

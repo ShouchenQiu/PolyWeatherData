@@ -310,6 +310,119 @@ def test_historical_source_paginates_trades_until_a_short_page() -> None:
     assert offsets == [0, 2]
 
 
+def test_historical_source_default_page_size_matches_data_api_cap() -> None:
+    event = {
+        "id": "event-1",
+        "slug": "highest-temperature-in-nyc-on-april-2-2026",
+        "endDate": "2026-04-03T03:59:00Z",
+        "markets": [
+            {
+                "id": "market-1",
+                "conditionId": "condition-1",
+                "slug": "highest-temperature-in-nyc-on-april-2-2026-70-71f",
+                "clobTokenIds": ["yes-1", "no-1"],
+                "outcomes": ["Yes", "No"],
+            }
+        ],
+    }
+
+    def trade(index: int) -> dict:
+        return {
+            "asset": "yes-1",
+            "conditionId": "condition-1",
+            "outcome": "Yes",
+            "side": "BUY",
+            "price": 0.42,
+            "size": 25.0,
+            "timestamp": 1775106300 + index,
+            "transactionHash": f"tx-{index}",
+        }
+
+    transport = _PagedTransport(
+        event,
+        {
+            0: [trade(index) for index in range(1000)],
+            1000: [trade(1000)],
+        },
+    )
+
+    dataset = HistoricalClobSource(transport=transport).fetch(
+        start_date="2026-04-02",
+        end_date="2026-04-02",
+        station=STATIONS["KLGA"],
+    )
+
+    assert len(dataset.trades) == 1001
+    offsets = [
+        params["offset"]
+        for url, params in transport.calls
+        if url.endswith("/trades")
+    ]
+    assert offsets == [0, 1000]
+
+
+def test_historical_source_rechecks_legacy_cache_at_page_boundary(
+    tmp_path,
+) -> None:
+    event = {
+        "id": "event-1",
+        "slug": "highest-temperature-in-nyc-on-april-2-2026",
+        "markets": [
+            {
+                "id": "market-1",
+                "conditionId": "condition-1",
+                "slug": "highest-temperature-in-nyc-on-april-2-2026-70-71f",
+                "clobTokenIds": ["yes-1", "no-1"],
+                "outcomes": ["Yes", "No"],
+            }
+        ],
+    }
+
+    def trade(index: int) -> dict:
+        return {
+            "asset": "yes-1",
+            "conditionId": "condition-1",
+            "outcome": "Yes",
+            "side": "BUY",
+            "price": 0.42,
+            "size": 25.0,
+            "timestamp": 1775106300 + index,
+            "transactionHash": f"tx-{index}",
+        }
+
+    cache_dir = tmp_path / "raw-cache"
+    trade_cache = cache_dir / "trades"
+    trade_cache.mkdir(parents=True)
+    (trade_cache / "condition-1.json").write_text(
+        json.dumps([trade(index) for index in range(1000)]),
+        encoding="utf-8",
+    )
+    transport = _PagedTransport(
+        event,
+        {
+            0: [trade(index) for index in range(1000)],
+            1000: [trade(1000)],
+        },
+    )
+
+    dataset = HistoricalClobSource(
+        transport=transport,
+        cache_dir=cache_dir,
+    ).fetch(
+        start_date="2026-04-02",
+        end_date="2026-04-02",
+        station=STATIONS["KLGA"],
+    )
+
+    assert len(dataset.trades) == 1001
+    offsets = [
+        params["offset"]
+        for url, params in transport.calls
+        if url.endswith("/trades")
+    ]
+    assert offsets == [0, 1000]
+
+
 def test_historical_source_rejects_trade_history_truncated_at_api_boundary() -> None:
     event = {
         "id": "event-1",
