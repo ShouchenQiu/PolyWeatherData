@@ -75,9 +75,15 @@ _Avoid_: bin, range
 date, and bucket bounds.
 _Avoid_: market id
 
-**edge**: The difference between the model's estimated probability for a Token and the
-market's implied probability (mid_price); the primary trading signal.
+**edge**: The difference between the model's estimated probability for a Token and its
+fee-adjusted executable price for the intended order size; the primary trading signal.
+Mid-price is display evidence, not an executable edge input.
 _Avoid_: alpha, signal (edge has a precise meaning here)
+
+**conservative executable edge**: The lower confidence bound of the calibrated Token
+probability minus its fee-adjusted executable price. Diagnostic replay may enter only
+when this value clears its frozen threshold.
+_Avoid_: raw edge, midpoint edge
 
 **CLOB**: The Polymarket central limit order book; the live venue for order submission,
 cancellation, and fill tracking.
@@ -145,6 +151,17 @@ _Avoid_: run config, Optuna config
 executions that all reference one ready training workspace and one immutable
 experiment-template revision.
 _Avoid_: run, training workspace
+
+**backtest study**: A governed trading-research lifecycle bound to immutable forecast,
+synthetic-quote, CLOB, and resolution-truth hashes plus one split role. Development uses
+only `oof_development`; trading research cannot use `model_test`; a frozen study may
+consume `post_test_holdout` once.
+_Avoid_: training study, ad-hoc replay
+
+**diagnostic replay**: A signal-quality replay with an independent fixed risk per Event,
+at most one first qualifying Token entry per Event, and settlement-only exit. It excludes
+adaptive sizing, adding, and reversal so money management cannot mask signal quality.
+_Avoid_: portfolio backtest, strategy optimisation
 
 **trial snapshot**: The immutable resolved configuration and evidence for one
 managed training execution, including its exact hyperparameters, data fingerprint,

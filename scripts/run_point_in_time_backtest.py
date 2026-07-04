@@ -2,16 +2,11 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
+import json
 from pathlib import Path
 
-import pandas as pd
-
 from backtest.forecast_cache import ForecastCache
-from backtest.replay import PointInTimeReplay, ReplayStrategy
-from backtest.reporting import ReplayArtifact, build_replay_report
-from backtest.synthetic_quotes import SyntheticQuoteDataset
-from data.clob.history import HistoricalClobDataset
+from backtest.study import BacktestStudy, StudyInputs
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -29,107 +24,81 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--station", default="KLGA")
     parser.add_argument("--start-target")
     parser.add_argument("--end-target")
+    parser.add_argument("--catalog", type=Path)
+    parser.add_argument("--study-id")
+    parser.add_argument("--folds", type=int, default=4)
+    parser.add_argument("--bootstrap-samples", type=int, default=5_000)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    forecast = ForecastCache.load(args.forecast_root)
-    quotes = SyntheticQuoteDataset.load(args.quotes_root)
-    clob = HistoricalClobDataset.load(args.clob_root)
-    actual_frame = (
-        pd.read_parquet(args.actual_highs)
-        if args.actual_highs.suffix == ".parquet"
-        else pd.read_csv(args.actual_highs)
-    )
-    required_actual = {"target_date", "actual_high_f"}
-    if not required_actual.issubset(actual_frame.columns):
+    if args.strategy != "baseline":
         raise ValueError(
-            "actual-highs file must contain target_date and actual_high_f"
+            "governed diagnostic replay supports only the frozen baseline "
+            "strategy"
         )
-    actual_highs = {
-        pd.Timestamp(row.target_date).date().isoformat(): float(
-            row.actual_high_f
-        )
-        for row in actual_frame.itertuples(index=False)
-    }
-    events = clob.events[
-        ["event_id", "target_date", "event_end_at"]
-    ].copy()
     if bool(args.start_target) != bool(args.end_target):
         raise ValueError(
             "--start-target and --end-target must be provided together"
         )
-    if args.start_target:
-        target_dates = pd.to_datetime(events["target_date"]).dt.date
-        start_target = pd.Timestamp(args.start_target).date()
-        end_target = pd.Timestamp(args.end_target).date()
-        events = events[
-            (target_dates >= start_target)
-            & (target_dates <= end_target)
-        ].copy()
-    if events.empty:
-        raise ValueError("no CLOB events remain in requested target range")
-    markets = clob.markets.merge(
-        events,
-        on="event_id",
-        how="inner",
-        validate="many_to_one",
+    clob_manifest = json.loads(
+        (args.clob_root / "manifest.json").read_text(encoding="utf-8")
     )
-    scheduled_end = (
-        markets["market_end_at"]
-        if "market_end_at" in markets
-        else pd.Series(pd.NaT, index=markets.index)
+    start_target, end_target = (
+        (args.start_target, args.end_target)
+        if args.start_target
+        else tuple(clob_manifest["requested_range"])
     )
-    resolved_at = (
-        markets["closed_at"]
-        if "closed_at" in markets
-        else pd.Series(pd.NaT, index=markets.index)
+    inputs = StudyInputs(
+        forecast_root=args.forecast_root,
+        quotes_root=args.quotes_root,
+        clob_root=args.clob_root,
+        actuals_path=args.actual_highs,
     )
-    markets["market_end_at"] = (
-        pd.to_datetime(resolved_at, utc=True, errors="coerce")
-        .fillna(pd.to_datetime(scheduled_end, utc=True, errors="coerce"))
-        .fillna(pd.to_datetime(markets["event_end_at"], utc=True))
+    catalog_path = args.catalog or args.output.parent / "studies.sqlite"
+    study = BacktestStudy(catalog_path)
+    forecast = ForecastCache.load(args.forecast_root)
+    split_roles = set(forecast.lineages["split_role"].astype(str))
+    if len(split_roles) != 1:
+        raise ValueError("forecast cache must contain exactly one split_role")
+    split_role = next(iter(split_roles))
+    if split_role == "oof_development":
+        if args.study_id:
+            study_id = args.study_id
+        else:
+            record = study.create_development(
+                station_id=args.station,
+                start_target=str(start_target),
+                end_target=str(end_target),
+                inputs=inputs,
+                strategy={"min_edge": 0.04, "risk_usd": 50.0},
+            )
+            study_id = record.study_id
+        study.run_development(
+            study_id,
+            output=args.output,
+            folds=args.folds,
+            bootstrap_samples=args.bootstrap_samples,
+        )
+    elif split_role == "post_test_holdout":
+        if not args.study_id:
+            raise ValueError(
+                "--study-id is required for post_test_holdout evaluation"
+            )
+        study.run_holdout(
+            args.study_id,
+            inputs=inputs,
+            output=args.output,
+            bootstrap_samples=args.bootstrap_samples,
+        )
+    else:
+        raise ValueError(f"{split_role} is forbidden for trading studies")
+    summary = json.loads(
+        (args.output / "summary.json").read_text(encoding="utf-8")
     )
-    quotes_frame = quotes.quotes[
-        quotes.quotes["condition_id"].isin(markets["condition_id"])
-    ].copy()
-    strategy = {
-        "baseline": ReplayStrategy.baseline,
-        "near_term": ReplayStrategy.near_term,
-        "liquid": ReplayStrategy.liquid,
-    }[args.strategy]()
-    replay = PointInTimeReplay(
-        forecast_cache=forecast,
-        quotes=quotes_frame,
-        markets=markets,
-        station_id=args.station,
-        strategy=strategy,
-    )
-    result = replay.run(actual_highs=actual_highs)
-    ReplayArtifact(result=result, strategy=strategy.name).save(
-        args.output,
-        source_sha256={
-            "forecast_manifest": _sha256(
-                args.forecast_root / "manifest.json"
-            ),
-            "quotes_manifest": _sha256(
-                args.quotes_root / "manifest.json"
-            ),
-            "clob_manifest": _sha256(args.clob_root / "manifest.json"),
-            "actual_highs": _sha256(args.actual_highs),
-        },
-    )
-    print(build_replay_report(result).summary, flush=True)
+    print(summary, flush=True)
     return 0
-
-
-def _sha256(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
 
 
 if __name__ == "__main__":

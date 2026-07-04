@@ -85,6 +85,12 @@ def render(
     if not (artifact_path / "manifest.json").exists():
         st.warning(f"Replay artifact missing: {artifact_path}")
         return
+    artifact_manifest = json.loads(
+        (artifact_path / "manifest.json").read_text(encoding="utf-8")
+    )
+    if artifact_manifest.get("data_class") == "backtest_edge_study":
+        _render_edge_study_artifact(artifact_path, strategy)
+        return
     artifact = ReplayArtifact.load(artifact_path)
     report = build_replay_report(artifact.result)
     summary = report.summary
@@ -119,3 +125,48 @@ def render(
     with st.expander("Trades and settlements"):
         st.dataframe(artifact.result.trades, use_container_width=True)
         st.dataframe(artifact.result.settlements, use_container_width=True)
+
+
+def _render_edge_study_artifact(path: Path, strategy: str) -> None:
+    summary = json.loads(
+        (path / "summary.json").read_text(encoding="utf-8")
+    )
+    signal = summary["signal"]
+    money = summary["money"]
+    st.subheader(f"{strategy}: governed edge study")
+    metrics = st.columns(6)
+    metrics[0].metric("Net PnL", f"${money['net_pnl_usd']:,.2f}")
+    metrics[1].metric("Trades", int(money["trade_count"]))
+    metrics[2].metric("Event days", int(money["event_days"]))
+    metrics[3].metric("Fees", f"${money['fees_usd']:,.2f}")
+    metrics[4].metric(
+        "Realized edge LCB",
+        f"{signal['realized_edge_lcb_90']:.3f}",
+    )
+    metrics[5].metric(
+        "Paper status",
+        "ELIGIBLE" if summary["paper_eligible"] else "BLOCKED",
+    )
+    st.caption(
+        "Signal quality is reported independently from fixed-risk money "
+        "outcomes. Gate reasons: "
+        + (", ".join(summary["gate_reasons"]) or "none")
+    )
+    by_stratum = pd.read_parquet(path / "by_stratum.parquet")
+    trades = pd.read_parquet(path / "trades.parquet")
+    settlements = pd.read_parquet(path / "settlements.parquet")
+    decisions = pd.read_parquet(path / "decisions.parquet")
+    st.subheader("Signal calibration by stratum")
+    st.dataframe(by_stratum, use_container_width=True)
+    if not settlements.empty:
+        daily = settlements.groupby("target_date", as_index=False)[
+            "realized_pnl_usd"
+        ].sum()
+        st.subheader("Event-day realized PnL")
+        st.bar_chart(daily.set_index("target_date")["realized_pnl_usd"])
+    if not decisions.empty:
+        st.subheader("Decision evidence")
+        st.dataframe(decisions, use_container_width=True)
+    with st.expander("Trades and settlements"):
+        st.dataframe(trades, use_container_width=True)
+        st.dataframe(settlements, use_container_width=True)

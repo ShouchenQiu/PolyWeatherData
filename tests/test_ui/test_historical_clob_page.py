@@ -11,6 +11,11 @@ from streamlit.testing.v1 import AppTest
 from backtest.synthetic_quotes import SyntheticQuoteDataset
 from data.clob.history import HistoricalClobDataset
 from ui.pages.historical_clob import (
+    _bucket_comparison_figure,
+    _execution_price_figure,
+    _liquidity_figure,
+    _shared_synthetic_x_axis,
+    _synthetic_price_figure,
     default_artifact_index,
     discover_historical_clob_artifacts,
     event_total_volume,
@@ -432,6 +437,123 @@ def test_synthetic_page_charts_actionable_50_dollar_execution_prices(
     assert "$50 executable prices" in subheaders
     assert "YES executable price" in subheaders
     assert "NO executable price" in subheaders
+
+
+def test_synthetic_book_figures_share_the_full_page_time_axis() -> None:
+    selected_quotes = pd.DataFrame(
+        [
+            {
+                "timestamp": pd.Timestamp("2026-04-01T12:00:00Z"),
+                "bid_price_yes": 0.40,
+                "mid_price_yes": 0.41,
+                "ask_price_yes": 0.42,
+                "capacity_usdc": 100.0,
+                "impact_per_usdc": 0.001,
+                "rolling_volume_usdc": 200.0,
+            },
+            {
+                "timestamp": pd.Timestamp("2026-04-01T18:00:00Z"),
+                "bid_price_yes": 0.45,
+                "mid_price_yes": 0.46,
+                "ask_price_yes": 0.47,
+                "capacity_usdc": 120.0,
+                "impact_per_usdc": 0.001,
+                "rolling_volume_usdc": 250.0,
+            },
+        ]
+    )
+    trades = pd.DataFrame(
+        [
+            {
+                "timestamp": pd.Timestamp("2026-04-01T13:00:00Z"),
+                "outcome": "YES",
+                "price": 0.41,
+            }
+        ]
+    )
+    comparison = pd.DataFrame(
+        [
+            {
+                "timestamp": pd.Timestamp("2026-04-01T06:00:00Z"),
+                "bucket": "59°F or below",
+                "mid_price_yes": 0.10,
+            },
+            {
+                "timestamp": pd.Timestamp("2026-04-02T00:00:00Z"),
+                "bucket": "60°F or above",
+                "mid_price_yes": 0.90,
+            },
+        ]
+    )
+    execution = pd.DataFrame(
+        [
+            {
+                "timestamp": timestamp,
+                "outcome": outcome,
+                "buy_vwap": 0.48,
+                "sell_vwap": 0.44,
+            }
+            for timestamp in selected_quotes["timestamp"]
+            for outcome in ("YES", "NO")
+        ]
+    )
+    axis = _shared_synthetic_x_axis(
+        selected_quotes,
+        trades,
+        comparison,
+    )
+    figures = [
+        _synthetic_price_figure(
+            selected_quotes,
+            trades,
+            outcome=outcome,
+            timezone="America/New_York",
+            x_axis=axis,
+        )
+        for outcome in ("YES", "NO")
+    ]
+    figures.extend(
+        _execution_price_figure(
+            execution,
+            outcome=outcome,
+            timezone="America/New_York",
+            order_usdc=50.0,
+            x_axis=axis,
+        )
+        for outcome in ("YES", "NO")
+    )
+    figures.extend(
+        [
+            _liquidity_figure(
+                selected_quotes,
+                timezone="America/New_York",
+                x_axis=axis,
+            ),
+            _bucket_comparison_figure(
+                comparison,
+                timezone="America/New_York",
+                x_axis=axis,
+            ),
+        ]
+    )
+
+    layouts = [
+        (
+            tuple(figure.layout.xaxis.range),
+            figure.layout.xaxis.tick0,
+            figure.layout.xaxis.dtick,
+            figure.layout.xaxis.tickformat,
+            figure.layout.margin.to_plotly_json(),
+        )
+        for figure in figures
+    ]
+    assert all(layout == layouts[0] for layout in layouts)
+    assert pd.Timestamp(layouts[0][0][0]) == pd.Timestamp(
+        "2026-04-01T06:00:00Z"
+    )
+    assert pd.Timestamp(layouts[0][0][1]) == pd.Timestamp(
+        "2026-04-02T00:00:00Z"
+    )
 
 
 def test_trades_page_shows_official_compatible_event_volume_without_raw_rows(

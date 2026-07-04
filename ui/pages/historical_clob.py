@@ -393,6 +393,12 @@ def _render_synthetic_book(artifact: HistoricalClobArtifact) -> None:
     if not trades.empty:
         trades["timestamp"] = _to_local(trades["timestamp"], timezone)
         trades["outcome"] = trades["outcome"].astype(str).str.upper()
+    comparison = _bucket_comparison_frame(
+        artifact,
+        target_date=target_date,
+        timezone=timezone,
+    )
+    x_axis = _shared_synthetic_x_axis(quotes, trades, comparison)
 
     actual_high = _actual_high_for_date(artifact, target_date)
     metrics = st.columns(6)
@@ -427,6 +433,7 @@ def _render_synthetic_book(artifact: HistoricalClobArtifact) -> None:
                 trades,
                 outcome=outcome,
                 timezone=timezone,
+                x_axis=x_axis,
             ),
             width="stretch",
         )
@@ -446,6 +453,7 @@ def _render_synthetic_book(artifact: HistoricalClobArtifact) -> None:
                 outcome=outcome,
                 timezone=timezone,
                 order_usdc=50.0,
+                x_axis=x_axis,
             ),
             width="stretch",
         )
@@ -456,7 +464,7 @@ def _render_synthetic_book(artifact: HistoricalClobArtifact) -> None:
         "price movement for a $50 order; lower is better."
     )
     st.plotly_chart(
-        _liquidity_figure(quotes, timezone=timezone),
+        _liquidity_figure(quotes, timezone=timezone, x_axis=x_axis),
         width="stretch",
     )
 
@@ -465,16 +473,15 @@ def _render_synthetic_book(artifact: HistoricalClobArtifact) -> None:
         "Synthetic YES midpoint by bucket. Click a legend item to hide or "
         "restore its line."
     )
-    comparison = _bucket_comparison_frame(
-        artifact,
-        target_date=target_date,
-        timezone=timezone,
-    )
     if comparison.empty:
         st.info("No same-day synthetic quotes available for comparison.")
     else:
         st.plotly_chart(
-            _bucket_comparison_figure(comparison, timezone=timezone),
+            _bucket_comparison_figure(
+                comparison,
+                timezone=timezone,
+                x_axis=x_axis,
+            ),
             width="stretch",
         )
 
@@ -660,6 +667,7 @@ def _synthetic_price_figure(
     *,
     outcome: str,
     timezone: str,
+    x_axis: dict | None = None,
 ) -> go.Figure:
     figure = go.Figure()
     if outcome == "YES":
@@ -706,6 +714,7 @@ def _synthetic_price_figure(
         yaxis_title=f"{outcome} price",
         yaxis_range=[0.0, 1.0],
     )
+    _apply_shared_x_axis(figure, x_axis)
     return figure
 
 
@@ -752,6 +761,7 @@ def _execution_price_figure(
     outcome: str,
     timezone: str,
     order_usdc: float,
+    x_axis: dict | None = None,
 ) -> go.Figure:
     selected = execution[execution["outcome"] == outcome]
     figure = go.Figure()
@@ -779,6 +789,7 @@ def _execution_price_figure(
         yaxis_title=f"{outcome} executable VWAP",
         yaxis_range=[0.0, 1.0],
     )
+    _apply_shared_x_axis(figure, x_axis)
     return figure
 
 
@@ -799,6 +810,7 @@ def _liquidity_figure(
     quotes: pd.DataFrame,
     *,
     timezone: str,
+    x_axis: dict | None = None,
 ) -> go.Figure:
     work = quotes.set_index("timestamp").sort_index()
     interval = (
@@ -841,6 +853,7 @@ def _liquidity_figure(
             "rangemode": "tozero",
         },
     )
+    _apply_shared_x_axis(figure, x_axis)
     return figure
 
 
@@ -883,6 +896,7 @@ def _bucket_comparison_figure(
     comparison: pd.DataFrame,
     *,
     timezone: str,
+    x_axis: dict | None = None,
 ) -> go.Figure:
     figure = go.Figure()
     for bucket, rows in comparison.groupby("bucket", sort=False):
@@ -906,7 +920,62 @@ def _bucket_comparison_figure(
         yaxis_title="Synthetic YES midpoint",
         yaxis_range=[0.0, 1.0],
     )
+    _apply_shared_x_axis(figure, x_axis)
     return figure
+
+
+def _shared_synthetic_x_axis(*frames: pd.DataFrame) -> dict:
+    """Return one Plotly time-axis contract for every Synthetic Book chart."""
+    timestamps: list[pd.Series] = []
+    for frame in frames:
+        if not frame.empty and "timestamp" in frame:
+            values = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+            timestamps.append(values.dropna())
+    if not timestamps:
+        return {}
+    combined = pd.concat(timestamps, ignore_index=True)
+    start = combined.min()
+    end = combined.max()
+    if start == end:
+        start -= pd.Timedelta(minutes=30)
+        end += pd.Timedelta(minutes=30)
+    duration = end - start
+    intervals = [
+        ("15min", pd.Timedelta(minutes=15)),
+        ("30min", pd.Timedelta(minutes=30)),
+        ("1h", pd.Timedelta(hours=1)),
+        ("2h", pd.Timedelta(hours=2)),
+        ("3h", pd.Timedelta(hours=3)),
+        ("6h", pd.Timedelta(hours=6)),
+        ("12h", pd.Timedelta(hours=12)),
+        ("1D", pd.Timedelta(days=1)),
+        ("2D", pd.Timedelta(days=2)),
+        ("7D", pd.Timedelta(days=7)),
+    ]
+    frequency, interval = intervals[-1]
+    for candidate_frequency, candidate in intervals:
+        if duration / candidate <= 8:
+            frequency, interval = candidate_frequency, candidate
+            break
+    return {
+        "range": [start, end],
+        "tick0": start.floor(frequency),
+        "dtick": int(interval.total_seconds() * 1000),
+        "tickformat": "%m-%d\n%H:%M",
+        "margin": {"l": 80, "r": 80, "t": 40, "b": 70},
+    }
+
+
+def _apply_shared_x_axis(figure: go.Figure, contract: dict | None) -> None:
+    if not contract:
+        return
+    figure.update_xaxes(
+        range=contract["range"],
+        tick0=contract["tick0"],
+        dtick=contract["dtick"],
+        tickformat=contract["tickformat"],
+    )
+    figure.update_layout(margin=contract["margin"])
 
 
 def _bucket_label(lo: object, hi: object) -> str:

@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import json
-
 import pandas as pd
+import pytest
 
 from backtest.forecast_cache import ForecastCache
-from backtest.reporting import ReplayArtifact
 from backtest.synthetic_quotes import SyntheticQuoteDataset
 from data.clob.history import HistoricalClobDataset
 from scripts.run_point_in_time_backtest import main
 
 
-def test_cli_runs_immutable_inputs_through_trade_settlement_and_report(
+def test_cli_rejects_unmanaged_post_test_holdout(
     tmp_path,
 ) -> None:
     forecast_root = tmp_path / "forecast"
@@ -171,35 +169,24 @@ def test_cli_runs_immutable_inputs_through_trade_settlement_and_report(
     ).to_csv(actual_highs, index=False)
     output = tmp_path / "result"
 
-    exit_code = main(
-        [
-            "--forecast-root",
-            str(forecast_root),
-            "--quotes-root",
-            str(quotes_root),
-            "--clob-root",
-            str(clob_root),
-            "--actual-highs",
-            str(actual_highs),
-            "--output",
-            str(output),
-            "--strategy",
-            "baseline",
-            "--start-target",
-            "2026-06-05",
-            "--end-target",
-            "2026-06-05",
-        ]
-    )
-
-    artifact = ReplayArtifact.load(output)
-    summary = json.loads(
-        (output / "summary.json").read_text(encoding="utf-8")
-    )
-    assert exit_code == 0
-    assert artifact.result.ending_cash_usd == 550.0
-    assert len(artifact.result.trades) == 1
-    assert len(artifact.result.settlements) == 1
-    assert summary["net_pnl_usd"] == 50.0
-    assert artifact.result.decisions["approved"].tolist() == [True]
-    assert artifact.result.decisions["reason"].isna().all()
+    with pytest.raises(ValueError, match="study-id is required"):
+        main(
+            [
+                "--forecast-root",
+                str(forecast_root),
+                "--quotes-root",
+                str(quotes_root),
+                "--clob-root",
+                str(clob_root),
+                "--actual-highs",
+                str(actual_highs),
+                "--output",
+                str(output),
+                "--strategy",
+                "baseline",
+                "--start-target",
+                "2026-06-05",
+                "--end-target",
+                "2026-06-05",
+            ]
+        )

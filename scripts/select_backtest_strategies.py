@@ -8,8 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from backtest.reporting import ReplayArtifact
-from backtest.selection import event_day_pnl, select_strategy_candidates
+from backtest.selection import select_strategy_candidates
 from data.clob.history import HistoricalClobDataset
 
 
@@ -36,27 +35,38 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     result_paths = _parse_results(args.result)
-    clob = HistoricalClobDataset.load(args.clob_root)
-    events = clob.events[
-        (clob.events["target_date"] >= args.start_target)
-        & (clob.events["target_date"] <= args.end_target)
-    ].copy()
-    markets = clob.markets[
-        clob.markets["event_id"].isin(events["event_id"])
-    ].copy()
+    HistoricalClobDataset.load(args.clob_root)
     daily_by_strategy: dict[str, pd.DataFrame] = {}
+    study_ids: set[str] = set()
+    calibration_hashes: set[str] = set()
+    clob_manifest_sha = _sha256(args.clob_root / "manifest.json")
     for strategy, path in result_paths.items():
-        artifact = ReplayArtifact.load(path)
-        if artifact.strategy != strategy:
-            raise ValueError(
-                f"strategy mismatch for {path}: "
-                f"{artifact.strategy!r} != {strategy!r}"
-            )
-        daily_by_strategy[strategy] = event_day_pnl(
-            artifact.result,
-            events=events,
-            markets=markets,
+        result_manifest = json.loads(
+            (path / "manifest.json").read_text(encoding="utf-8")
         )
+        if result_manifest.get("data_class") != "backtest_edge_study":
+            raise ValueError(
+                f"{path} is not a managed BacktestStudy artifact"
+            )
+        if result_manifest.get("split_role") != "oof_development":
+            raise ValueError("strategy selection requires oof_development")
+        if (
+            result_manifest.get("input_sha256", {}).get("clob_manifest")
+            != clob_manifest_sha
+        ):
+            raise ValueError("strategy result uses another CLOB artifact")
+        study_ids.add(str(result_manifest["study_id"]))
+        calibration_hashes.add(str(result_manifest["calibration_sha256"]))
+        settlements = pd.read_parquet(path / "settlements.parquet")
+        daily_by_strategy[strategy] = (
+            settlements.groupby("target_date", as_index=False)[
+                "realized_pnl_usd"
+            ]
+            .sum()
+            .rename(columns={"target_date": "event_day"})
+        )
+    if len(study_ids) != 1 or len(calibration_hashes) != 1:
+        raise ValueError("strategy artifacts must share one study and calibration")
     selection = select_strategy_candidates(
         daily_by_strategy,
         min_event_days=args.min_event_days,
@@ -77,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
     manifest = {
         "schema_version": 1,
         "data_class": "development_strategy_selection",
+        "study_id": next(iter(study_ids)),
+        "calibration_sha256": next(iter(calibration_hashes)),
         "target_range": [args.start_target, args.end_target],
         "parameters": {
             "min_event_days": args.min_event_days,
@@ -89,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
             selection["selected"], "strategy"
         ].tolist(),
         "source_sha256": {
-            "clob_manifest": _sha256(args.clob_root / "manifest.json"),
+            "clob_manifest": clob_manifest_sha,
             **{
                 f"result_{strategy}": _sha256(path / "manifest.json")
                 for strategy, path in result_paths.items()
