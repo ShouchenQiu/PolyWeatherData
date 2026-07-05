@@ -6,16 +6,21 @@ from contextlib import ExitStack, nullcontext
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 from streamlit.testing.v1 import AppTest
 
+from backtest.forecast_cache import ForecastCache
 from backtest.synthetic_quotes import SyntheticQuoteDataset
 from data.clob.history import HistoricalClobDataset
 from ui.pages.historical_clob import (
     _bucket_comparison_figure,
+    _bucket_comparison_frame,
     _execution_price_figure,
     _liquidity_figure,
+    _model_probability_frame,
     _shared_synthetic_x_axis,
     _synthetic_price_figure,
+    _theoretical_buy_price_frame,
     default_artifact_index,
     discover_historical_clob_artifacts,
     event_total_volume,
@@ -117,6 +122,73 @@ def _attach_synthetic_quotes(root, artifact_name: str) -> None:
     )
 
 
+def _attach_forecast_cache(root, artifact_name: str) -> None:
+    manifest_path = (
+        root
+        / "backtest"
+        / "clob"
+        / "KLGA"
+        / artifact_name
+        / "manifest.json"
+    )
+    source_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    ForecastCache(
+        snapshots=pd.DataFrame(
+            [
+                {
+                    "snapshot_id": "snapshot",
+                    "station_id": "KLGA",
+                    "init_time": "2026-04-01T11:00:00Z",
+                    "target_date": "2026-04-01",
+                    "available_at": "2026-04-01T12:05:00Z",
+                    "p10_f": 55.0,
+                    "p50_f": 60.0,
+                    "p90_f": 65.0,
+                    "lineage_id": "lineage",
+                    "coverage_type": "observed_plus_forecast",
+                    "observed_high_f": 58.0,
+                    "observed_hour_count": 4,
+                    "observed_through": "2026-04-01T11:00:00Z",
+                    "forecast_hour_count": 20,
+                    "forecast_start_at": "2026-04-01T12:00:00Z",
+                    "forecast_through": "2026-04-02T07:00:00Z",
+                    "target_hour_count": 24,
+                }
+            ]
+        ),
+        probabilities=pd.DataFrame(
+            [
+                {
+                    "snapshot_id": "snapshot",
+                    "condition_id": f"{artifact_name}-low",
+                    "yes_probability": 0.7,
+                },
+                {
+                    "snapshot_id": "snapshot",
+                    "condition_id": f"{artifact_name}-high",
+                    "yes_probability": 0.3,
+                },
+            ]
+        ),
+        lineages=pd.DataFrame(
+            [
+                {
+                    "lineage_id": "lineage",
+                    "checkpoint_sha256": "a" * 64,
+                    "calibration_sha256": "b" * 64,
+                    "split_role": "oof_development",
+                    "mc_seed": 42,
+                    "mc_samples": 2000,
+                }
+            ]
+        ),
+    ).save(
+        root / "backtest" / "forecasts" / "KLGA" / "forecast",
+        created_at="2026-07-02T00:00:00Z",
+        source_sha256={"clob_manifest": source_sha256},
+    )
+
+
 def test_catalog_defaults_to_latest_passing_artifact(tmp_path) -> None:
     _artifact(
         tmp_path,
@@ -139,6 +211,31 @@ def test_catalog_defaults_to_latest_passing_artifact(tmp_path) -> None:
     ]
     assert not artifacts[0].audit.passed
     assert artifacts[1].audit.passed
+    assert default_artifact_index(artifacts) == 1
+
+
+def test_catalog_defaults_to_model_ready_passing_artifact(tmp_path) -> None:
+    _artifact(
+        tmp_path,
+        "model-ready",
+        gap=False,
+        fetched_at="2026-07-01T00:00:00Z",
+    )
+    _attach_synthetic_quotes(tmp_path, "model-ready")
+    _attach_forecast_cache(tmp_path, "model-ready")
+    _artifact(
+        tmp_path,
+        "newer-without-model",
+        gap=False,
+        fetched_at="2026-07-02T00:00:00Z",
+    )
+
+    artifacts = discover_historical_clob_artifacts(tmp_path)
+
+    assert [artifact.name for artifact in artifacts] == [
+        "newer-without-model",
+        "model-ready",
+    ]
     assert default_artifact_index(artifacts) == 1
 
 
@@ -201,6 +298,51 @@ def test_catalog_pairs_synthetic_quotes_by_source_manifest_hash(
     assert artifact.quotes_root is not None
     assert artifact.audit.passed
     assert artifact.audit.summary["quotes"] == 1
+
+
+def test_catalog_pairs_forecasts_by_source_manifest_hash(tmp_path) -> None:
+    _artifact(
+        tmp_path,
+        "valid",
+        gap=False,
+        fetched_at="2026-07-01T00:00:00Z",
+    )
+    _attach_forecast_cache(tmp_path, "valid")
+
+    artifact = discover_historical_clob_artifacts(tmp_path)[0]
+
+    assert len(artifact.forecasts) == 1
+    assert artifact.forecasts[0].snapshots["target_date"].tolist() == [
+        "2026-04-01"
+    ]
+    assert artifact.forecast_binding == "exact"
+
+
+def test_catalog_pairs_forecasts_when_market_payload_hash_matches(
+    tmp_path,
+) -> None:
+    _artifact(
+        tmp_path,
+        "source",
+        gap=False,
+        fetched_at="2026-07-01T00:00:00Z",
+    )
+    _attach_forecast_cache(tmp_path, "source")
+    source_root = tmp_path / "backtest" / "clob" / "KLGA" / "source"
+    HistoricalClobDataset.load(source_root).save(
+        tmp_path / "backtest" / "clob" / "KLGA" / "new-trades-version",
+        fetched_at="2026-07-02T00:00:00Z",
+    )
+
+    artifacts = discover_historical_clob_artifacts(tmp_path)
+    compatible = next(
+        artifact
+        for artifact in artifacts
+        if artifact.name == "new-trades-version"
+    )
+
+    assert len(compatible.forecasts) == 1
+    assert compatible.forecast_binding == "market_compatible"
 
 
 def test_catalog_applies_explicit_exclusions_from_quality_artifact(
@@ -439,6 +581,30 @@ def test_synthetic_page_charts_actionable_50_dollar_execution_prices(
     assert "NO executable price" in subheaders
 
 
+def test_synthetic_page_places_yes_and_no_bucket_comparisons_first(
+    tmp_path,
+) -> None:
+    _artifact(
+        tmp_path,
+        "valid",
+        gap=False,
+        fetched_at="2026-07-01T00:00:00Z",
+    )
+    _attach_synthetic_quotes(tmp_path, "valid")
+    _attach_forecast_cache(tmp_path, "valid")
+
+    app = AppTest.from_string(
+        "from ui.pages.historical_clob import render\n"
+        f"render(data_store_dir={str(tmp_path)!r})\n"
+    ).run(timeout=20)
+
+    subheaders = [subheader.value for subheader in app.subheader]
+    yes_comparison = subheaders.index("YES bucket comparison")
+    no_comparison = subheaders.index("NO bucket comparison")
+    yes_book = subheaders.index("YES synthetic book")
+    assert yes_comparison < no_comparison < yes_book
+
+
 def test_synthetic_book_figures_share_the_full_page_time_axis() -> None:
     selected_quotes = pd.DataFrame(
         [
@@ -554,6 +720,179 @@ def test_synthetic_book_figures_share_the_full_page_time_axis() -> None:
     assert pd.Timestamp(layouts[0][0][1]) == pd.Timestamp(
         "2026-04-02T00:00:00Z"
     )
+
+
+def test_bucket_comparison_overlays_model_fair_prices_for_yes_and_no(
+    tmp_path,
+) -> None:
+    _artifact(
+        tmp_path,
+        "valid",
+        gap=False,
+        fetched_at="2026-07-01T00:00:00Z",
+    )
+    _attach_synthetic_quotes(tmp_path, "valid")
+    _attach_forecast_cache(tmp_path, "valid")
+    artifact = discover_historical_clob_artifacts(tmp_path)[0]
+    comparison = _bucket_comparison_frame(
+        artifact,
+        target_date="2026-04-01",
+        condition_id="valid-low",
+        timezone="UTC",
+    )
+    model = _model_probability_frame(
+        artifact,
+        target_date="2026-04-01",
+        condition_id="valid-low",
+        timezone="UTC",
+    )
+
+    yes = _bucket_comparison_figure(
+        comparison,
+        model_probabilities=model,
+        outcome="YES",
+        timezone="UTC",
+    )
+    no = _bucket_comparison_figure(
+        comparison,
+        model_probabilities=model,
+        outcome="NO",
+        timezone="UTC",
+    )
+
+    assert [trace.name for trace in yes.data] == [
+        "CLOB mid",
+        "Model fair",
+    ]
+    assert [trace.name for trace in no.data] == [
+        "CLOB mid",
+        "Model fair",
+    ]
+    yes_model = next(
+        trace for trace in yes.data if trace.name == "Model fair"
+    )
+    no_model = next(
+        trace for trace in no.data if trace.name == "Model fair"
+    )
+    assert list(yes_model.y) == [0.7]
+    assert list(no_model.y) == pytest.approx([0.3])
+    assert yes_model.line.dash == "dash"
+    assert yes_model.line.color == no_model.line.color
+    assert model.iloc[0]["timestamp"] == pd.Timestamp(
+        "2026-04-01T12:05:00Z"
+    )
+    assert model.iloc[0]["init_time"] == pd.Timestamp(
+        "2026-04-01T11:00:00Z"
+    )
+    assert "init_time" in yes_model.hovertemplate
+    assert model.iloc[0]["coverage_type"] == "observed_plus_forecast"
+    assert "observed hours=" in yes_model.hovertemplate
+
+
+def test_synthetic_book_overlays_selected_bucket_theoretical_fair_price() -> None:
+    quotes = pd.DataFrame(
+        [
+            {
+                "timestamp": pd.Timestamp("2026-04-01T12:05:00Z"),
+                "bid_price_yes": 0.49,
+                "mid_price_yes": 0.50,
+                "ask_price_yes": 0.51,
+            }
+        ]
+    )
+    model = pd.DataFrame(
+        [
+            {
+                "timestamp": pd.Timestamp("2026-04-01T12:05:00Z"),
+                "yes_probability": 0.7,
+            }
+        ]
+    )
+    theoretical = pd.DataFrame(
+        [
+            {
+                "timestamp": pd.Timestamp("2026-04-01T12:05:00Z"),
+                "outcome": outcome,
+                "order_usdc": order_usdc,
+                "buy_vwap": 0.51 + order_usdc / 1000,
+            }
+            for outcome in ("YES", "NO")
+            for order_usdc in (1.0, 5.0, 10.0)
+        ]
+    )
+
+    yes = _synthetic_price_figure(
+        quotes,
+        pd.DataFrame(),
+        model_probabilities=model,
+        theoretical_execution=theoretical,
+        outcome="YES",
+        timezone="UTC",
+    )
+    no = _synthetic_price_figure(
+        quotes,
+        pd.DataFrame(),
+        model_probabilities=model,
+        theoretical_execution=theoretical,
+        outcome="NO",
+        timezone="UTC",
+    )
+
+    yes_fair = next(
+        trace for trace in yes.data if trace.name == "Model fair (theoretical)"
+    )
+    no_fair = next(
+        trace for trace in no.data if trace.name == "Model fair (theoretical)"
+    )
+    assert list(yes_fair.y) == [0.7]
+    assert list(no_fair.y) == pytest.approx([0.3])
+    assert yes_fair.line.dash == "dash"
+    yes_buy_traces = [
+        trace
+        for trace in yes.data
+        if trace.name.startswith("Theoretical buy")
+    ]
+    assert [trace.name for trace in yes_buy_traces] == [
+        "Theoretical buy $1 VWAP",
+        "Theoretical buy $5 VWAP",
+        "Theoretical buy $10 VWAP",
+    ]
+    assert [list(trace.y) for trace in yes_buy_traces] == [
+        [0.511],
+        [0.515],
+        [0.52],
+    ]
+
+
+def test_theoretical_buy_price_ignores_capacity_but_walks_spread_and_impact(
+) -> None:
+    quotes = pd.DataFrame(
+        [
+            {
+                "timestamp": pd.Timestamp("2026-04-01T12:05:00Z"),
+                "bid_price_yes": 0.79,
+                "mid_price_yes": 0.80,
+                "ask_price_yes": 0.81,
+                "impact_per_usdc": 0.001,
+                "capacity_usdc": 1.0,
+            }
+        ]
+    )
+
+    theoretical = _theoretical_buy_price_frame(
+        quotes,
+        order_usdc=50.0,
+    )
+
+    assert theoretical["outcome"].tolist() == ["YES", "NO"]
+    assert theoretical["order_usdc"].tolist() == [50.0, 50.0]
+    assert theoretical["buy_vwap"].notna().all()
+    assert theoretical.loc[
+        theoretical["outcome"] == "YES", "buy_vwap"
+    ].item() > 0.81
+    assert theoretical.loc[
+        theoretical["outcome"] == "NO", "buy_vwap"
+    ].item() > 0.21
 
 
 def test_trades_page_shows_official_compatible_event_volume_without_raw_rows(

@@ -104,6 +104,7 @@ def test_forecast_cache_is_immutable_and_hash_verified(tmp_path) -> None:
     cache = _cache()
     manifest = cache.save(root, created_at="2026-07-02T00:00:00Z")
 
+    assert manifest["schema_version"] == 2
     assert manifest["data_class"] == "point_in_time_forecast_cache"
     loaded = ForecastCache.load(root)
     assert loaded.snapshots["snapshot_id"].tolist() == [

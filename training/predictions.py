@@ -92,6 +92,14 @@ def build_quantile_prediction_frame(
                     "p90": quantiles[position, :, 2],
                     "base_temp_c": metadata["TMP_2m"].to_numpy(),
                     "weight": weights[position],
+                    "is_extrapolated": metadata.get(
+                        "is_extrapolated",
+                        pd.Series(False, index=metadata.index),
+                    ).to_numpy(dtype=bool),
+                    "extrapolation_step": metadata.get(
+                        "extrapolation_step",
+                        pd.Series(0, index=metadata.index),
+                    ).to_numpy(dtype=int),
                 }
             )
         )

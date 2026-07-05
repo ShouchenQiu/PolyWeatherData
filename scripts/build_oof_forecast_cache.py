@@ -3,14 +3,18 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 from pathlib import Path
 from typing import Callable
 
 import pandas as pd
 
+from backtest.observations import PointInTimeObservationDataset
 from training.backtest_forecast_generation import (
     build_forecast_cache,
     fit_oof_calibrations,
+    mc_calibration_sha256,
+    partial_bias_sha256,
 )
 from config.stations import STATIONS
 from data.clob.history import HistoricalClobDataset
@@ -26,11 +30,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--predictions", required=True, type=Path)
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--availability-root", required=True, type=Path)
+    parser.add_argument("--observations-root", required=True, type=Path)
     parser.add_argument("--clob-root", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--station", default="KLGA", choices=sorted(STATIONS))
     parser.add_argument("--start-init")
     parser.add_argument("--end-init")
+    parser.add_argument("--target-start", required=True)
+    parser.add_argument("--target-end", required=True)
     parser.add_argument("--folds", type=int, default=4)
     parser.add_argument("--mc-samples", type=int, default=2_000)
     return parser
@@ -58,15 +65,19 @@ def main(
         raise ValueError("no hourly predictions remain in the requested range")
 
     availability = HrrrAvailabilityDataset.load(args.availability_root)
+    observations = PointInTimeObservationDataset.load(
+        args.observations_root
+    )
     clob = HistoricalClobDataset.load(args.clob_root)
     markets = clob.markets.merge(
-        clob.events[["event_id", "target_date"]],
+        clob.events[["event_id", "target_date", "event_end_at"]],
         on="event_id",
         how="inner",
         validate="many_to_one",
     )
-    lineages, assignments, calibrations = fit_oof_calibrations(
+    lineages, assignments, calibrations, partial_biases = fit_oof_calibrations(
         predictions,
+        observations=observations.observations,
         checkpoint_path=args.checkpoint,
         station_timezone=station.timezone,
         folds=args.folds,
@@ -75,13 +86,17 @@ def main(
     )
     cache = build_forecast_cache(
         hourly_predictions=predictions,
+        observations=observations.observations,
         availability=availability.cycles,
         markets=markets,
         lineages=lineages,
         cycle_lineages=assignments,
         calibrations=calibrations,
+        partial_biases=partial_biases,
         station_id=station.station_id,
         station_timezone=station.timezone,
+        target_start=args.target_start,
+        target_end=args.target_end,
     )
     manifest = cache.save(
         args.output,
@@ -91,6 +106,22 @@ def main(
                 args.availability_root / "manifest.json"
             ),
             "clob_manifest": _sha256(args.clob_root / "manifest.json"),
+            "checkpoint": _sha256(args.checkpoint),
+            "mc_calibration_bundle": _mapping_sha256(
+                {
+                    key: mc_calibration_sha256(value)
+                    for key, value in calibrations.items()
+                }
+            ),
+            "partial_bias_bundle": _mapping_sha256(
+                {
+                    key: partial_bias_sha256(value)
+                    for key, value in partial_biases.items()
+                }
+            ),
+            "observations_manifest": _sha256(
+                args.observations_root / "manifest.json"
+            ),
         },
     )
     print(
@@ -108,6 +139,12 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def _mapping_sha256(values: dict[str, str]) -> str:
+    return hashlib.sha256(
+        json.dumps(values, sort_keys=True).encode("ascii")
+    ).hexdigest()
 
 
 def _utc(value: object) -> pd.Timestamp:

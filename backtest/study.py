@@ -390,7 +390,7 @@ class BacktestStudy:
         manifests = {
             "forecast_manifest": _load_manifest(
                 forecast_manifest_path,
-                schema_version=1,
+                schema_version=2,
                 data_class="point_in_time_forecast_cache",
             ),
             "quotes_manifest": _load_manifest(

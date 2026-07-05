@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from backtest.observations import PointInTimeObservationDataset
 from data.clob.history import HistoricalClobDataset
 from data.forecast.availability import HrrrAvailabilityDataset
 from model.mc_calibration import McCalibration
@@ -69,7 +70,13 @@ def test_fixed_cache_binds_april_calibration_and_split_role(tmp_path) -> None:
     clob_root = tmp_path / "clob"
     HistoricalClobDataset(
         events=pd.DataFrame(
-            [{"event_id": "event", "target_date": "2026-06-05"}]
+            [
+                {
+                    "event_id": "event",
+                    "target_date": "2026-06-05",
+                    "event_end_at": "2026-06-06T12:00:00Z",
+                }
+            ]
         ),
         markets=pd.DataFrame(
             [
@@ -90,6 +97,26 @@ def test_fixed_cache_binds_april_calibration_and_split_role(tmp_path) -> None:
         end_date="2026-06-05",
         station_id="KLGA",
     ).save(clob_root)
+    observations_root = tmp_path / "observations"
+    PointInTimeObservationDataset(
+        observations=pd.DataFrame(
+            {
+                "valid_time": pd.date_range(
+                    "2026-06-05T04:00:00Z",
+                    periods=24,
+                    freq="h",
+                ),
+                "available_at": pd.date_range(
+                    "2026-06-05T04:00:00Z",
+                    periods=24,
+                    freq="h",
+                ),
+                "temperature_c": [21.0] * 24,
+            }
+        ),
+        station_id="KLGA",
+        station_timezone="America/New_York",
+    ).save(observations_root, source_sha256={"fixture": "a" * 64})
     output = tmp_path / "cache"
 
     result = main(
@@ -100,8 +127,12 @@ def test_fixed_cache_binds_april_calibration_and_split_role(tmp_path) -> None:
             str(checkpoint),
             "--calibration-root",
             str(calibration_root),
+            "--bias-predictions",
+            str(predictions),
             "--availability-root",
             str(availability_root),
+            "--observations-root",
+            str(observations_root),
             "--clob-root",
             str(clob_root),
             "--output",
@@ -111,6 +142,10 @@ def test_fixed_cache_binds_april_calibration_and_split_role(tmp_path) -> None:
             "--start-init",
             "2026-06-05",
             "--end-init",
+            "2026-06-05",
+            "--target-start",
+            "2026-06-05",
+            "--target-end",
             "2026-06-05",
             "--mc-samples",
             "100",

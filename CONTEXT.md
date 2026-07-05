@@ -117,6 +117,17 @@ TFT quantiles using empirical error correlation, then maps samples to bucket
 probabilities via temperature reconstruction.
 _Avoid_: MC, sampler
 
+**ForecastCache bucket probability**: The point-in-time YES settlement probability for
+one `(init_time, target_date, condition_id)`, obtained by resolution-rounding the
+McSampler daily-high draws and counting draws inside that Market's Bucket; it becomes
+actionable only at the snapshot's `available_at`.
+_Avoid_: model price, 48-hour maximum probability
+
+**point-in-time partial-day daily high**: A target local-day distribution whose elapsed
+hours come from observations visible by `init_time` and whose later hours come from
+non-extrapolated MC forecasts, emitted only when their union covers the complete day.
+_Avoid_: remaining-hours maximum, partial maximum
+
 **max_bias**: Per-station scalar correction for the upward bias introduced when taking
 max() over McSampler samples (Jensen's inequality effect). Measured on the validation
 set as E[max(samples)] ? mean(observed daily max). Stored in the registry and subtracted
@@ -254,6 +265,11 @@ _Avoid_: parquet file, storage file
   meteorological transforms. TFT model-adapter features (time_idx, Node_ID, calendar
   encodings such as sin_hour/cos_hour/sin_doy/cos_doy) are added by
   `ModelPipeline._add_model_features` immediately before inference.
+- One `(init_time, target_date)` -> one McSampler daily-high distribution -> one
+  **ForecastCache bucket probability** per Market; `available_at`, not `init_time`,
+  controls when trading research may consume it.
+- An in-progress Event uses a **point-in-time partial-day daily high**; uncovered
+  right-tail hours or extrapolated decoder cells suppress the snapshot.
 - **ForecastLoop** -> **TFT** -> **McSampler** -> bucket probabilities -> **TradingLoop**
 - **DiscoveryLoop** owns **Event** / **Market** / **Token** records; **TradingLoop**
   references them by slug only. At any given time 2-3 Events may be concurrently active.

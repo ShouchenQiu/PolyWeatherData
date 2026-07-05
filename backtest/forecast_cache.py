@@ -19,6 +19,14 @@ _SNAPSHOT_COLUMNS = {
     "p50_f",
     "p90_f",
     "lineage_id",
+    "coverage_type",
+    "observed_high_f",
+    "observed_hour_count",
+    "observed_through",
+    "forecast_hour_count",
+    "forecast_start_at",
+    "forecast_through",
+    "target_hour_count",
 }
 _PROBABILITY_COLUMNS = {
     "snapshot_id",
@@ -46,6 +54,19 @@ class ForecastCache:
 
     def __post_init__(self) -> None:
         snapshots = self.snapshots.copy()
+        defaults = {
+            "coverage_type": "forecast_only",
+            "observed_high_f": float("nan"),
+            "observed_hour_count": 0,
+            "observed_through": pd.NaT,
+            "forecast_hour_count": 24,
+            "forecast_start_at": pd.NaT,
+            "forecast_through": pd.NaT,
+            "target_hour_count": 24,
+        }
+        for column, default in defaults.items():
+            if column not in snapshots:
+                snapshots[column] = default
         probabilities = self.probabilities.copy()
         lineages = self.lineages.copy()
         _require_columns(snapshots, _SNAPSHOT_COLUMNS, "snapshots")
@@ -61,6 +82,30 @@ class ForecastCache:
         snapshots["target_date"] = pd.to_datetime(
             snapshots["target_date"]
         ).dt.date.astype(str)
+        for column in (
+            "observed_through",
+            "forecast_start_at",
+            "forecast_through",
+        ):
+            snapshots[column] = pd.to_datetime(
+                snapshots[column], utc=True, errors="coerce"
+            )
+        for column in (
+            "observed_hour_count",
+            "forecast_hour_count",
+            "target_hour_count",
+        ):
+            snapshots[column] = snapshots[column].astype(int)
+        if not set(snapshots["coverage_type"]).issubset(
+            {"forecast_only", "observed_plus_forecast", "observed_only"}
+        ):
+            raise ValueError("unsupported daily-high coverage_type")
+        if (
+            snapshots["observed_hour_count"]
+            + snapshots["forecast_hour_count"]
+            != snapshots["target_hour_count"]
+        ).any():
+            raise ValueError("snapshot observation/forecast coverage is incomplete")
         if snapshots["snapshot_id"].duplicated().any():
             raise ValueError("snapshots contain duplicate snapshot_id")
         if lineages["lineage_id"].duplicated().any():
@@ -203,8 +248,13 @@ class ForecastCache:
             hashes[filename] = hashlib.sha256(path.read_bytes()).hexdigest()
         created = _utc(created_at or pd.Timestamp.now(tz="UTC"))
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "data_class": "point_in_time_forecast_cache",
+            "target_window": "point_in_time_local_calendar_day",
+            "resolution_rounding": "half_up_fahrenheit",
+            "partial_day_policy": (
+                "observed_plus_trusted_forecast_full_coverage"
+            ),
             "created_at": created.isoformat().replace("+00:00", "Z"),
             "station_ids": sorted(self.snapshots["station_id"].unique()),
             "split_roles": sorted(self.lineages["split_role"].unique()),
@@ -231,7 +281,7 @@ class ForecastCache:
             )
         except (OSError, ValueError) as exc:
             raise RuntimeError(f"invalid forecast cache manifest: {exc}") from exc
-        if manifest.get("schema_version") != 1:
+        if manifest.get("schema_version") not in {1, 2}:
             raise RuntimeError(
                 "unsupported forecast cache schema_version="
                 f"{manifest.get('schema_version')!r}"

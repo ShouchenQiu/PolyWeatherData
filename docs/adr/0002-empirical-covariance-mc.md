@@ -21,3 +21,8 @@ error; only legacy v1 models may use the old covariance/diagonal fallback.
 Daily-high max bias and calibration evidence use only complete station-local calendar
 days as defined by ADR-0010. Contiguous-fold validation persists one out-of-fold row per
 `(init_time, target_date)` cycle-day; a global 48-hour maximum is not valid evidence.
+
+ADR-0019 supersedes reuse of the single complete-day max-bias scalar for trading
+partial-day forecasts. Complete-day model evaluation retains this scalar; governed
+partial-day ForecastCache generation uses a development-fitted bias by remaining
+trusted forecast-hour count.

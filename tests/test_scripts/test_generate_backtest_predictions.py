@@ -44,6 +44,8 @@ def test_prediction_cli_uses_audited_frame_and_writes_lineage_manifest(
                     "p90": 1.0,
                     "base_temp_c": 20.0,
                     "weight": 0.0,
+                    "is_extrapolated": False,
+                    "extrapolation_step": 0,
                 }
             ]
         )
@@ -69,6 +71,7 @@ def test_prediction_cli_uses_audited_frame_and_writes_lineage_manifest(
     )
     assert result == 0
     assert len(pd.read_parquet(output)) == 1
+    assert manifest["schema_version"] == 2
     assert manifest["row_count"] == 1
     assert manifest["source_sha256"]["checkpoint"]
     assert manifest["sha256"]["predictions.parquet"]

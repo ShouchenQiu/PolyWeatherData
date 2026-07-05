@@ -12,6 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from backtest.forecast_cache import ForecastCache
 from backtest.synthetic_quotes import (
     SyntheticQuoteDataset,
     build_synthetic_book,
@@ -36,6 +37,9 @@ class HistoricalClobArtifact:
     audit: ClobAuditReport
     quotes_root: Path | None = None
     quotes: SyntheticQuoteDataset | None = None
+    forecast_roots: tuple[Path, ...] = ()
+    forecasts: tuple[ForecastCache, ...] = ()
+    forecast_binding: str = "none"
     load_error: str = ""
 
 
@@ -44,6 +48,48 @@ def discover_historical_clob_artifacts(
 ) -> list[HistoricalClobArtifact]:
     """Load and audit every local historical CLOB artifact."""
     store = Path(data_store_dir)
+    clob_market_sha_by_manifest: dict[str, str] = {}
+    for clob_manifest_path in (
+        store / "backtest" / "clob"
+    ).glob("*/*/manifest.json"):
+        try:
+            manifest_bytes = clob_manifest_path.read_bytes()
+            manifest = json.loads(manifest_bytes)
+            market_sha = str(
+                manifest.get("sha256", {}).get("markets.parquet", "")
+            )
+            if market_sha:
+                clob_market_sha_by_manifest[
+                    hashlib.sha256(manifest_bytes).hexdigest()
+                ] = market_sha
+        except Exception:
+            continue
+    forecasts_by_source: dict[
+        str, list[tuple[str, Path, ForecastCache]]
+    ] = {}
+    for forecast_manifest_path in (
+        store / "backtest" / "forecasts"
+    ).glob("*/*/manifest.json"):
+        try:
+            forecast_manifest = json.loads(
+                forecast_manifest_path.read_text("utf-8")
+            )
+            source = str(
+                forecast_manifest.get("source_sha256", {}).get(
+                    "clob_manifest", ""
+                )
+            )
+            if not source:
+                continue
+            forecasts_by_source.setdefault(source, []).append(
+                (
+                    str(forecast_manifest.get("created_at", "")),
+                    forecast_manifest_path.parent,
+                    ForecastCache.load(forecast_manifest_path.parent),
+                )
+            )
+        except Exception:
+            continue
     quote_by_source: dict[str, tuple[str, Path, dict]] = {}
     for quote_manifest_path in (
         store / "backtest" / "quotes"
@@ -118,6 +164,25 @@ def discover_historical_clob_artifacts(
             else None
         )
         quote_manifest = quote_match[2] if quote_match is not None else {}
+        forecast_binding = "exact"
+        forecast_matches = forecasts_by_source.get(digest, [])
+        if not forecast_matches:
+            forecast_binding = "market_compatible"
+            selected_market_sha = clob_market_sha_by_manifest.get(digest)
+            forecast_matches = [
+                match
+                for source_digest, matches in forecasts_by_source.items()
+                if selected_market_sha
+                and clob_market_sha_by_manifest.get(source_digest)
+                == selected_market_sha
+                for match in matches
+            ]
+        forecast_matches = sorted(
+            forecast_matches,
+            key=lambda match: (match[0], str(match[1])),
+        )
+        if not forecast_matches:
+            forecast_binding = "none"
         audit = build_clob_audit_report(
             dataset,
             exclusions=exclusions,
@@ -145,6 +210,11 @@ def discover_historical_clob_artifacts(
                 audit=audit,
                 quotes_root=quotes_root,
                 quotes=quotes,
+                forecast_roots=tuple(
+                    match[1] for match in forecast_matches
+                ),
+                forecasts=tuple(match[2] for match in forecast_matches),
+                forecast_binding=forecast_binding,
             )
         )
     return sorted(
@@ -157,7 +227,14 @@ def discover_historical_clob_artifacts(
 def default_artifact_index(
     artifacts: list[HistoricalClobArtifact],
 ) -> int:
-    """Select the newest freshly audited artifact, or newest artifact."""
+    """Select the newest model-ready passing artifact when available."""
+    for index, artifact in enumerate(artifacts):
+        if (
+            artifact.audit.passed
+            and artifact.quotes is not None
+            and artifact.forecasts
+        ):
+            return index
     for index, artifact in enumerate(artifacts):
         if artifact.audit.passed:
             return index
@@ -216,6 +293,7 @@ def render(data_store_dir: Path | str | None = None) -> None:
     labels = [
         (
             f"{'PASS' if artifact.audit.passed else 'FAIL'} · "
+            f"{'MODEL · ' if artifact.forecasts else ''}"
             f"{artifact.name} · "
             f"{_format_local_time(artifact.fetched_at, station)}"
         )
@@ -260,6 +338,7 @@ def _catalog_fingerprint(root: Path) -> str:
         "backtest/clob/*/*/manifest.json",
         "backtest/clob/*/*.quality.json",
         "backtest/quotes/*/*/manifest.json",
+        "backtest/forecasts/*/*/manifest.json",
         "backtest/actuals/*/*.manifest.json",
     ]
     for pattern in patterns:
@@ -396,9 +475,37 @@ def _render_synthetic_book(artifact: HistoricalClobArtifact) -> None:
     comparison = _bucket_comparison_frame(
         artifact,
         target_date=target_date,
+        condition_id=condition_id,
         timezone=timezone,
     )
-    x_axis = _shared_synthetic_x_axis(quotes, trades, comparison)
+    model_probabilities = _model_probability_frame(
+        artifact,
+        target_date=target_date,
+        condition_id=condition_id,
+        timezone=timezone,
+    )
+    selected_model = model_probabilities[
+        model_probabilities.get(
+            "condition_id", pd.Series(dtype=str)
+        ).astype(str)
+        == str(condition_id)
+    ].copy()
+    theoretical_execution = pd.concat(
+        [
+            _theoretical_buy_price_frame(
+                quotes,
+                order_usdc=order_usdc,
+            )
+            for order_usdc in (1.0, 5.0, 10.0)
+        ],
+        ignore_index=True,
+    )
+    x_axis = _shared_synthetic_x_axis(
+        quotes,
+        trades,
+        comparison,
+        model_probabilities,
+    )
 
     actual_high = _actual_high_for_date(artifact, target_date)
     metrics = st.columns(6)
@@ -425,14 +532,57 @@ def _render_synthetic_book(artifact: HistoricalClobArtifact) -> None:
         f"{quotes['staleness_seconds'].median() / 60:.1f} min",
     )
 
+    st.subheader("Bucket comparison")
+    st.caption(
+        "The selected Bucket is shown as one pair: synthetic CLOB midpoint "
+        "and point-in-time model fair probability. Model points are placed "
+        "at available_at (the first tradable time); hover shows init_time."
+    )
+    if artifact.forecast_binding == "market_compatible":
+        st.info(
+            "Forecast overlay is UI-compatible because its source CLOB has "
+            "the identical markets.parquet payload (same Events, buckets, "
+            "and condition IDs). Quotes and trades still come only from the "
+            "selected artifact; managed Backtest Studies continue to require "
+            "an exact CLOB manifest match."
+        )
+    if model_probabilities.empty:
+        st.warning(
+            "No point-in-time ForecastCache has an exact or market-compatible "
+            "CLOB binding, so model probabilities cannot be overlaid."
+        )
+    if comparison.empty and model_probabilities.empty:
+        st.info("No same-day bucket evidence is available for comparison.")
+    else:
+        for outcome in ("YES", "NO"):
+            st.subheader(f"{outcome} bucket comparison")
+            st.plotly_chart(
+                _bucket_comparison_figure(
+                    comparison,
+                    model_probabilities=model_probabilities,
+                    outcome=outcome,
+                    timezone=timezone,
+                    x_axis=x_axis,
+                ),
+                width="stretch",
+            )
+
     for outcome in ("YES", "NO"):
         st.subheader(f"{outcome} synthetic book")
+        st.caption(
+            "The orange lines are hypothetical $1 / $5 / $10 BUY VWAPs: "
+            "each starts at the ask (midpoint + half-spread), walks five "
+            "impact levels, and deliberately ignores observed capacity. "
+            "Fees are not included."
+        )
         st.plotly_chart(
             _synthetic_price_figure(
                 quotes,
                 trades,
                 outcome=outcome,
                 timezone=timezone,
+                model_probabilities=selected_model,
+                theoretical_execution=theoretical_execution,
                 x_axis=x_axis,
             ),
             width="stretch",
@@ -467,23 +617,6 @@ def _render_synthetic_book(artifact: HistoricalClobArtifact) -> None:
         _liquidity_figure(quotes, timezone=timezone, x_axis=x_axis),
         width="stretch",
     )
-
-    st.subheader("Bucket comparison")
-    st.caption(
-        "Synthetic YES midpoint by bucket. Click a legend item to hide or "
-        "restore its line."
-    )
-    if comparison.empty:
-        st.info("No same-day synthetic quotes available for comparison.")
-    else:
-        st.plotly_chart(
-            _bucket_comparison_figure(
-                comparison,
-                timezone=timezone,
-                x_axis=x_axis,
-            ),
-            width="stretch",
-        )
 
 
 def _select_market_by_date(
@@ -667,9 +800,15 @@ def _synthetic_price_figure(
     *,
     outcome: str,
     timezone: str,
+    model_probabilities: pd.DataFrame | None = None,
+    theoretical_execution: pd.DataFrame | None = None,
+    theoretical_order_usdc: float = 50.0,
     x_axis: dict | None = None,
 ) -> go.Figure:
     figure = go.Figure()
+    outcome = outcome.upper()
+    if outcome not in {"YES", "NO"}:
+        raise ValueError("outcome must be YES or NO")
     if outcome == "YES":
         series = [
             ("bid_price_yes", "Sell YES (bid)", "#1f77b4"),
@@ -697,6 +836,56 @@ def _synthetic_price_figure(
                 line={"color": color},
             )
         )
+    model = (
+        model_probabilities
+        if model_probabilities is not None
+        else pd.DataFrame()
+    )
+    if not model.empty:
+        probability = model["yes_probability"].astype(float)
+        fair_price = probability if outcome == "YES" else 1.0 - probability
+        figure.add_trace(
+            go.Scatter(
+                x=model["timestamp"],
+                y=fair_price,
+                name="Model fair (theoretical)",
+                mode="lines",
+                line={
+                    "color": "#16a34a",
+                    "dash": "dash",
+                    "shape": "hv",
+                    "width": 2,
+                },
+            )
+        )
+    theoretical = (
+        theoretical_execution
+        if theoretical_execution is not None
+        else pd.DataFrame()
+    )
+    if not theoretical.empty:
+        selected_execution = theoretical[
+            theoretical["outcome"].astype(str).str.upper() == outcome
+        ].copy()
+        if "order_usdc" not in selected_execution:
+            selected_execution["order_usdc"] = theoretical_order_usdc
+        colors = ["#fbbf24", "#f59e0b", "#c2410c"]
+        for index, (order_usdc, rows) in enumerate(
+            selected_execution.groupby("order_usdc", sort=True)
+        ):
+            figure.add_trace(
+                go.Scatter(
+                    x=rows["timestamp"],
+                    y=rows["buy_vwap"],
+                    name=f"Theoretical buy ${float(order_usdc):g} VWAP",
+                    mode="lines",
+                    line={
+                        "color": colors[index % len(colors)],
+                        "dash": "dot",
+                        "width": 2,
+                    },
+                )
+            )
     if not trades.empty:
         selected = trades[trades["outcome"] == outcome]
         figure.add_trace(
@@ -752,6 +941,59 @@ def _execution_price_frame(
     return pd.DataFrame(
         rows,
         columns=["timestamp", "outcome", "buy_vwap", "sell_vwap"],
+    )
+
+
+def _theoretical_buy_price_frame(
+    quotes: pd.DataFrame,
+    *,
+    order_usdc: float,
+    levels: int = 5,
+) -> pd.DataFrame:
+    """Price a hypothetical BUY ladder without applying capacity limits."""
+    if order_usdc <= 0:
+        raise ValueError("order_usdc must be positive")
+    if levels <= 0:
+        raise ValueError("levels must be positive")
+    rows: list[dict] = []
+    usd_per_level = float(order_usdc) / levels
+    for quote_row in quotes.sort_values("timestamp").to_dict("records"):
+        impact = max(0.0, float(quote_row["impact_per_usdc"]))
+        best_asks = {
+            "YES": float(quote_row["ask_price_yes"]),
+            "NO": 1.0 - float(quote_row["bid_price_yes"]),
+        }
+        for outcome, best_ask in best_asks.items():
+            asks = []
+            for index in range(levels):
+                price = float(
+                    np.clip(
+                        best_ask + impact * usd_per_level * index,
+                        0.001,
+                        0.999,
+                    )
+                )
+                asks.append(
+                    {"price": price, "size": usd_per_level / price}
+                )
+            quote = compute_quote(
+                {"bids": [], "asks": asks},
+                "BUY",
+                order_usdc,
+            )
+            rows.append(
+                {
+                    "timestamp": quote_row["timestamp"],
+                    "outcome": outcome,
+                    "order_usdc": float(order_usdc),
+                    "buy_vwap": (
+                        quote.vwap_price if quote.complete_fill else np.nan
+                    ),
+                }
+            )
+    return pd.DataFrame(
+        rows,
+        columns=["timestamp", "outcome", "order_usdc", "buy_vwap"],
     )
 
 
@@ -861,6 +1103,7 @@ def _bucket_comparison_frame(
     artifact: HistoricalClobArtifact,
     *,
     target_date: str | None,
+    condition_id: str | None = None,
     timezone: str,
 ) -> pd.DataFrame:
     if artifact.quotes is None or target_date is None:
@@ -875,6 +1118,10 @@ def _bucket_comparison_frame(
     markets = artifact.dataset.markets[
         artifact.dataset.markets["event_id"].astype(str).isin(event_ids)
     ][["condition_id", "bucket_lo_f", "bucket_hi_f"]].copy()
+    if condition_id is not None:
+        markets = markets[
+            markets["condition_id"].astype(str) == str(condition_id)
+        ]
     if markets.empty:
         return pd.DataFrame()
     markets["bucket"] = [
@@ -892,32 +1139,179 @@ def _bucket_comparison_frame(
     return comparison
 
 
+def _model_probability_frame(
+    artifact: HistoricalClobArtifact,
+    *,
+    target_date: str | None,
+    condition_id: str | None = None,
+    timezone: str,
+) -> pd.DataFrame:
+    if target_date is None or not artifact.forecasts:
+        return pd.DataFrame()
+    events = artifact.dataset.events
+    event_ids = set(
+        events.loc[
+            events["target_date"].astype(str) == str(target_date),
+            "event_id",
+        ].astype(str)
+    )
+    markets = artifact.dataset.markets[
+        artifact.dataset.markets["event_id"].astype(str).isin(event_ids)
+    ][["condition_id", "bucket_lo_f", "bucket_hi_f"]].copy()
+    if condition_id is not None:
+        markets = markets[
+            markets["condition_id"].astype(str) == str(condition_id)
+        ]
+    if markets.empty:
+        return pd.DataFrame()
+    markets["condition_id"] = markets["condition_id"].astype(str)
+    markets["bucket"] = [
+        _bucket_label(lo, hi)
+        for lo, hi in zip(markets["bucket_lo_f"], markets["bucket_hi_f"])
+    ]
+    frames: list[pd.DataFrame] = []
+    condition_ids = set(markets["condition_id"])
+    for cache in artifact.forecasts:
+        snapshots = cache.snapshots[
+            (cache.snapshots["station_id"].astype(str) == artifact.station_id)
+            & (
+                cache.snapshots["target_date"].astype(str)
+                == str(target_date)
+            )
+        ]
+        if snapshots.empty:
+            continue
+        probabilities = cache.probabilities[
+            cache.probabilities["condition_id"].astype(str).isin(
+                condition_ids
+            )
+        ].copy()
+        probabilities["condition_id"] = probabilities["condition_id"].astype(
+            str
+        )
+        frame = snapshots[
+            [
+                "snapshot_id",
+                "init_time",
+                "available_at",
+                "coverage_type",
+                "observed_high_f",
+                "observed_hour_count",
+                "forecast_hour_count",
+                "target_hour_count",
+            ]
+        ].merge(
+            probabilities,
+            on="snapshot_id",
+            how="inner",
+            validate="one_to_many",
+        ).merge(
+            markets[["condition_id", "bucket"]],
+            on="condition_id",
+            how="inner",
+            validate="many_to_one",
+        )
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame()
+    model = (
+        pd.concat(frames, ignore_index=True)
+        .rename(columns={"available_at": "timestamp"})
+        .drop_duplicates(
+            subset=["condition_id", "timestamp"],
+            keep="last",
+        )
+        .sort_values(["timestamp", "condition_id"])
+        .reset_index(drop=True)
+    )
+    model["timestamp"] = _to_local(model["timestamp"], timezone)
+    model["init_time"] = _to_local(model["init_time"], timezone)
+    return model
+
+
 def _bucket_comparison_figure(
     comparison: pd.DataFrame,
     *,
     timezone: str,
+    model_probabilities: pd.DataFrame | None = None,
+    outcome: str = "YES",
     x_axis: dict | None = None,
 ) -> go.Figure:
+    outcome = outcome.upper()
+    if outcome not in {"YES", "NO"}:
+        raise ValueError("outcome must be YES or NO")
     figure = go.Figure()
-    for bucket, rows in comparison.groupby("bucket", sort=False):
-        sampled = (
-            rows.set_index("timestamp")["mid_price_yes"]
-            .resample("15min")
-            .last()
-            .dropna()
+    model = (
+        model_probabilities
+        if model_probabilities is not None
+        else pd.DataFrame()
+    )
+    buckets = list(
+        dict.fromkeys(
+            comparison.get("bucket", pd.Series(dtype=str)).astype(str).tolist()
+            + model.get("bucket", pd.Series(dtype=str)).astype(str).tolist()
         )
-        figure.add_trace(
-            go.Scatter(
-                x=sampled.index,
-                y=sampled,
-                name=str(bucket),
-                mode="lines",
+    )
+    palette = px.colors.qualitative.Plotly
+    for index, bucket in enumerate(buckets):
+        color = palette[index % len(palette)]
+        rows = comparison[comparison["bucket"].astype(str) == bucket]
+        if not rows.empty:
+            sampled = (
+                rows.set_index("timestamp")["mid_price_yes"]
+                .resample("15min")
+                .last()
+                .dropna()
             )
+            values = sampled if outcome == "YES" else 1.0 - sampled
+            figure.add_trace(
+                go.Scatter(
+                    x=sampled.index,
+                    y=values,
+                    name="CLOB mid",
+                    mode="lines",
+                    line={"color": color},
+                )
+            )
+        model_rows = (
+            model[model["bucket"].astype(str) == bucket]
+            if not model.empty
+            else pd.DataFrame()
         )
+        if not model_rows.empty:
+            probability = model_rows["yes_probability"].astype(float)
+            values = probability if outcome == "YES" else 1.0 - probability
+            figure.add_trace(
+                go.Scatter(
+                    x=model_rows["timestamp"],
+                    y=values,
+                    name="Model fair",
+                    mode="lines+markers",
+                    line={"color": color, "dash": "dash", "shape": "hv"},
+                    customdata=model_rows[
+                        [
+                            "init_time",
+                            "coverage_type",
+                            "observed_high_f",
+                            "observed_hour_count",
+                            "forecast_hour_count",
+                        ]
+                    ],
+                    hovertemplate=(
+                        "available_at=%{x}<br>"
+                        "init_time=%{customdata[0]}<br>"
+                        "coverage=%{customdata[1]}<br>"
+                        "observed high=%{customdata[2]:.1f}°F<br>"
+                        "observed hours=%{customdata[3]}<br>"
+                        "forecast hours=%{customdata[4]}<br>"
+                        "model fair=%{y:.3f}<extra></extra>"
+                    ),
+                )
+            )
     figure.update_layout(
         legend=_top_legend(),
         xaxis_title=f"Local time ({timezone})",
-        yaxis_title="Synthetic YES midpoint",
+        yaxis_title=f"{outcome} probability / midpoint",
         yaxis_range=[0.0, 1.0],
     )
     _apply_shared_x_axis(figure, x_axis)

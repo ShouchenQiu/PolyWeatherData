@@ -8,6 +8,7 @@ from training.backtest_forecast_generation import (
     contiguous_oof_assignments,
     fit_oof_calibrations,
 )
+from model.daily_high import PartialDayBiasCalibration
 from model.mc_calibration import McCalibration
 
 
@@ -44,12 +45,14 @@ def test_build_forecast_cache_uses_predictions_even_when_label_weight_is_zero() 
         [
             {
                 "target_date": "2026-06-05",
+                "event_end_at": "2026-06-06T12:00:00Z",
                 "condition_id": "70-71",
                 "bucket_lo_f": float("-inf"),
                 "bucket_hi_f": 72.0,
             },
             {
                 "target_date": "2026-06-05",
+                "event_end_at": "2026-06-06T12:00:00Z",
                 "condition_id": "at-least-72",
                 "bucket_lo_f": 72.0,
                 "bucket_hi_f": float("inf"),
@@ -85,11 +88,15 @@ def test_build_forecast_cache_uses_predictions_even_when_label_weight_is_zero() 
 
     cache = build_forecast_cache(
         hourly_predictions=hourly,
+        observations=pd.DataFrame(
+            columns=["valid_time", "available_at", "temperature_c"]
+        ),
         availability=availability,
         markets=markets,
         lineages=lineages,
         cycle_lineages=assignments,
         calibrations={"fixed": calibration},
+        partial_biases={"fixed": PartialDayBiasCalibration.zero()},
         station_id="KLGA",
         station_timezone="America/New_York",
     )
@@ -99,6 +106,8 @@ def test_build_forecast_cache_uses_predictions_even_when_label_weight_is_zero() 
         "2026-06-05T01:15:00Z"
     )
     assert cache.snapshots.iloc[0]["target_date"] == "2026-06-05"
+    assert cache.snapshots.iloc[0]["coverage_type"] == "forecast_only"
+    assert cache.snapshots.iloc[0]["forecast_hour_count"] == 24
     assert set(cache.probabilities["condition_id"]) == {
         "70-71",
         "at-least-72",
@@ -150,13 +159,23 @@ def test_fit_oof_calibrations_never_fits_on_held_out_cycles(tmp_path) -> None:
             station_timezone=station_timezone,
         )
 
-    lineages, assignments, calibrations = fit_oof_calibrations(
+    bias_fitted_on: list[set[pd.Timestamp]] = []
+
+    def fake_bias(*, hourly_predictions, **kwargs):
+        bias_fitted_on.append(
+            set(pd.to_datetime(hourly_predictions["init_time"], utc=True))
+        )
+        return PartialDayBiasCalibration.zero()
+
+    lineages, assignments, calibrations, biases = fit_oof_calibrations(
         hourly,
+        observations=pd.DataFrame(),
         checkpoint_path=checkpoint,
         station_timezone="America/New_York",
         folds=2,
         mc_samples=100,
         fit_calibration=fake_fit,
+        fit_partial_bias=fake_bias,
     )
 
     for fold in range(2):
@@ -168,5 +187,7 @@ def test_fit_oof_calibrations_never_fits_on_held_out_cycles(tmp_path) -> None:
             ]
         )
         assert held_out.isdisjoint(fitted_on[fold])
+        assert held_out.isdisjoint(bias_fitted_on[fold])
     assert set(calibrations) == {"oof-fold-0", "oof-fold-1"}
+    assert set(biases) == {"oof-fold-0", "oof-fold-1"}
     assert set(lineages["split_role"]) == {"oof_development"}

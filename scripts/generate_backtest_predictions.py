@@ -54,6 +54,13 @@ def main(
         frame=frame,
         batch_size=args.batch_size,
     )
+    provenance = {"is_extrapolated", "extrapolation_step"}
+    missing_provenance = provenance - set(predictions)
+    if missing_provenance:
+        raise ValueError(
+            "prediction output missing decoder provenance: "
+            + ", ".join(sorted(missing_provenance))
+        )
     if args.output.exists():
         raise FileExistsError(args.output)
     manifest_path = args.output.with_suffix(
@@ -70,7 +77,7 @@ def main(
     if args.frame is not None:
         source_sha256["frame"] = _sha256(args.frame)
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "data_class": "fixed_checkpoint_hourly_predictions",
         "station_id": args.station,
         "requested_init_range": [args.start_init, args.end_init],
