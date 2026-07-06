@@ -16,11 +16,11 @@ def test_build_oof_forecast_cache_cli_writes_replay_artifact(tmp_path) -> None:
     predictions = tmp_path / "predictions.parquet"
     rows = []
     for init, first_fxx in [
-        (pd.Timestamp("2026-06-05T00:00:00Z"), 4),
-        (pd.Timestamp("2026-06-05T01:00:00Z"), 3),
+        (pd.Timestamp("2026-06-05T00:00:00Z"), 5),
+        (pd.Timestamp("2026-06-05T01:00:00Z"), 4),
     ]:
         for offset, valid_time in enumerate(
-            pd.date_range("2026-06-05T04:00:00Z", periods=24, freq="h")
+            pd.date_range("2026-06-05T05:00:00Z", periods=24, freq="h")
         ):
             rows.append(
                 {
@@ -96,12 +96,12 @@ def test_build_oof_forecast_cache_cli_writes_replay_artifact(tmp_path) -> None:
         observations=pd.DataFrame(
             {
                 "valid_time": pd.date_range(
-                    "2026-06-05T04:00:00Z",
+                    "2026-06-05T05:00:00Z",
                     periods=24,
                     freq="h",
                 ),
                 "available_at": pd.date_range(
-                    "2026-06-05T04:00:00Z",
+                    "2026-06-05T05:00:00Z",
                     periods=24,
                     freq="h",
                 ),

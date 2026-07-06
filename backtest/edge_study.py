@@ -12,6 +12,7 @@ import pandas as pd
 from backtest.forecast_cache import ForecastCache
 from backtest.study import StudyValidation
 from backtest.synthetic_quotes import build_synthetic_book
+from config.stations import STATIONS
 from core.pricing.fees import taker_fee_usdc
 from core.pricing.quote import compute_quote
 
@@ -670,8 +671,18 @@ def build_edge_observations(
             validation.end_target,
         )
     ].copy()
+    station = STATIONS[validation.station_id]
+    events["settlement_at"] = events["target_date"].map(
+        lambda target_date: (
+            pd.Timestamp(str(target_date))
+            .tz_localize(station.timezone)
+            + pd.DateOffset(days=1)
+        ).tz_convert("UTC")
+    )
     markets = validation.clob.markets.merge(
-        events[["event_id", "target_date", "event_end_at"]],
+        events[
+            ["event_id", "target_date", "event_end_at", "settlement_at"]
+        ],
         on="event_id",
         how="inner",
         validate="many_to_one",
@@ -699,7 +710,7 @@ def build_edge_observations(
     )
     for row in evidence.itertuples(index=False):
             target_date = str(row.target_date)
-            close_at = _utc(row.market_close_at)
+            settlement_at = _utc(row.settlement_at)
             tick = _utc(row.timestamp)
             quote_payload = row._asdict()
             yes_book = build_synthetic_book(quote_payload, outcome="YES")
@@ -745,7 +756,7 @@ def build_edge_observations(
                         row.p90_f - row.p10_f
                     ),
                     "lead_hours": (
-                        close_at - _utc(tick)
+                        settlement_at - tick
                     ).total_seconds()
                     / 3600.0,
                     "estimated_spread": float(row.estimated_spread),
@@ -816,6 +827,7 @@ def _join_visible_forecasts(
         "event_id",
         "target_date",
         "market_close_at",
+        "settlement_at",
         "bucket_lo_f",
         "bucket_hi_f",
         "yes_token_id",
@@ -841,6 +853,9 @@ def _join_visible_forecasts(
     ]
     evidence = evidence[
         evidence["timestamp"] < evidence["market_close_at"]
+    ]
+    evidence = evidence[
+        evidence["timestamp"] < evidence["settlement_at"]
     ]
     return evidence.sort_values(
         ["timestamp", "condition_id"]

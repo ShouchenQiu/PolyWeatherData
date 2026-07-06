@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from backtest.forecast_cache import ForecastCache
-from backtest.study import BacktestStudy, StudyInputs
+from backtest.study import BacktestStudy, StudyInputs, validate_study_inputs
 from backtest.synthetic_quotes import SyntheticQuoteDataset
 from data.clob.history import HistoricalClobDataset
 from data.clob.quality import audit_historical_clob
@@ -190,6 +190,23 @@ def test_development_study_registers_one_validated_input_contract(
     assert record.status == "development"
     assert validated.split_role == "oof_development"
     assert validated.input_sha256 == record.input_sha256
+
+
+def test_public_input_contract_validates_oof_without_catalog(tmp_path) -> None:
+    inputs = _study_inputs(tmp_path)
+
+    validated = validate_study_inputs(
+        study_id="signal-study",
+        station_id="KLGA",
+        start_target="2026-04-01",
+        end_target="2026-04-01",
+        inputs=inputs,
+        expected_split_role="oof_development",
+    )
+
+    assert validated.study_id == "signal-study"
+    assert validated.split_role == "oof_development"
+    assert not (tmp_path / "studies.sqlite").exists()
 
 
 def test_development_study_rejects_model_test_forecasts(tmp_path) -> None:

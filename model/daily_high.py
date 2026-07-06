@@ -88,7 +88,7 @@ def fit_partial_day_bias(
     ).fillna(False).astype(bool)
     work = work[~extrapolated].copy()
     work["target_date"] = (
-        work["valid_time"]
+        (work["valid_time"] - pd.Timedelta(nanoseconds=1))
         .dt.tz_convert(station_timezone)
         .dt.date.astype(str)
     )
@@ -282,7 +282,7 @@ def _target_hours(target_date: str, timezone: str) -> pd.DatetimeIndex:
         start,
         end,
         freq="h",
-        inclusive="left",
+        inclusive="right",
     ).tz_convert("UTC")
 
 

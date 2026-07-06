@@ -17,7 +17,7 @@ from model.mc_calibration import McCalibration
 def test_partial_day_combines_visible_observed_high_with_future_mc() -> None:
     init_time = pd.Timestamp("2026-01-01T11:00:00Z")
     observed_times = pd.date_range(
-        "2026-01-01T00:00:00Z",
+        "2026-01-01T01:00:00Z",
         "2026-01-01T11:00:00Z",
         freq="h",
     )
@@ -25,23 +25,23 @@ def test_partial_day_combines_visible_observed_high_with_future_mc() -> None:
         {
             "valid_time": observed_times,
             "available_at": observed_times,
-            "temperature_c": [20.0] * 11 + [30.0],
+            "temperature_c": [20.0] * 10 + [30.0],
         }
     )
     forecast_times = pd.date_range(
         "2026-01-01T12:00:00Z",
-        "2026-01-01T23:00:00Z",
+        "2026-01-02T00:00:00Z",
         freq="h",
     )
     predictions = pd.DataFrame(
         {
             "valid_time": forecast_times,
-            "fxx": range(1, 13),
-            "p10": [9.0] * 12,
-            "p50": [10.0] * 12,
-            "p90": [11.0] * 12,
-            "base_temp_c": [0.0] * 12,
-            "is_extrapolated": [False] * 12,
+            "fxx": range(1, 14),
+            "p10": [9.0] * 13,
+            "p50": [10.0] * 13,
+            "p90": [11.0] * 13,
+            "base_temp_c": [0.0] * 13,
+            "is_extrapolated": [False] * 13,
         }
     )
 
@@ -56,11 +56,61 @@ def test_partial_day_combines_visible_observed_high_with_future_mc() -> None:
     )
 
     assert result.coverage_type == "observed_plus_forecast"
-    assert result.observed_hour_count == 12
-    assert result.forecast_hour_count == 12
+    assert result.observed_hour_count == 11
+    assert result.forecast_hour_count == 13
     assert result.target_hour_count == 24
     assert result.observed_high_f == 86.0
     assert np.all(result.daily_high_samples_f == 86.0)
+
+
+def test_local_day_excludes_previous_2351_slot_and_includes_next_midnight() -> None:
+    observations = pd.DataFrame(
+        {
+            "valid_time": pd.to_datetime(
+                [
+                    "2026-05-28T04:00:00Z",
+                    "2026-05-28T05:00:00Z",
+                ]
+            ),
+            "available_at": pd.to_datetime(
+                [
+                    "2026-05-28T04:00:00Z",
+                    "2026-05-28T05:00:00Z",
+                ]
+            ),
+            "temperature_c": [25.0, 23.3333333333],
+        }
+    )
+    forecast_times = pd.date_range(
+        "2026-05-28T06:00:00Z",
+        "2026-05-29T04:00:00Z",
+        freq="h",
+    )
+    predictions = pd.DataFrame(
+        {
+            "valid_time": forecast_times,
+            "fxx": range(1, len(forecast_times) + 1),
+            "p10": [9.999] * len(forecast_times),
+            "p50": [10.0] * len(forecast_times),
+            "p90": [10.001] * len(forecast_times),
+            "base_temp_c": [0.0] * len(forecast_times),
+            "is_extrapolated": [False] * len(forecast_times),
+        }
+    )
+
+    result = build_daily_high_distribution(
+        init_time="2026-05-28T05:00:00Z",
+        target_date="2026-05-28",
+        station_timezone="America/New_York",
+        predictions=predictions,
+        observations=observations,
+        sampler=McSampler(n_samp=100, rng_seed=42),
+        bias=PartialDayBiasCalibration.zero(),
+    )
+
+    assert result.observed_hour_count == 1
+    assert result.observed_high_f == pytest.approx(74.0)
+    assert result.forecast_through == pd.Timestamp("2026-05-29T04:00:00Z")
 
 
 def test_partial_day_rejects_future_observation_instead_of_leaking() -> None:
@@ -154,8 +204,8 @@ def test_partial_bias_shrinks_remaining_hour_cell_to_full_day_prior() -> None:
 @pytest.mark.parametrize(
     ("target_date", "start_utc", "hours"),
     [
-        ("2026-03-08", "2026-03-08T05:00:00Z", 23),
-        ("2026-11-01", "2026-11-01T04:00:00Z", 25),
+        ("2026-03-08", "2026-03-08T06:00:00Z", 23),
+        ("2026-11-01", "2026-11-01T05:00:00Z", 25),
     ],
 )
 def test_forecast_only_uses_dst_local_day_hour_count(

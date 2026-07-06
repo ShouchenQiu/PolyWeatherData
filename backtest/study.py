@@ -364,8 +364,8 @@ class BacktestStudy:
             connection.close()
         return validated
 
+    @staticmethod
     def _validate_inputs(
-        self,
         *,
         study_id: str,
         station_id: str,
@@ -559,6 +559,26 @@ class BacktestStudy:
         if row is None:
             raise KeyError(f"unknown backtest study {study_id!r}")
         return json.loads(row["strategy_json"])
+
+
+def validate_study_inputs(
+    *,
+    study_id: str,
+    station_id: str,
+    start_target: str,
+    end_target: str,
+    inputs: StudyInputs,
+    expected_split_role: str,
+) -> StudyValidation:
+    """Validate immutable replay inputs without creating a study catalog."""
+    return BacktestStudy._validate_inputs(
+        study_id=study_id,
+        station_id=station_id,
+        start_target=start_target,
+        end_target=end_target,
+        inputs=inputs,
+        expected_split_role=expected_split_role,
+    )
 
 
 def _record(row: sqlite3.Row) -> StudyRecord:

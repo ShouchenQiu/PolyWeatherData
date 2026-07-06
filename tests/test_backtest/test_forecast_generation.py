@@ -15,7 +15,7 @@ from model.mc_calibration import McCalibration
 def test_build_forecast_cache_uses_predictions_even_when_label_weight_is_zero() -> None:
     init = pd.Timestamp("2026-06-05T00:00:00Z")
     valid = pd.date_range(
-        "2026-06-05T04:00:00Z",
+        "2026-06-05T05:00:00Z",
         periods=24,
         freq="h",
     )
@@ -23,7 +23,7 @@ def test_build_forecast_cache_uses_predictions_even_when_label_weight_is_zero() 
         {
             "init_time": init,
             "valid_time": valid,
-            "fxx": range(4, 28),
+            "fxx": range(5, 29),
             "target": 0.0,
             "p10": -0.001,
             "p50": 0.0,
@@ -116,6 +116,101 @@ def test_build_forecast_cache_uses_predictions_even_when_label_weight_is_zero() 
     assert cache.probabilities.set_index("condition_id").loc[
         "at-least-72", "yes_probability"
     ] > 0.99
+
+
+def test_build_forecast_cache_ignores_early_event_end_before_local_day_end() -> None:
+    init = pd.Timestamp("2026-05-28T10:00:00Z")
+    forecast_times = pd.date_range(
+        "2026-05-28T11:00:00Z",
+        "2026-05-29T00:00:00Z",
+        freq="h",
+    )
+    hourly = pd.DataFrame(
+        {
+            "init_time": init,
+            "valid_time": forecast_times,
+            "fxx": range(1, len(forecast_times) + 1),
+            "p10": -0.001,
+            "p50": 0.0,
+            "p90": 0.001,
+            "base_temp_c": 22.0,
+        }
+    )
+    observed_times = pd.date_range(
+        "2026-05-28T01:00:00Z",
+        init,
+        freq="h",
+    )
+    observations = pd.DataFrame(
+        {
+            "valid_time": observed_times,
+            "available_at": observed_times,
+            "temperature_c": 22.0,
+        }
+    )
+    availability = pd.DataFrame(
+        [
+            {
+                "init_time": init,
+                "complete": True,
+                "available_at": "2026-05-28T13:00:00Z",
+            }
+        ]
+    )
+    markets = pd.DataFrame(
+        [
+            {
+                "target_date": "2026-05-28",
+                "event_end_at": "2026-05-28T12:00:00Z",
+                "condition_id": "all",
+                "bucket_lo_f": float("-inf"),
+                "bucket_hi_f": float("inf"),
+            }
+        ]
+    )
+    calibration = McCalibration(
+        correlation=np.eye(48),
+        sigma_scales=np.ones(5),
+        max_bias_f=0.0,
+        model_sha256="a" * 64,
+        fit_split="val",
+        fit_start="2026-04-01",
+        fit_end="2026-04-30",
+        sample_count=30,
+        station_timezone="UTC",
+    )
+    lineages = pd.DataFrame(
+        [
+            {
+                "lineage_id": "fixed",
+                "checkpoint_sha256": "a" * 64,
+                "calibration_sha256": "b" * 64,
+                "split_role": "model_test",
+                "mc_seed": 42,
+                "mc_samples": 100,
+            }
+        ]
+    )
+
+    cache = build_forecast_cache(
+        hourly_predictions=hourly,
+        observations=observations,
+        availability=availability,
+        markets=markets,
+        lineages=lineages,
+        cycle_lineages=pd.DataFrame(
+            [{"init_time": init, "lineage_id": "fixed"}]
+        ),
+        calibrations={"fixed": calibration},
+        partial_biases={"fixed": PartialDayBiasCalibration.zero()},
+        station_id="KLGA",
+        station_timezone="UTC",
+    )
+
+    assert len(cache.snapshots) == 1
+    assert cache.snapshots.iloc[0]["available_at"] == pd.Timestamp(
+        "2026-05-28T13:00:00Z"
+    )
 
 
 def test_contiguous_oof_assignments_hold_out_every_cycle_once() -> None:

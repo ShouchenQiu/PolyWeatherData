@@ -45,7 +45,7 @@ def test_edge_observations_bind_point_in_time_signal_truth_and_execution(
     assert row["yes_probability"] == 0.8
     assert row["yes_outcome"] == 1.0
     assert row["forecast_width_f"] == 10.0
-    assert row["lead_hours"] > 0.0
+    assert row["lead_hours"] == pytest.approx(15.0 + 55.0 / 60.0)
     assert row["yes_effective_price"] >= row["yes_vwap"]
     assert row["no_effective_price"] >= row["no_vwap"]
 
@@ -183,6 +183,79 @@ def test_edge_observations_use_latest_forecast_available_at_each_tick(
     observations = build_edge_observations(expanded)
 
     assert observations["yes_probability"].tolist() == [0.8, 0.6]
+
+
+def test_edge_observations_reject_quotes_after_local_day_settlement(
+    tmp_path,
+) -> None:
+    study = BacktestStudy(tmp_path / "studies.sqlite")
+    record = study.create_development(
+        station_id="KLGA",
+        start_target="2026-04-01",
+        end_target="2026-04-01",
+        inputs=_study_inputs(tmp_path),
+        strategy={"min_edge": 0.04, "risk_usd": 50.0},
+    )
+    validation = study.validate(record.study_id)
+    after_settlement_snapshot = validation.forecast.snapshots.iloc[[0]].assign(
+        snapshot_id="snapshot-after-settlement",
+        init_time="2026-04-02T04:00:00Z",
+        available_at="2026-04-02T04:05:00Z",
+    )
+    after_settlement_probability = (
+        validation.forecast.probabilities.iloc[[0]].assign(
+            snapshot_id="snapshot-after-settlement",
+            yes_probability=0.99,
+        )
+    )
+    after_settlement_quote = validation.quotes.quotes.iloc[[0]].assign(
+        timestamp="2026-04-02T04:05:00Z",
+    )
+    expanded = replace(
+        validation,
+        forecast=ForecastCache(
+            snapshots=pd.concat(
+                [
+                    validation.forecast.snapshots,
+                    after_settlement_snapshot,
+                ],
+                ignore_index=True,
+            ),
+            probabilities=pd.concat(
+                [
+                    validation.forecast.probabilities,
+                    after_settlement_probability,
+                ],
+                ignore_index=True,
+            ),
+            lineages=validation.forecast.lineages,
+        ),
+        quotes=SyntheticQuoteDataset(
+            quotes=pd.concat(
+                [validation.quotes.quotes, after_settlement_quote],
+                ignore_index=True,
+            ),
+            start_at=validation.quotes.start_at,
+            end_at="2026-04-02T04:05:00Z",
+            decision_tick=validation.quotes.decision_tick,
+            lookback=validation.quotes.lookback,
+            max_staleness=validation.quotes.max_staleness,
+        ),
+        clob=HistoricalClobDataset(
+            events=validation.clob.events,
+            markets=validation.clob.markets.assign(
+                closed_at="2026-04-02T12:00:00Z"
+            ),
+            trades=validation.clob.trades,
+            start_date=validation.clob.start_date,
+            end_date=validation.clob.end_date,
+            station_id=validation.clob.station_id,
+        ),
+    )
+
+    observations = build_edge_observations(expanded)
+
+    assert observations["yes_probability"].tolist() == [0.8]
 
 
 def test_edge_calibration_weights_events_equally_and_falls_back_globally() -> None:

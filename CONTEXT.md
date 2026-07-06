@@ -85,6 +85,30 @@ probability minus its fee-adjusted executable price. Diagnostic replay may enter
 when this value clears its frozen threshold.
 _Avoid_: raw edge, midpoint edge
 
+**normalized synthetic midpoint**: At one complete 5-minute Event tick, the vector of
+past-public-trade synthetic YES midpoints divided by its cross-Bucket sum. The raw sum
+is retained as overround evidence. This is a public-price benchmark for signal
+evaluation, not a historical L2 quote or an executable price.
+_Avoid_: market probability, executable midpoint
+
+**Forecast Signal Study**: A strategy-free `oof_development` comparison of raw
+ForecastCache Bucket probabilities with the normalized synthetic midpoint on identical
+complete Event/tick vectors. It reports proper scores, calibration, sharpness, and
+paired event-day uncertainty, but has no promotion gate and never consumes holdout.
+_Avoid_: Edge Study, strategy backtest
+
+**signal advantage slice**: A development-only, ex-ante subset of Forecast Signal
+Study vectors used to test where model probabilities improve on the normalized
+synthetic midpoint. Distribution scores use all eligible ticks with Event-equal
+weighting; Token evidence uses only the first eligible tick per Event. Its theoretical
+midpoint excess excludes execution, fees, capacity, and fill risk.
+_Avoid_: strategy, tradable edge, profitable segment
+
+**Event settlement boundary**: The end of the station-local target calendar day;
+Edge Study lead time and decision eligibility use this boundary, independently of
+the later CLOB `closed_at`.
+_Avoid_: market close, event_end_at
+
 **CLOB**: The Polymarket central limit order book; the live venue for order submission,
 cancellation, and fill tracking.
 _Avoid_: exchange, book
@@ -125,7 +149,8 @@ _Avoid_: model price, 48-hour maximum probability
 
 **point-in-time partial-day daily high**: A target local-day distribution whose elapsed
 hours come from observations visible by `init_time` and whose later hours come from
-non-extrapolated MC forecasts, emitted only when their union covers the complete day.
+non-extrapolated MC forecasts over aligned slots `(local D 00:00, local D+1 00:00]`,
+emitted only when their union covers the complete day.
 _Avoid_: remaining-hours maximum, partial maximum
 
 **max_bias**: Per-station scalar correction for the upward bias introduced when taking
@@ -268,6 +293,18 @@ _Avoid_: parquet file, storage file
 - One `(init_time, target_date)` -> one McSampler daily-high distribution -> one
   **ForecastCache bucket probability** per Market; `available_at`, not `init_time`,
   controls when trading research may consume it.
+- **Forecast Signal Study** runs before strategy research. It requires all Event
+  Buckets at one quote tick, joins every Bucket to one latest-visible Forecast
+  snapshot, and compares `model_raw` with the **normalized synthetic midpoint** using
+  Event-equal scoring. Events without a valid overlap remain explicit coverage
+  exclusions; stale prices and future forecasts are never filled to improve coverage.
+- A **signal advantage slice** may nominate a strategy candidate only from
+  `oof_development`. Adaptive thresholds are fitted outside contiguous held-out
+  event-day folds, and the result remains development evidence until a separately
+  frozen executable strategy is evaluated.
+- Edge Study observations require quote ticks before both the CLOB close and the
+  **Event settlement boundary**; lead-time strata measure time to settlement, not
+  time to the venue's later close.
 - An in-progress Event uses a **point-in-time partial-day daily high**; uncovered
   right-tail hours or extrapolated decoder cells suppress the snapshot.
 - **ForecastLoop** -> **TFT** -> **McSampler** -> bucket probabilities -> **TradingLoop**

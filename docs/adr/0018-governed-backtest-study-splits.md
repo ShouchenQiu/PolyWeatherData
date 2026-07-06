@@ -11,8 +11,10 @@ are frozen with an approver, an independent SQLite catalog permits one atomic
 
 The initial diagnostic replay treats one Event as one risk unit: it takes only the first
 qualifying Token, uses a fixed $50 order, and holds through settlement. Calibration uses
-event-equal residual evidence and conservative executable prices. Adaptive position
-sizing is deferred to a separate money-management study after signal eligibility.
+event-equal residual evidence and conservative executable prices. Lead time is measured
+to the station-local target-day boundary, and quote ticks at or after that settlement
+boundary are ineligible even if the CLOB remains open. Adaptive position sizing is
+deferred to a separate money-management study after signal eligibility.
 
 **Considered alternatives**: CLI flags alone cannot prevent accidental split reuse;
 immutable output directories can be deleted or renamed; reusing the training catalog

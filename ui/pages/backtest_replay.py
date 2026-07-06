@@ -8,15 +8,35 @@ import pandas as pd
 import streamlit as st
 
 from backtest.reporting import ReplayArtifact, build_replay_report
+from backtest.signal_slice_study import load_signal_slice_artifact
+from backtest.signal_study import load_signal_study_artifact
 from config.settings import Settings
 
 
 def render(
     *,
+    signal_root: Path | str | None = None,
+    slice_root: Path | str | None = None,
     selection_root: Path | str | None = None,
     results_root: Path | str | None = None,
 ) -> None:
     settings = Settings()
+    signal_dir = Path(
+        signal_root
+        or settings.data_store_dir
+        / "backtest"
+        / "signal"
+        / "KLGA"
+        / "development_full_day_v1"
+    )
+    slice_dir = Path(
+        slice_root
+        or settings.data_store_dir
+        / "backtest"
+        / "signal_slices"
+        / "KLGA"
+        / "development_full_day_v1"
+    )
     selection_dir = Path(
         selection_root
         or settings.data_store_dir
@@ -34,6 +54,16 @@ def render(
         / "development_v2"
     )
     st.header("Point-in-time Backtest & Strategy Selection")
+    if (signal_dir / "manifest.json").exists():
+        _render_signal_study_artifact(signal_dir)
+    else:
+        st.caption(f"No Forecast Signal Study artifact found at {signal_dir}.")
+    if (slice_dir / "manifest.json").exists():
+        _render_signal_slice_artifact(slice_dir)
+    else:
+        st.caption(
+            f"No Forecast Signal Slice Study artifact found at {slice_dir}."
+        )
     if not (selection_dir / "manifest.json").exists():
         st.warning(
             f"No strategy-selection artifact found at {selection_dir}."
@@ -170,3 +200,92 @@ def _render_edge_study_artifact(path: Path, strategy: str) -> None:
     with st.expander("Trades and settlements"):
         st.dataframe(trades, use_container_width=True)
         st.dataframe(settlements, use_container_width=True)
+
+
+def _render_signal_study_artifact(path: Path) -> None:
+    try:
+        artifact = load_signal_study_artifact(path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        st.warning(f"Forecast Signal Study artifact is invalid: {exc}")
+        return
+    summary = artifact.summary
+    sample = summary["sample"]
+    st.subheader("Signal Quality: model vs normalized midpoint")
+    metrics = st.columns(4)
+    metrics[0].metric("Events", int(sample["event_count"]))
+    metrics[1].metric("5-minute vectors", int(sample["vector_count"]))
+    metrics[2].metric("Buckets", int(sample["bucket_count"]))
+    metrics[3].metric(
+        "Midpoint overround",
+        f"{summary['midpoint']['mean_overround']:.3f}",
+    )
+    st.caption(
+        "Strategy-free OOF development evidence. Lower is better for "
+        "Brier, Log Score, RPS, ECE and MCE; sharpness is descriptive only."
+    )
+    source_table = (
+        pd.DataFrame.from_dict(summary["sources"], orient="index")
+        .rename_axis("source")
+        .reset_index()
+    )
+    comparison_table = (
+        pd.DataFrame.from_dict(summary["comparison"], orient="index")
+        .rename_axis("metric")
+        .reset_index()
+    )
+    st.dataframe(source_table, use_container_width=True)
+    st.subheader("Paired event-day comparison")
+    st.dataframe(comparison_table, use_container_width=True)
+    st.subheader("Calibration reliability")
+    st.dataframe(artifact.reliability, use_container_width=True)
+    st.subheader("Signal scores by lead band")
+    st.dataframe(artifact.by_lead, use_container_width=True)
+
+
+def _render_signal_slice_artifact(path: Path) -> None:
+    try:
+        artifact = load_signal_slice_artifact(path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        st.warning(f"Forecast Signal Slice Study artifact is invalid: {exc}")
+        return
+    summary = artifact.summary
+    sample = summary["sample"]
+    tier_counts = summary["shortlist"]["tier_counts"]
+    st.subheader("Advantage Slices: development evidence")
+    metrics = st.columns(4)
+    metrics[0].metric("Events", int(sample["event_count"]))
+    metrics[1].metric(
+        "Fixed slices", int(sample["fixed_slice_count"])
+    )
+    metrics[2].metric(
+        "Cross-fit rules", int(sample["crossfit_rule_count"])
+    )
+    metrics[3].metric(
+        "Stable candidates", int(tier_counts["stable_candidate"])
+    )
+    st.warning(
+        "Theoretical midpoint excess is non-executable development evidence. "
+        "It excludes VWAP, fees, capacity and fill risk."
+    )
+    st.subheader("Nested cross-fit shortlist")
+    st.dataframe(artifact.shortlist, use_container_width=True)
+    st.subheader("Fixed slice atlas")
+    st.dataframe(artifact.slice_atlas, use_container_width=True)
+    heatmap_rows = artifact.slice_atlas[
+        artifact.slice_atlas["dimensions"] == "lead_band|tv_band"
+    ].copy()
+    if not heatmap_rows.empty:
+        split_values = heatmap_rows["values"].str.split(
+            "|", n=1, expand=True
+        )
+        heatmap_rows["lead_band"] = split_values[0]
+        heatmap_rows["tv_band"] = split_values[1]
+        heatmap = heatmap_rows.pivot(
+            index="lead_band",
+            columns="tv_band",
+            values="brier_delta",
+        )
+        st.subheader("Lead × disagreement Brier delta")
+        st.dataframe(heatmap, use_container_width=True)
+    st.subheader("Cross-fit fold stability")
+    st.dataframe(artifact.crossfit_results, use_container_width=True)

@@ -8,6 +8,11 @@ The union must cover every hour of the station-local calendar day; a missing
 right tail rejects that `(init_time, target_date)` instead of treating a partial
 maximum as the Event resolution target or using tail fallback.
 
+Hourly IEM evidence uses the representative `H-1 :51` observation aligned to the
+`H:00` model slot. Therefore target date D owns aligned slots
+`(D 00:00, D+1 00:00]`: the D 00:00 slot belongs to the preceding settlement day,
+while D+1 00:00 contains D's final representative observation.
+
 Future-maximum bias is calibrated by trusted forecast-hour count on development
 cycles and shrunk toward the complete-day max-bias prior. Each MC daily-high draw
 is the maximum of the visible observed high and the bias-corrected future-path

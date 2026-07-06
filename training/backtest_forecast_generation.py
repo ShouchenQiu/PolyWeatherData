@@ -6,6 +6,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -222,7 +223,12 @@ def build_forecast_cache(
             "target_date", sort=True
         ):
             available_at = _utc(available["available_at"])
-            if available_at >= day_markets["event_end_at"].min():
+            target_day_end = (
+                pd.Timestamp(str(target_date))
+                .tz_localize(ZoneInfo(station_timezone))
+                + pd.DateOffset(days=1)
+            ).tz_convert("UTC")
+            if available_at >= target_day_end:
                 continue
             sampler = McSampler(
                 n_samp=int(lineage["mc_samples"]),
