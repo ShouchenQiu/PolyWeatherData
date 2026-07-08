@@ -37,6 +37,40 @@ class ForecastSignalSliceArtifact:
     shortlist: pd.DataFrame
 
 
+@dataclass(frozen=True)
+class FrozenSliceValidationResult:
+    summary: dict
+    slices: pd.DataFrame
+    families: pd.DataFrame
+    frozen_thresholds: dict[str, tuple[float, float]]
+
+
+@dataclass(frozen=True)
+class FrozenSliceValidationArtifact:
+    manifest: dict
+    summary: dict
+    slices: pd.DataFrame
+    families: pd.DataFrame
+
+
+DEFAULT_FROZEN_SLICE_FAMILIES: dict[str, tuple[str, ...]] = {
+    "stable_probability": (
+        "tv_distance_qband=middle",
+        "coverage_type=forecast_only&tv_distance_qband=middle",
+    ),
+    "high_disagreement_opportunity": (
+        "tv_distance_qband=high",
+        "coverage_type=forecast_only&tv_distance_qband=high",
+        "tv_distance_qband=high&benchmark_probability_qband=high",
+    ),
+    "center_bucket_distribution": (
+        "bucket_position=center",
+        "token_side=YES&bucket_position=center",
+        "token_side=NO&bucket_position=center",
+    ),
+}
+
+
 def build_contiguous_event_day_folds(
     target_dates: pd.Series | np.ndarray | list[str],
     *,
@@ -143,6 +177,13 @@ def build_signal_slice_features(
             ),
             "max_absolute_probability_gap": float(
                 np.abs(model - midpoint).max()
+            ),
+            "model_true_bucket_probability": float(model[np.argmax(outcome)]),
+            "midpoint_true_bucket_probability": float(
+                midpoint[np.argmax(outcome)]
+            ),
+            "true_bucket_probability_delta": float(
+                model[np.argmax(outcome)] - midpoint[np.argmax(outcome)]
             ),
             "snapshot_age_hours": float(
                 (timestamp - available_at).total_seconds() / 3600.0
@@ -593,6 +634,175 @@ def run_nested_slice_search(
     return crossfit, fold_rules, shortlist
 
 
+def score_frozen_slice_validation(
+    development_vector_features: pd.DataFrame,
+    development_token_candidates: pd.DataFrame,
+    validation_vector_features: pd.DataFrame,
+    validation_token_candidates: pd.DataFrame,
+    *,
+    split_role: str,
+    slice_families: dict[str, tuple[str, ...]]
+    | None = None,
+    bootstrap_samples: int = 10_000,
+    seed: int = 42,
+) -> FrozenSliceValidationResult:
+    """Score frozen development slice families on an independent validation split.
+
+    Development rows are used only to freeze qband thresholds. The validation
+    rows are never used for threshold fitting or rule selection.
+    """
+    if bootstrap_samples < 1:
+        raise ValueError("bootstrap_samples must be positive")
+    families = slice_families or DEFAULT_FROZEN_SLICE_FAMILIES
+    frozen_thresholds = _fit_nested_thresholds(
+        development_vector_features.merge(
+            development_token_candidates,
+            on=_VECTOR_KEYS + ["snapshot_id"],
+            how="inner",
+            validate="one_to_one",
+            suffixes=("", "_token"),
+        )
+    )
+    validation_features = _assign_nested_bands(
+        validation_vector_features.merge(
+            validation_token_candidates,
+            on=_VECTOR_KEYS + ["snapshot_id"],
+            how="inner",
+            validate="one_to_one",
+            suffixes=("", "_token"),
+        ),
+        frozen_thresholds,
+    )
+    rule_by_id = {
+        definition.slice_id: definition
+        for definition in _nested_rule_definitions()
+    }
+    required_rule_ids = sorted(
+        {rule_id for rule_ids in families.values() for rule_id in rule_ids}
+    )
+    missing = set(required_rule_ids) - set(rule_by_id)
+    if missing:
+        raise ValueError(f"unknown frozen slice ids: {sorted(missing)}")
+
+    slice_rows = []
+    masks: dict[str, pd.Series] = {}
+    for rule_id in required_rule_ids:
+        definition = rule_by_id[rule_id]
+        mask = _slice_mask(validation_features, definition)
+        masks[rule_id] = mask
+        slice_rows.append(
+            _score_frozen_selection(
+                rule_id=rule_id,
+                selected=validation_features[mask].copy(),
+                bootstrap_samples=bootstrap_samples,
+                seed=seed + _stable_seed(rule_id),
+            )
+        )
+
+    family_rows = []
+    for family_id, rule_ids in families.items():
+        family_mask = pd.Series(False, index=validation_features.index)
+        for rule_id in rule_ids:
+            family_mask |= masks[rule_id]
+        family_rows.append(
+            {
+                "family_id": family_id,
+                "member_slice_ids": tuple(rule_ids),
+                **_score_frozen_selection(
+                    rule_id=family_id,
+                    selected=validation_features[family_mask].copy(),
+                    bootstrap_samples=bootstrap_samples,
+                    seed=seed + _stable_seed(family_id),
+                ),
+            }
+        )
+
+    slices = pd.DataFrame(slice_rows)
+    family_frame = pd.DataFrame(family_rows)
+    summary = {
+        "schema_version": 1,
+        "data_class": "frozen_forecast_distribution_validation_summary",
+        "selection_policy": "frozen_no_search",
+        "split_role": split_role,
+        "development_event_count": int(
+            development_vector_features["event_id"].nunique()
+        ),
+        "validation_event_count": int(
+            validation_vector_features["event_id"].nunique()
+        ),
+        "frozen_slice_ids": required_rule_ids,
+        "frozen_families": {
+            family_id: list(rule_ids)
+            for family_id, rule_ids in families.items()
+        },
+        "frozen_thresholds": {
+            key: [float(value) for value in values]
+            for key, values in frozen_thresholds.items()
+        },
+        "parameters": {
+            "bootstrap_samples": bootstrap_samples,
+            "seed": seed,
+        },
+    }
+    return FrozenSliceValidationResult(
+        summary=summary,
+        slices=slices,
+        families=family_frame,
+        frozen_thresholds=frozen_thresholds,
+    )
+
+
+def _slice_mask(
+    features: pd.DataFrame,
+    definition: SliceDefinition,
+) -> pd.Series:
+    mask = pd.Series(True, index=features.index)
+    for dimension, value in zip(
+        definition.dimensions, definition.values
+    ):
+        mask &= features[dimension].astype(str) == value
+    return mask
+
+
+def _score_frozen_selection(
+    *,
+    rule_id: str,
+    selected: pd.DataFrame,
+    bootstrap_samples: int,
+    seed: int,
+) -> dict[str, object]:
+    evidence = _slice_event_evidence(selected)
+    summary = _mean_evidence(evidence)
+    if evidence.empty:
+        edge_lcb = float("nan")
+    else:
+        edge_by_day = evidence.groupby("target_date")[
+            "theoretical_midpoint_excess"
+        ].mean()
+        edge_lcb = float(
+            np.quantile(
+                _bootstrap_day_mean(
+                    edge_by_day,
+                    bootstrap_samples=bootstrap_samples,
+                    seed=seed,
+                ),
+                0.10,
+            )
+        )
+    return {
+        "slice_id": rule_id,
+        "event_count": int(evidence["event_id"].nunique()),
+        "event_day_count": int(
+            evidence["target_date"].nunique()
+            if not evidence.empty
+            else 0
+        ),
+        "vector_count": int(len(selected)),
+        "theoretical_midpoint_excess_lcb90": edge_lcb,
+        **summary,
+    }
+
+
 def run_forecast_signal_slice_study(
     *,
     signal_root: Path | str,
@@ -716,6 +926,67 @@ def run_forecast_signal_slice_study(
         crossfit_results=crossfit,
         fold_rules=fold_rules,
         shortlist=shortlist,
+    )
+
+
+def run_frozen_forecast_distribution_validation(
+    *,
+    development_slice_root: Path | str,
+    validation_signal_root: Path | str,
+    validation_forecast_root: Path | str,
+    output: Path | str,
+    bootstrap_samples: int = 10_000,
+    seed: int = 42,
+) -> dict:
+    """Apply frozen development slice families to a validation signal study."""
+    development = load_signal_slice_artifact(development_slice_root)
+    signal_dir = Path(validation_signal_root)
+    forecast_dir = Path(validation_forecast_root)
+    validation_signal = load_signal_study_artifact(signal_dir)
+    forecast_manifest_sha256 = _file_sha256(forecast_dir / "manifest.json")
+    if (
+        validation_signal.manifest.get("input_sha256", {}).get(
+            "forecast_manifest"
+        )
+        != forecast_manifest_sha256
+    ):
+        raise ValueError(
+            "validation ForecastCache does not match the validation Signal Study"
+        )
+    forecast = ForecastCache.load(forecast_dir)
+    split_roles = set(forecast.lineages["split_role"].astype(str))
+    if len(split_roles) != 1:
+        raise ValueError("validation ForecastCache must contain one split_role")
+    split_role = next(iter(split_roles))
+    if validation_signal.manifest.get("split_role") != split_role:
+        raise ValueError(
+            "validation Signal Study split_role does not match ForecastCache"
+        )
+    vectors, tokens = build_signal_slice_features(
+        validation_signal.panel, forecast.snapshots
+    )
+    result = score_frozen_slice_validation(
+        development.vector_features,
+        development.token_candidates,
+        vectors,
+        tokens,
+        split_role=split_role,
+        bootstrap_samples=bootstrap_samples,
+        seed=seed,
+    )
+    return save_frozen_slice_validation_artifact(
+        output,
+        development_slice_manifest_sha256=_file_sha256(
+            Path(development_slice_root) / "manifest.json"
+        ),
+        validation_signal_manifest_sha256=_file_sha256(
+            signal_dir / "manifest.json"
+        ),
+        validation_forecast_manifest_sha256=forecast_manifest_sha256,
+        station_id=str(validation_signal.manifest["station_id"]),
+        target_range=list(validation_signal.manifest["target_range"]),
+        split_role=split_role,
+        result=result,
     )
 
 
@@ -848,6 +1119,119 @@ def load_signal_slice_artifact(
     )
 
 
+def save_frozen_slice_validation_artifact(
+    root: Path | str,
+    *,
+    development_slice_manifest_sha256: str,
+    validation_signal_manifest_sha256: str,
+    validation_forecast_manifest_sha256: str,
+    station_id: str,
+    target_range: list[str],
+    split_role: str,
+    result: FrozenSliceValidationResult,
+) -> dict:
+    artifact_dir = Path(root)
+    artifact_dir.mkdir(parents=True, exist_ok=False)
+    frames = {
+        "frozen_slices.parquet": result.slices,
+        "frozen_families.parquet": result.families,
+    }
+    hashes: dict[str, str] = {}
+    for filename, frame in frames.items():
+        path = artifact_dir / filename
+        frame.to_parquet(path, index=False)
+        hashes[filename] = _file_sha256(path)
+    summary_path = artifact_dir / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            result.summary,
+            indent=2,
+            sort_keys=True,
+            allow_nan=True,
+        ),
+        encoding="utf-8",
+    )
+    hashes[summary_path.name] = _file_sha256(summary_path)
+    identity = {
+        "development_slice_manifest_sha256": (
+            development_slice_manifest_sha256
+        ),
+        "validation_signal_manifest_sha256": (
+            validation_signal_manifest_sha256
+        ),
+        "validation_forecast_manifest_sha256": (
+            validation_forecast_manifest_sha256
+        ),
+        "parameters": result.summary["parameters"],
+        "split_role": split_role,
+    }
+    study_id = "frozen-signal-validation-" + hashlib.sha256(
+        json.dumps(identity, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    manifest = {
+        "schema_version": 1,
+        "data_class": "frozen_forecast_distribution_validation",
+        "study_id": study_id,
+        "development_slice_manifest_sha256": (
+            development_slice_manifest_sha256
+        ),
+        "validation_signal_manifest_sha256": (
+            validation_signal_manifest_sha256
+        ),
+        "validation_forecast_manifest_sha256": (
+            validation_forecast_manifest_sha256
+        ),
+        "station_id": station_id,
+        "target_range": target_range,
+        "split_role": split_role,
+        "selection_policy": "frozen_no_search",
+        "parameters": result.summary["parameters"],
+        "sha256": hashes,
+    }
+    (artifact_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def load_frozen_slice_validation_artifact(
+    root: Path | str,
+) -> FrozenSliceValidationArtifact:
+    artifact_dir = Path(root)
+    manifest = json.loads(
+        (artifact_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("data_class")
+        != "frozen_forecast_distribution_validation"
+    ):
+        raise ValueError(
+            "unsupported frozen forecast distribution validation manifest"
+        )
+    expected = {
+        "summary.json",
+        "frozen_slices.parquet",
+        "frozen_families.parquet",
+    }
+    if set(manifest.get("sha256", {})) != expected:
+        raise ValueError(
+            "frozen validation manifest has incomplete payloads"
+        )
+    for filename, digest in manifest["sha256"].items():
+        if _file_sha256(artifact_dir / filename) != digest:
+            raise ValueError(f"frozen validation checksum mismatch: {filename}")
+    return FrozenSliceValidationArtifact(
+        manifest=manifest,
+        summary=json.loads(
+            (artifact_dir / "summary.json").read_text(encoding="utf-8")
+        ),
+        slices=pd.read_parquet(artifact_dir / "frozen_slices.parquet"),
+        families=pd.read_parquet(artifact_dir / "frozen_families.parquet"),
+    )
+
+
 def _fit_nested_thresholds(
     fit: pd.DataFrame,
 ) -> dict[str, tuple[float, float]]:
@@ -958,18 +1342,28 @@ def _slice_event_evidence(selected: pd.DataFrame) -> pd.DataFrame:
         "brier_delta",
         "log_score_delta",
         "rps_delta",
+        "true_bucket_probability_delta",
         "theoretical_midpoint_excess",
         "model_probability_residual",
         "model_probability_advantage",
     ]
     if selected.empty:
         return pd.DataFrame(columns=columns)
+    distribution_columns = [
+        "brier_delta",
+        "log_score_delta",
+        "rps_delta",
+    ]
+    if "true_bucket_probability_delta" in selected:
+        distribution_columns.append("true_bucket_probability_delta")
     distribution = (
         selected.groupby(["event_id", "target_date"], as_index=False)[
-            ["brier_delta", "log_score_delta", "rps_delta"]
+            distribution_columns
         ]
         .mean()
     )
+    if "true_bucket_probability_delta" not in distribution:
+        distribution["true_bucket_probability_delta"] = float("nan")
     first = (
         selected.sort_values(
             ["timestamp", "condition_id", "token_side"], kind="stable"
@@ -998,6 +1392,7 @@ def _mean_evidence(evidence: pd.DataFrame) -> dict[str, float]:
         "brier_delta",
         "log_score_delta",
         "rps_delta",
+        "true_bucket_probability_delta",
         "theoretical_midpoint_excess",
         "model_probability_residual",
         "model_probability_advantage",

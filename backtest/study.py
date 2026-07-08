@@ -373,13 +373,14 @@ class BacktestStudy:
         end_target: str,
         inputs: StudyInputs,
         expected_split_role: str,
+        allow_model_test: bool = False,
     ) -> StudyValidation:
-        if expected_split_role == "model_test":
+        allowed_splits = {"oof_development", "post_test_holdout"}
+        if allow_model_test:
+            allowed_splits.add("model_test")
+        if expected_split_role == "model_test" and not allow_model_test:
             raise ValueError("model_test is forbidden for trading studies")
-        if expected_split_role not in {
-            "oof_development",
-            "post_test_holdout",
-        }:
+        if expected_split_role not in allowed_splits:
             raise ValueError(f"unsupported trading-study split {expected_split_role!r}")
         forecast_manifest_path = Path(inputs.forecast_root) / "manifest.json"
         quotes_manifest_path = Path(inputs.quotes_root) / "manifest.json"
@@ -437,7 +438,7 @@ class BacktestStudy:
         clob = HistoricalClobDataset.load(inputs.clob_root)
         actuals = _load_actuals(inputs.actuals_path, manifests["actuals_manifest"])
         split_roles = set(forecast.lineages["split_role"].astype(str))
-        if "model_test" in split_roles:
+        if "model_test" in split_roles and not allow_model_test:
             raise ValueError("model_test is forbidden for trading studies")
         if split_roles != {expected_split_role}:
             raise ValueError(
@@ -578,6 +579,27 @@ def validate_study_inputs(
         end_target=end_target,
         inputs=inputs,
         expected_split_role=expected_split_role,
+    )
+
+
+def validate_signal_inputs(
+    *,
+    study_id: str,
+    station_id: str,
+    start_target: str,
+    end_target: str,
+    inputs: StudyInputs,
+    expected_split_role: str,
+) -> StudyValidation:
+    """Validate forecast-signal inputs without trading-study split bans."""
+    return BacktestStudy._validate_inputs(
+        study_id=study_id,
+        station_id=station_id,
+        start_target=start_target,
+        end_target=end_target,
+        inputs=inputs,
+        expected_split_role=expected_split_role,
+        allow_model_test=True,
     )
 
 

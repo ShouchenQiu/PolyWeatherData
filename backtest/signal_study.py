@@ -398,6 +398,49 @@ def run_forecast_signal_study(
     """Build, score, and persist one immutable development signal study."""
     if validation.split_role != "oof_development":
         raise ValueError("ForecastSignalStudy accepts only oof_development")
+    return _run_forecast_signal_study(
+        validation,
+        output=output,
+        ece_bins=ece_bins,
+        probability_floor=probability_floor,
+        bootstrap_samples=bootstrap_samples,
+        seed=seed,
+    )
+
+
+def run_forecast_signal_validation_study(
+    validation: StudyValidation,
+    *,
+    output: Path | str,
+    ece_bins: int = 10,
+    probability_floor: float = 1e-6,
+    bootstrap_samples: int = 5_000,
+    seed: int = 42,
+) -> dict:
+    """Build and persist one immutable non-development signal validation."""
+    if validation.split_role != "model_test":
+        raise ValueError(
+            "ForecastSignalValidationStudy accepts only model_test"
+        )
+    return _run_forecast_signal_study(
+        validation,
+        output=output,
+        ece_bins=ece_bins,
+        probability_floor=probability_floor,
+        bootstrap_samples=bootstrap_samples,
+        seed=seed,
+    )
+
+
+def _run_forecast_signal_study(
+    validation: StudyValidation,
+    *,
+    output: Path | str,
+    ece_bins: int,
+    probability_floor: float,
+    bootstrap_samples: int,
+    seed: int,
+) -> dict:
     panel = build_signal_panel(validation)
     report = score_signal_panel(
         panel,

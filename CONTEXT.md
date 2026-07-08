@@ -104,6 +104,13 @@ weighting; Token evidence uses only the first eligible tick per Event. Its theor
 midpoint excess excludes execution, fees, capacity, and fill risk.
 _Avoid_: strategy, tradable edge, profitable segment
 
+**frozen forecast distribution validation**: A non-search validation artifact that
+freezes signal advantage slice thresholds and families from `oof_development`, then
+scores them on an independent forecast split such as `model_test`. It validates
+forecast distribution advantage with proper scores and true-Bucket probability
+evidence; it does not recalibrate, select rules, or establish executable edge.
+_Avoid_: slice discovery, strategy validation, holdout optimisation
+
 **Event settlement boundary**: The end of the station-local target calendar day;
 Edge Study lead time and decision eligibility use this boundary, independently of
 the later CLOB `closed_at`.

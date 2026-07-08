@@ -8,9 +8,14 @@ from pathlib import Path
 
 from backtest.signal_study import (
     run_forecast_signal_study,
+    run_forecast_signal_validation_study,
     signal_study_id,
 )
-from backtest.study import StudyInputs, validate_study_inputs
+from backtest.study import (
+    StudyInputs,
+    validate_signal_inputs,
+    validate_study_inputs,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -27,6 +32,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--probability-floor", type=float, default=1e-6)
     parser.add_argument("--bootstrap-samples", type=int, default=5_000)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--expected-split-role",
+        choices=["oof_development", "model_test"],
+        default="oof_development",
+        help=(
+            "Use model_test only for frozen forecast-signal validation; "
+            "strategy studies still reject model_test."
+        ),
+    )
     return parser
 
 
@@ -50,13 +64,18 @@ def main(argv: list[str] | None = None) -> int:
         clob_root=args.clob_root,
         actuals_path=args.actual_highs,
     )
-    validation = validate_study_inputs(
+    validator = (
+        validate_study_inputs
+        if args.expected_split_role == "oof_development"
+        else validate_signal_inputs
+    )
+    validation = validator(
         study_id="signal-pending",
         station_id=args.station,
         start_target=start_target,
         end_target=end_target,
         inputs=inputs,
-        expected_split_role="oof_development",
+        expected_split_role=args.expected_split_role,
     )
     study_id = signal_study_id(
         station_id=args.station,
@@ -68,7 +87,12 @@ def main(argv: list[str] | None = None) -> int:
         bootstrap_samples=args.bootstrap_samples,
         seed=args.seed,
     )
-    manifest = run_forecast_signal_study(
+    runner = (
+        run_forecast_signal_study
+        if args.expected_split_role == "oof_development"
+        else run_forecast_signal_validation_study
+    )
+    manifest = runner(
         replace(validation, study_id=study_id),
         output=args.output,
         ece_bins=args.ece_bins,

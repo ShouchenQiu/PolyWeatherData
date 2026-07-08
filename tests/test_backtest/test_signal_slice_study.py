@@ -9,8 +9,11 @@ from backtest.signal_slice_study import (
     build_contiguous_event_day_folds,
     build_signal_slice_features,
     evaluate_fixed_slice_atlas,
+    load_frozen_slice_validation_artifact,
     load_signal_slice_artifact,
     run_nested_slice_search,
+    score_frozen_slice_validation,
+    save_frozen_slice_validation_artifact,
     save_signal_slice_artifact,
 )
 
@@ -69,6 +72,9 @@ def test_slice_features_measure_vector_and_choose_one_model_favored_token() -> N
     assert vector["tv_distance"] == pytest.approx(0.2)
     assert bool(vector["top_bucket_agrees"])
     assert vector["max_absolute_probability_gap"] == pytest.approx(0.2)
+    assert vector["model_true_bucket_probability"] == pytest.approx(0.6)
+    assert vector["midpoint_true_bucket_probability"] == pytest.approx(0.4)
+    assert vector["true_bucket_probability_delta"] == pytest.approx(0.2)
     assert vector["snapshot_age_hours"] == pytest.approx(1.0)
     assert vector["init_age_hours"] == pytest.approx(2.0)
     assert vector["coverage_type"] == "forecast_only"
@@ -292,3 +298,244 @@ def test_slice_artifact_is_complete_and_hash_verified(tmp_path) -> None:
     (output / "summary.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="checksum mismatch"):
         load_signal_slice_artifact(output)
+
+
+def test_frozen_validation_scores_development_families_without_refitting() -> None:
+    development_vectors = pd.DataFrame(
+        [
+            {
+                "event_id": f"dev-{index}",
+                "target_date": f"2026-04-{index + 1:02d}",
+                "timestamp": pd.Timestamp(f"2026-04-{index + 1:02d}T12:00:00Z"),
+                "snapshot_id": f"dev-snapshot-{index}",
+                "lead_hours": 24.0,
+                "coverage_type": "forecast_only",
+                "model_max_probability": 0.4,
+                "model_normalized_entropy": 0.6,
+                "tv_distance": tv_distance,
+                "top_bucket_agrees": False,
+                "model_multiclass_brier": 0.20,
+                "midpoint_multiclass_brier": 0.35,
+                "brier_delta": -0.15,
+                "model_log_score": 0.50,
+                "midpoint_log_score": 0.70,
+                "log_score_delta": -0.20,
+                "model_normalized_rps": 0.05,
+                "midpoint_normalized_rps": 0.08,
+                "rps_delta": -0.03,
+                "model_true_bucket_probability": 0.55,
+                "midpoint_true_bucket_probability": 0.40,
+                "true_bucket_probability_delta": 0.15,
+            }
+            for index, tv_distance in enumerate(
+                [0.10, 0.12, 0.20, 0.22, 0.40, 0.42]
+            )
+        ]
+    )
+    development_tokens = pd.DataFrame(
+        [
+            {
+                "event_id": row.event_id,
+                "target_date": row.target_date,
+                "timestamp": row.timestamp,
+                "snapshot_id": row.snapshot_id,
+                "condition_id": "bucket",
+                "token_side": "YES",
+                "bucket_position": "center",
+                "benchmark_probability": 0.40,
+                "theoretical_midpoint_excess": 0.60,
+                "model_probability_residual": 0.45,
+                "model_probability_advantage": 0.15,
+            }
+            for row in development_vectors.itertuples(index=False)
+        ]
+    )
+    holdout_vectors = development_vectors.copy()
+    holdout_vectors["event_id"] = [f"holdout-{index}" for index in range(6)]
+    holdout_vectors["target_date"] = [
+        f"2026-05-{index + 1:02d}" for index in range(6)
+    ]
+    holdout_vectors["timestamp"] = pd.to_datetime(
+        [f"2026-05-{index + 1:02d}T12:00:00Z" for index in range(6)],
+        utc=True,
+    )
+    holdout_vectors["snapshot_id"] = [
+        f"holdout-snapshot-{index}" for index in range(6)
+    ]
+    holdout_vectors["tv_distance"] = [0.20, 0.21, 0.22, 0.40, 0.41, 0.42]
+    holdout_vectors["true_bucket_probability_delta"] = [
+        0.20,
+        0.10,
+        0.15,
+        0.05,
+        0.06,
+        0.07,
+    ]
+    holdout_tokens = pd.DataFrame(
+        [
+            {
+                "event_id": row.event_id,
+                "target_date": row.target_date,
+                "timestamp": row.timestamp,
+                "snapshot_id": row.snapshot_id,
+                "condition_id": "bucket",
+                "token_side": "YES",
+                "bucket_position": "center",
+                "benchmark_probability": 0.40,
+                "theoretical_midpoint_excess": 0.60,
+                "model_probability_residual": 0.40,
+                "model_probability_advantage": 0.20,
+            }
+            for row in holdout_vectors.itertuples(index=False)
+        ]
+    )
+
+    frozen = score_frozen_slice_validation(
+        development_vectors,
+        development_tokens,
+        holdout_vectors,
+        holdout_tokens,
+        split_role="model_test",
+        bootstrap_samples=50,
+        seed=42,
+    )
+
+    assert frozen.summary["selection_policy"] == "frozen_no_search"
+    assert frozen.summary["split_role"] == "model_test"
+    assert frozen.summary["frozen_thresholds"]["tv_distance"] == pytest.approx(
+        [0.17333333333333334, 0.27999999999999997]
+    )
+    stable = frozen.families.set_index("family_id").loc[
+        "stable_probability"
+    ]
+    assert stable["event_count"] == 3
+    assert stable["true_bucket_probability_delta"] == pytest.approx(0.15)
+    high = frozen.families.set_index("family_id").loc[
+        "high_disagreement_opportunity"
+    ]
+    assert high["event_count"] == 3
+    assert high["theoretical_midpoint_excess"] == pytest.approx(0.60)
+
+
+def test_frozen_validation_artifact_is_complete_and_hash_verified(
+    tmp_path,
+) -> None:
+    result = score_frozen_slice_validation(
+        pd.DataFrame(
+            [
+                {
+                    "event_id": "dev",
+                    "target_date": "2026-04-01",
+                    "timestamp": pd.Timestamp("2026-04-01T12:00:00Z"),
+                    "snapshot_id": "dev-snapshot",
+                    "lead_hours": 24.0,
+                    "coverage_type": "forecast_only",
+                    "model_max_probability": 0.4,
+                    "model_normalized_entropy": 0.6,
+                    "tv_distance": 0.2,
+                    "top_bucket_agrees": False,
+                    "brier_delta": -0.1,
+                    "log_score_delta": -0.2,
+                    "rps_delta": -0.01,
+                    "true_bucket_probability_delta": 0.1,
+                }
+            ]
+            * 3
+        ).assign(
+            event_id=lambda frame: [
+                f"dev-{index}" for index in range(len(frame))
+            ],
+            snapshot_id=lambda frame: [
+                f"dev-snapshot-{index}" for index in range(len(frame))
+            ],
+        ),
+        pd.DataFrame(
+            [
+                {
+                    "event_id": f"dev-{index}",
+                    "target_date": "2026-04-01",
+                    "timestamp": pd.Timestamp("2026-04-01T12:00:00Z"),
+                    "snapshot_id": f"dev-snapshot-{index}",
+                    "condition_id": "bucket",
+                    "token_side": "YES",
+                    "bucket_position": "center",
+                    "benchmark_probability": 0.4,
+                    "theoretical_midpoint_excess": 0.6,
+                    "model_probability_residual": 0.3,
+                    "model_probability_advantage": 0.2,
+                }
+                for index in range(3)
+            ]
+        ),
+        pd.DataFrame(
+            [
+                {
+                    "event_id": f"validation-{index}",
+                    "target_date": f"2026-05-0{index + 1}",
+                    "timestamp": pd.Timestamp(
+                        f"2026-05-0{index + 1}T12:00:00Z"
+                    ),
+                    "snapshot_id": f"validation-snapshot-{index}",
+                    "lead_hours": 24.0,
+                    "coverage_type": "forecast_only",
+                    "model_max_probability": 0.4,
+                    "model_normalized_entropy": 0.6,
+                    "tv_distance": 0.2,
+                    "top_bucket_agrees": False,
+                    "brier_delta": -0.1,
+                    "log_score_delta": -0.2,
+                    "rps_delta": -0.01,
+                    "true_bucket_probability_delta": 0.1,
+                }
+                for index in range(3)
+            ]
+        ),
+        pd.DataFrame(
+            [
+                {
+                    "event_id": f"validation-{index}",
+                    "target_date": f"2026-05-0{index + 1}",
+                    "timestamp": pd.Timestamp(
+                        f"2026-05-0{index + 1}T12:00:00Z"
+                    ),
+                    "snapshot_id": f"validation-snapshot-{index}",
+                    "condition_id": "bucket",
+                    "token_side": "YES",
+                    "bucket_position": "center",
+                    "benchmark_probability": 0.4,
+                    "theoretical_midpoint_excess": 0.6,
+                    "model_probability_residual": 0.3,
+                    "model_probability_advantage": 0.2,
+                }
+                for index in range(3)
+            ]
+        ),
+        split_role="model_test",
+        bootstrap_samples=10,
+        seed=42,
+    )
+    output = tmp_path / "frozen-validation"
+
+    manifest = save_frozen_slice_validation_artifact(
+        output,
+        development_slice_manifest_sha256="a" * 64,
+        validation_signal_manifest_sha256="b" * 64,
+        validation_forecast_manifest_sha256="c" * 64,
+        station_id="KLGA",
+        target_range=["2026-05-01", "2026-05-03"],
+        split_role="model_test",
+        result=result,
+    )
+    artifact = load_frozen_slice_validation_artifact(output)
+
+    assert manifest["data_class"] == "frozen_forecast_distribution_validation"
+    assert artifact.summary["selection_policy"] == "frozen_no_search"
+    assert set(manifest["sha256"]) == {
+        "summary.json",
+        "frozen_slices.parquet",
+        "frozen_families.parquet",
+    }
+
+    (output / "summary.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        load_frozen_slice_validation_artifact(output)
