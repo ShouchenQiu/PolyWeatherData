@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from backtest.signal_study import load_signal_study_artifact
+from backtest.forecast_cache import ForecastCache
 from model.mc_calibration import McCalibration
 
 
@@ -23,8 +25,15 @@ class EvaluationData:
     artifact: EvaluationArtifact
     hourly: pd.DataFrame
     daily: pd.DataFrame
-    calibration: McCalibration
+    calibration: McCalibration | None
     calibration_evidence: dict[str, object]
+
+
+@dataclass(frozen=True)
+class SignalEvaluationData:
+    roots: tuple[Path, ...]
+    events: pd.DataFrame
+    panel: pd.DataFrame
 
 
 def discover_evaluations(runs_root: Path | str) -> list[EvaluationArtifact]:
@@ -84,6 +93,123 @@ def load_evaluation(artifact: EvaluationArtifact) -> EvaluationData:
         daily=daily,
         calibration=calibration,
         calibration_evidence=evidence,
+    )
+
+
+def load_backtest_model_evaluation(
+    *,
+    prediction_paths: list[Path] | tuple[Path, ...],
+    forecast_root: Path,
+    run_id: str = "KLGA May model-test",
+    version: str = "202605 fixed hourly + MC snapshots",
+    station_timezone: str = "America/New_York",
+    target_start: str | None = "2026-05-01",
+    target_end: str | None = "2026-05-31",
+    actuals_path: Path | None = None,
+) -> EvaluationData:
+    """Load fixed backtest predictions as Model Evaluation data."""
+    existing = [Path(path) for path in prediction_paths if Path(path).exists()]
+    if not existing or not Path(forecast_root).exists():
+        raise FileNotFoundError("May backtest model evaluation artifacts missing")
+    raw = pd.concat(
+        [pd.read_parquet(path) for path in existing],
+        ignore_index=True,
+    )
+    hourly = _prepare_hourly(raw, station_timezone)
+    hourly["target_date"] = (
+        (hourly["valid_time"] - pd.Timedelta(nanoseconds=1))
+        .dt.tz_convert(station_timezone)
+        .dt.date.astype(str)
+    )
+    if target_start is not None:
+        hourly = hourly[hourly["target_date"] >= target_start]
+    if target_end is not None:
+        hourly = hourly[hourly["target_date"] <= target_end]
+
+    cache = ForecastCache.load(forecast_root)
+    snapshots = cache.snapshots.copy()
+    snapshots["init_time"] = pd.to_datetime(snapshots["init_time"], utc=True)
+    snapshots["target_date"] = snapshots["target_date"].astype(str)
+    if target_start is not None:
+        snapshots = snapshots[snapshots["target_date"] >= target_start]
+    if target_end is not None:
+        snapshots = snapshots[snapshots["target_date"] <= target_end]
+    complete_hours = hourly[hourly["weight"].astype(float) > 0]
+    cycle_highs = (
+        complete_hours.groupby(["init_time", "target_date"], as_index=False)
+        .agg(
+            hrrr_future_high_f=("hrrr_f", "max"),
+            tft_future_high_f=("tft_p50_f", "max"),
+        )
+    )
+    daily = snapshots.merge(
+        cycle_highs,
+        on=["init_time", "target_date"],
+        how="inner",
+        validate="one_to_one",
+    )
+    observed_high = daily["observed_high_f"].astype(float)
+    daily["hrrr_high_f"] = daily["hrrr_future_high_f"].where(
+        observed_high.isna(),
+        daily[["hrrr_future_high_f", "observed_high_f"]].max(axis=1),
+    )
+    daily["tft_high_f"] = daily["tft_future_high_f"].where(
+        observed_high.isna(),
+        daily[["tft_future_high_f", "observed_high_f"]].max(axis=1),
+    )
+    if actuals_path is not None and Path(actuals_path).exists():
+        actuals = pd.read_csv(actuals_path)
+        actuals["target_date"] = actuals["target_date"].astype(str)
+        daily = daily.drop(columns=["actual_high_f"], errors="ignore").merge(
+            actuals[["target_date", "actual_high_f"]],
+            on="target_date",
+            how="left",
+            validate="many_to_one",
+        )
+    else:
+        actual_by_day = (
+            hourly.groupby("target_date", as_index=False)
+            .agg(actual_high_f=("actual_f", "max"))
+        )
+        daily = daily.merge(
+            actual_by_day,
+            on="target_date",
+            how="left",
+            validate="many_to_one",
+        )
+    daily = daily.rename(
+        columns={
+            "p10_f": "mc_p10_f",
+            "p50_f": "mc_p50_f",
+            "p90_f": "mc_p90_f",
+        }
+    )
+    daily = daily[
+        [
+            "init_time",
+            "target_date",
+            "actual_high_f",
+            "hrrr_high_f",
+            "tft_high_f",
+            "mc_p10_f",
+            "mc_p50_f",
+            "mc_p90_f",
+            "coverage_type",
+            "observed_hour_count",
+            "forecast_hour_count",
+        ]
+    ].sort_values(["target_date", "init_time"])
+    return EvaluationData(
+        artifact=EvaluationArtifact(
+            run_id=run_id,
+            version=version,
+            path=Path(forecast_root),
+            checkpoint_path=Path(forecast_root) / "manifest.json",
+        ),
+        hourly=hourly,
+        daily=daily,
+        calibration=None,
+        calibration_evidence={"source": "backtest_model_test"},
     )
 
 
@@ -148,6 +274,11 @@ def model_performance_table(data: EvaluationData) -> pd.DataFrame:
     """Return a compact TFT/MC comparison using each model's direct baseline."""
     metrics = evaluation_metrics(data)
     tft_high_mae = metrics["tft_high_mae_f"]
+    mc_target = (
+        "Daily high (model_test cycle-day)"
+        if data.calibration is None
+        else "Daily high (OOF cycle-day)"
+    )
     mc_skill = (
         (1.0 - metrics["mc_high_mae_f"] / tft_high_mae) * 100.0
         if tft_high_mae > 0
@@ -168,7 +299,7 @@ def model_performance_table(data: EvaluationData) -> pd.DataFrame:
             },
             {
                 "Model": "MC",
-                "Target": "Daily high (OOF cycle-day)",
+                "Target": mc_target,
                 "Baseline": "TFT",
                 "MAE (°F)": metrics["mc_high_mae_f"],
                 "Baseline MAE (°F)": tft_high_mae,
@@ -211,6 +342,88 @@ def skill_heatmap(data: EvaluationData) -> pd.DataFrame:
     )
     grouped["skill_pct"] = (1.0 - grouped["tft"] / grouped["hrrr"]) * 100
     return grouped["skill_pct"].unstack("fxx_band")
+
+
+def load_signal_evaluation(roots: list[Path] | tuple[Path, ...]) -> SignalEvaluationData:
+    """Load model-vs-midpoint signal artifacts into event diagnostics."""
+    loaded = []
+    for root in roots:
+        path = Path(root)
+        if path.exists():
+            loaded.append((path, load_signal_study_artifact(path)))
+    if not loaded:
+        return SignalEvaluationData(tuple(), pd.DataFrame(), pd.DataFrame())
+
+    event_frames = []
+    panel_frames = []
+    for root, artifact in loaded:
+        label = root.name
+        by_event = artifact.by_event.copy()
+        pivot = by_event.pivot(index=["event_id", "target_date"], columns="source")
+        events = pd.DataFrame(
+            {
+                "event_id": [str(index[0]) for index in pivot.index],
+                "target_date": [str(index[1]) for index in pivot.index],
+                "artifact": label,
+                "model_brier": pivot["multiclass_brier"]["model_raw"],
+                "midpoint_brier": pivot["multiclass_brier"][
+                    "synthetic_midpoint"
+                ],
+                "model_log_score": pivot["log_score"]["model_raw"],
+                "midpoint_log_score": pivot["log_score"][
+                    "synthetic_midpoint"
+                ],
+                "model_rps": pivot["normalized_rps"]["model_raw"],
+                "midpoint_rps": pivot["normalized_rps"][
+                    "synthetic_midpoint"
+                ],
+                "model_true_bucket_probability": pivot[
+                    "true_bucket_probability"
+                ]["model_raw"],
+                "midpoint_true_bucket_probability": pivot[
+                    "true_bucket_probability"
+                ]["synthetic_midpoint"],
+                "model_top1_accuracy": pivot["top1_accuracy"]["model_raw"],
+                "midpoint_top1_accuracy": pivot["top1_accuracy"][
+                    "synthetic_midpoint"
+                ],
+            }
+        ).reset_index(drop=True)
+        actuals = (
+            artifact.panel[
+                ["event_id", "target_date", "actual_high_f"]
+            ]
+            .drop_duplicates()
+            .assign(event_id=lambda frame: frame["event_id"].astype(str))
+        )
+        events = events.merge(
+            actuals,
+            on=["event_id", "target_date"],
+            how="left",
+            validate="one_to_one",
+        )
+        events["brier_delta"] = events["model_brier"] - events["midpoint_brier"]
+        events["log_score_delta"] = (
+            events["model_log_score"] - events["midpoint_log_score"]
+        )
+        events["rps_delta"] = events["model_rps"] - events["midpoint_rps"]
+        events["true_bucket_probability_delta"] = (
+            events["model_true_bucket_probability"]
+            - events["midpoint_true_bucket_probability"]
+        )
+        event_frames.append(events)
+        panel_frames.append(artifact.panel.assign(artifact=label))
+
+    event_frame = pd.concat(event_frames, ignore_index=True)
+    event_frame["target_date"] = pd.to_datetime(event_frame["target_date"])
+    panel = pd.concat(panel_frames, ignore_index=True)
+    panel["target_date"] = pd.to_datetime(panel["target_date"])
+    panel["timestamp"] = pd.to_datetime(panel["timestamp"], utc=True)
+    return SignalEvaluationData(
+        roots=tuple(root for root, _artifact in loaded),
+        events=event_frame.sort_values("target_date").reset_index(drop=True),
+        panel=panel,
+    )
 
 
 def _prepare_hourly(frame: pd.DataFrame, timezone: str) -> pd.DataFrame:

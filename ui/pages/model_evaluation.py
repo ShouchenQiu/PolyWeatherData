@@ -11,9 +11,12 @@ import streamlit as st
 from config.settings import Settings
 from ui.model_evaluation import (
     EvaluationData,
+    SignalEvaluationData,
     daily_target_summary,
     discover_evaluations,
     evaluation_metrics,
+    load_backtest_model_evaluation,
+    load_signal_evaluation,
     horizon_metrics,
     load_evaluation,
     model_performance_table,
@@ -29,36 +32,67 @@ COLORS = {
 }
 
 
-def render(*, runs_root: Path | str | None = None) -> None:
+def render(
+    *,
+    runs_root: Path | str | None = None,
+    signal_roots: list[Path] | tuple[Path, ...] | None = None,
+    use_may_backtest: bool | None = None,
+) -> None:
     st.header("Model Evaluation")
     st.caption(
         "Validation-only diagnostics. MC daily-high results are contiguous-fold "
         "out-of-fold estimates for complete station-local calendar days."
     )
-    root = Path(runs_root or Settings().project_root / "runs")
+    settings = Settings()
+    root = Path(runs_root or settings.project_root / "runs")
+    prefer_may = (runs_root is None) if use_may_backtest is None else use_may_backtest
+    data: EvaluationData | None = None
+    if prefer_may:
+        try:
+            data = load_backtest_model_evaluation(
+                **_default_may_backtest_inputs(settings.project_root)
+            )
+        except (OSError, ValueError, KeyError, FileNotFoundError):
+            data = None
+
     artifacts = discover_evaluations(root)
-    if not artifacts:
+    if data is None and not artifacts:
         st.info(f"No complete calibrated evaluations found under {root}.")
         return
-    labels = {
-        f"{item.run_id} / {item.version}": item
-        for item in artifacts
-    }
-    selected = st.selectbox("Evaluation", list(labels))
-    try:
-        data = load_evaluation(labels[selected])
-    except (OSError, ValueError, KeyError) as exc:
-        st.warning(f"Evaluation artifacts are invalid: {exc}")
-        return
+    if data is None:
+        labels = {
+            f"{item.run_id} / {item.version}": item
+            for item in artifacts
+        }
+        selected = st.selectbox("Evaluation", list(labels))
+        try:
+            data = load_evaluation(labels[selected])
+        except (OSError, ValueError, KeyError) as exc:
+            st.warning(f"Evaluation artifacts are invalid: {exc}")
+            return
+    else:
+        st.caption(
+            "Showing KLGA May 2026 model_test backtest predictions by default: "
+            "fixed hourly TFT outputs plus MC daily-high snapshots."
+        )
 
-    tabs = st.tabs(
-        [
-            "Overview",
-            "Hourly & Horizon",
-            "Daily High & MC",
-            "TFT & MC Performance",
-        ]
+    signal_data = load_signal_evaluation(
+        tuple(signal_roots)
+        if signal_roots is not None
+        else _default_may_signal_roots(settings.project_root)
+        if runs_root is None
+        else tuple()
     )
+
+    tab_labels = [
+        "Overview",
+        "Hourly & Horizon",
+        "Daily High & MC",
+        "TFT & MC Performance",
+    ]
+    if not signal_data.events.empty:
+        tab_labels.append("May Model-Test Signal")
+    tabs = st.tabs(tab_labels)
     with tabs[0]:
         _overview(data)
     with tabs[1]:
@@ -67,10 +101,56 @@ def render(*, runs_root: Path | str | None = None) -> None:
         _daily(data)
     with tabs[3]:
         _performance(data)
+    if not signal_data.events.empty:
+        with tabs[4]:
+            _may_signal(signal_data)
+
+
+def _default_may_signal_roots(project_root: Path) -> tuple[Path, ...]:
+    signal_root = project_root / "data_store" / "backtest" / "signal" / "KLGA"
+    return (
+        signal_root / "model_test_20260501_20260516",
+        signal_root / "model_test_20260519_20260531",
+    )
+
+
+def _default_may_backtest_inputs(project_root: Path) -> dict[str, object]:
+    return {
+        "prediction_paths": (
+            project_root
+            / "data_store"
+            / "backtest"
+            / "predictions"
+            / "KLGA"
+            / "20260501_20260531_fixed_hourly.parquet",
+        ),
+        "forecast_root": (
+            project_root
+            / "data_store"
+            / "backtest"
+            / "forecasts"
+            / "KLGA"
+            / "20260501_20260604_model_test"
+        ),
+        "actuals_path": (
+            project_root
+            / "data_store"
+            / "backtest"
+            / "actuals"
+            / "KLGA"
+            / "20260401_20260604.csv"
+        ),
+    }
 
 
 def _overview(data: EvaluationData) -> None:
     metrics = evaluation_metrics(data)
+    mc_label = "MC high MAE" if data.calibration is None else "MC high MAE (OOF)"
+    mc_coverage_label = (
+        "MC high coverage"
+        if data.calibration is None
+        else "MC high coverage (OOF)"
+    )
     cols = st.columns(5)
     cols[0].metric("HRRR hourly MAE", f"{metrics['hrrr_hourly_mae_f']:.2f} °F")
     cols[1].metric(
@@ -79,8 +159,8 @@ def _overview(data: EvaluationData) -> None:
         f"{metrics['hourly_skill_pct']:.1f}% skill",
     )
     cols[2].metric("TFT P10–P90 coverage", f"{metrics['hourly_coverage']:.1%}")
-    cols[3].metric("MC high MAE (OOF)", f"{metrics['mc_high_mae_f']:.2f} °F")
-    cols[4].metric("MC high coverage (OOF)", f"{metrics['mc_coverage']:.1%}")
+    cols[3].metric(mc_label, f"{metrics['mc_high_mae_f']:.2f} °F")
+    cols[4].metric(mc_coverage_label, f"{metrics['mc_coverage']:.1%}")
 
     errors = pd.concat(
         [
@@ -197,11 +277,19 @@ def _daily(data: EvaluationData) -> None:
     cols[1].metric("TFT high MAE", f"{metrics['tft_high_mae_f']:.2f} °F")
     cols[2].metric("MC high MAE", f"{metrics['mc_high_mae_f']:.2f} °F")
     cols[3].metric("MC interval width", f"{metrics['mc_interval_width_f']:.2f} °F")
-    st.caption(
-        "Charts show one point per target day: forecasts and MC bounds are the "
-        "median across available cycles; actual high is the observed daily value. "
-        "Summary metrics above retain the OOF cycle-day evaluation grain."
-    )
+    if data.calibration is None:
+        st.caption(
+            "Charts show one point per target day: forecasts and MC bounds are "
+            "the median across available May model_test cycles; actual high is "
+            "the observed daily value. Summary metrics above retain the "
+            "cycle-day evaluation grain."
+        )
+    else:
+        st.caption(
+            "Charts show one point per target day: forecasts and MC bounds are the "
+            "median across available cycles; actual high is the observed daily value. "
+            "Summary metrics above retain the OOF cycle-day evaluation grain."
+        )
 
     forecast = go.Figure()
     for name, column in (
@@ -315,10 +403,16 @@ def _daily(data: EvaluationData) -> None:
 
 def _performance(data: EvaluationData) -> None:
     st.subheader("TFT and MC performance")
-    st.caption(
-        "TFT is compared with raw HRRR at the hourly grain. MC is compared "
-        "with TFT daily highs using out-of-fold cycle-day predictions."
-    )
+    if data.calibration is None:
+        st.caption(
+            "TFT is compared with raw HRRR at the hourly grain. MC is compared "
+            "with TFT daily highs using May model_test cycle-day predictions."
+        )
+    else:
+        st.caption(
+            "TFT is compared with raw HRRR at the hourly grain. MC is compared "
+            "with TFT daily highs using out-of-fold cycle-day predictions."
+        )
     table = model_performance_table(data).round(
         {
             "MAE (°F)": 2,
@@ -329,3 +423,168 @@ def _performance(data: EvaluationData) -> None:
         }
     )
     st.dataframe(table, width="stretch", hide_index=True)
+
+
+def _may_signal(data: SignalEvaluationData) -> None:
+    st.subheader("May model-test signal")
+    st.caption(
+        "Frozen inspection of model_test signal artifacts. Score deltas are "
+        "model minus normalized synthetic midpoint; lower is better for Brier, "
+        "log score, and RPS."
+    )
+    events = data.events.copy()
+    cols = st.columns(5)
+    cols[0].metric("Events", f"{events['event_id'].nunique():d}")
+    cols[1].metric("Brier delta", f"{events['brier_delta'].mean():+.3f}")
+    cols[2].metric("Log delta", f"{events['log_score_delta'].mean():+.3f}")
+    cols[3].metric("RPS delta", f"{events['rps_delta'].mean():+.3f}")
+    cols[4].metric(
+        "True Bucket P delta",
+        f"{events['true_bucket_probability_delta'].mean():+.3f}",
+    )
+
+    st.plotly_chart(
+        px.bar(
+            events,
+            x="target_date",
+            y="brier_delta",
+            color="artifact",
+            labels={
+                "target_date": "Target day",
+                "brier_delta": "Brier delta",
+                "artifact": "Artifact",
+            },
+            title="May event Brier delta by target day",
+        ).add_hline(y=0, line_dash="dot", line_color="#666666"),
+        width="stretch",
+    )
+    true_prob = events.melt(
+        id_vars=["event_id", "target_date"],
+        value_vars=[
+            "model_true_bucket_probability",
+            "midpoint_true_bucket_probability",
+        ],
+        var_name="source",
+        value_name="true_bucket_probability",
+    )
+    true_prob["source"] = true_prob["source"].map(
+        {
+            "model_true_bucket_probability": "Model",
+            "midpoint_true_bucket_probability": "Midpoint",
+        }
+    )
+    st.plotly_chart(
+        px.line(
+            true_prob,
+            x="target_date",
+            y="true_bucket_probability",
+            color="source",
+            markers=True,
+            color_discrete_map={
+                "Model": COLORS["TFT"],
+                "Midpoint": "#59a14f",
+            },
+            labels={
+                "target_date": "Target day",
+                "true_bucket_probability": "Probability on true Bucket",
+                "source": "Source",
+            },
+            title="Probability assigned to the resolved Bucket",
+        ),
+        width="stretch",
+    )
+
+    worst = events.sort_values("brier_delta", ascending=False).head(10)
+    st.dataframe(
+        worst[
+            [
+                "target_date",
+                "actual_high_f",
+                "brier_delta",
+                "log_score_delta",
+                "rps_delta",
+                "true_bucket_probability_delta",
+                "model_true_bucket_probability",
+                "midpoint_true_bucket_probability",
+            ]
+        ].round(4),
+        width="stretch",
+        hide_index=True,
+    )
+
+    options = [
+        f"{row.target_date.date()} | {row.event_id} | "
+        f"Brier {row.brier_delta:+.3f}"
+        for row in worst.itertuples(index=False)
+    ]
+    selected_label = st.selectbox("Inspect event distribution", options)
+    selected_event = selected_label.split(" | ")[1]
+    _event_distribution(data.panel, selected_event)
+
+
+def _event_distribution(panel: pd.DataFrame, event_id: str) -> None:
+    event = panel[panel["event_id"].astype(str) == str(event_id)].copy()
+    if event.empty:
+        st.info("No panel rows found for selected event.")
+        return
+    target_date = event["target_date"].iloc[0].date()
+    actual_high = float(event["actual_high_f"].iloc[0])
+    st.caption(f"Selected Event {event_id}: {target_date}, actual high {actual_high:.0f} F")
+    ticks = list(event.groupby("timestamp", sort=True))
+    selected_ticks = [ticks[0]]
+    if len(ticks) > 1:
+        selected_ticks.append(ticks[-1])
+    for timestamp, tick in selected_ticks:
+        bucket = tick.sort_values("bucket_order").copy()
+        bucket["bucket"] = bucket.apply(_bucket_label, axis=1)
+        bucket_long = bucket.melt(
+            id_vars=["bucket", "yes_outcome"],
+            value_vars=["model_probability", "midpoint_probability"],
+            var_name="source",
+            value_name="probability",
+        )
+        bucket_long["source"] = bucket_long["source"].map(
+            {
+                "model_probability": "Model",
+                "midpoint_probability": "Midpoint",
+            }
+        )
+        figure = px.bar(
+            bucket_long,
+            x="bucket",
+            y="probability",
+            color="source",
+            barmode="group",
+            color_discrete_map={
+                "Model": COLORS["TFT"],
+                "Midpoint": "#59a14f",
+            },
+            labels={
+                "bucket": "Bucket",
+                "probability": "Probability",
+                "source": "Source",
+            },
+            title=(
+                "Bucket distribution at "
+                f"{pd.Timestamp(timestamp).isoformat()}"
+            ),
+        )
+        true_indexes = bucket.index[bucket["yes_outcome"].astype(float) == 1.0]
+        if len(true_indexes) == 1:
+            true_bucket = bucket.loc[true_indexes[0], "bucket"]
+            figure.add_vline(
+                x=bucket["bucket"].tolist().index(true_bucket),
+                line_dash="dot",
+                line_color=COLORS["Actual"],
+            )
+        st.plotly_chart(figure, width="stretch")
+
+
+def _bucket_label(row: pd.Series) -> str:
+    lo = row["bucket_lo_f"]
+    hi = row["bucket_hi_f"]
+    if pd.isna(lo) or lo == float("-inf"):
+        return f"<{hi:.0f}"
+    if pd.isna(hi) or hi == float("inf"):
+        return f">={lo:.0f}"
+    return f"{lo:.0f}-{hi:.0f}"

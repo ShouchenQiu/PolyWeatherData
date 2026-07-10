@@ -492,6 +492,15 @@ def test_context_manager_closes(tmp_dir) -> None:
         db._conn.execute("SELECT 1")
 
 
+def test_file_db_creates_missing_parent_directory(tmp_dir) -> None:
+    db_path = tmp_dir / "missing" / "test.db"
+
+    with DbClient(db_path) as db:
+        db.upsert_station(*STATION)
+
+    assert db_path.exists()
+
+
 # ---------------------------------------------------------------------------
 # bot_state KV table (private helpers)
 # ---------------------------------------------------------------------------
