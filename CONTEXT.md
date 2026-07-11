@@ -149,10 +149,16 @@ probabilities via temperature reconstruction.
 _Avoid_: MC, sampler
 
 **ForecastCache bucket probability**: The point-in-time YES settlement probability for
-one `(init_time, target_date, condition_id)`, obtained by resolution-rounding the
-McSampler daily-high draws and counting draws inside that Market's Bucket; it becomes
+one `(init_time, target_date, condition_id)`, obtained from a versioned daily-high
+distribution source under the Event's integer-Fahrenheit resolution rule; it becomes
 actionable only at the snapshot's `available_at`.
 _Avoid_: model price, 48-hour maximum probability
+
+**daily-high PMF pilot**: An offline point-in-time model artifact that assigns
+probability directly to each integer-Fahrenheit settlement high using April
+chronological OOF training and frozen May diagnosis, without consuming June or serving
+production probabilities.
+_Avoid_: production model, MC recalibration
 
 **point-in-time partial-day daily high**: A target local-day distribution whose elapsed
 hours come from observations visible by `init_time` and whose later hours come from

@@ -10,12 +10,14 @@ import streamlit as st
 
 from config.settings import Settings
 from ui.model_evaluation import (
+    DailyHighPmfPilotData,
     EvaluationData,
     SignalEvaluationData,
     daily_target_summary,
     discover_evaluations,
     evaluation_metrics,
     load_backtest_model_evaluation,
+    load_daily_high_pmf_pilot,
     load_signal_evaluation,
     horizon_metrics,
     load_evaluation,
@@ -29,6 +31,7 @@ COLORS = {
     "HRRR": "#f28e2b",
     "TFT": "#4e79a7",
     "MC": "#9c6ade",
+    "PMF pilot": "#59a14f",
 }
 
 
@@ -83,6 +86,19 @@ def render(
         if runs_root is None
         else tuple()
     )
+    pmf_pilot: DailyHighPmfPilotData | None = None
+    if runs_root is None:
+        try:
+            pmf_pilot = load_daily_high_pmf_pilot(
+                settings.project_root
+                / "data_store"
+                / "backtest"
+                / "daily_high_pmf"
+                / "KLGA"
+                / "pilot_v1"
+            )
+        except (OSError, ValueError, KeyError):
+            pmf_pilot = None
 
     tab_labels = [
         "Overview",
@@ -92,6 +108,8 @@ def render(
     ]
     if not signal_data.events.empty:
         tab_labels.append("May Model-Test Signal")
+    if pmf_pilot is not None:
+        tab_labels.append("Daily High PMF Pilot")
     tabs = st.tabs(tab_labels)
     with tabs[0]:
         _overview(data)
@@ -101,9 +119,14 @@ def render(
         _daily(data)
     with tabs[3]:
         _performance(data)
+    next_tab = 4
     if not signal_data.events.empty:
-        with tabs[4]:
+        with tabs[next_tab]:
             _may_signal(signal_data)
+        next_tab += 1
+    if pmf_pilot is not None:
+        with tabs[next_tab]:
+            _pmf_pilot(pmf_pilot)
 
 
 def _default_may_signal_roots(project_root: Path) -> tuple[Path, ...]:
@@ -423,6 +446,99 @@ def _performance(data: EvaluationData) -> None:
         }
     )
     st.dataframe(table, width="stretch", hide_index=True)
+
+
+def _pmf_pilot(data: DailyHighPmfPilotData) -> None:
+    st.subheader("Point-in-time daily-high PMF pilot")
+    gates = data.report["gates"]
+    eligible = bool(gates["eligible_for_cross_fit_goal"])
+    st.caption(
+        "April chronological OOF and frozen May diagnostic. June is unconsumed; "
+        "this candidate is offline evidence and is not a production probability source."
+    )
+    may = data.may_summary.set_index("stratum").loc["overall"]
+    cols = st.columns(5)
+    cols[0].metric("Cross-fit eligible", "Yes" if eligible else "No")
+    cols[1].metric("PMF RPS", f"{may['candidate_rps']:.3f}")
+    cols[2].metric("MC RPS", f"{may['mc_rps']:.3f}")
+    cols[3].metric("PMF high MAE", f"{may['candidate_mae_f']:.2f} °F")
+    cols[4].metric("PMF coverage", f"{may['candidate_coverage']:.1%}")
+
+    strata = data.may_summary.copy()
+    rps = strata.melt(
+        id_vars=["stratum"],
+        value_vars=["candidate_rps", "mc_rps"],
+        var_name="source",
+        value_name="rps",
+    )
+    rps["source"] = rps["source"].map(
+        {"candidate_rps": "PMF pilot", "mc_rps": "MC"}
+    )
+    st.plotly_chart(
+        px.bar(
+            rps,
+            x="stratum",
+            y="rps",
+            color="source",
+            barmode="group",
+            color_discrete_map={
+                "PMF pilot": COLORS["PMF pilot"],
+                "MC": COLORS["MC"],
+            },
+            labels={"stratum": "Stratum", "rps": "RPS", "source": "Source"},
+            title="Frozen May RPS by point-in-time stratum",
+        ),
+        width="stretch",
+    )
+
+    daily = (
+        data.may_scores.groupby("target_date", as_index=False)
+        .agg(
+            actual_high_f=("actual_high_f", "first"),
+            pmf_p50_f=("candidate_p50_f", "median"),
+            mc_p50_f=("mc_p50_f", "median"),
+        )
+        .sort_values("target_date")
+    )
+    daily_long = daily.melt(
+        id_vars=["target_date", "actual_high_f"],
+        value_vars=["pmf_p50_f", "mc_p50_f"],
+        var_name="source",
+        value_name="forecast_high_f",
+    )
+    daily_long["source"] = daily_long["source"].map(
+        {"pmf_p50_f": "PMF pilot", "mc_p50_f": "MC"}
+    )
+    st.plotly_chart(
+        px.line(
+            daily_long,
+            x="target_date",
+            y="forecast_high_f",
+            color="source",
+            markers=True,
+            color_discrete_map={
+                "PMF pilot": COLORS["PMF pilot"],
+                "MC": COLORS["MC"],
+            },
+            labels={
+                "target_date": "Target day",
+                "forecast_high_f": "P50 daily high (°F)",
+                "source": "Source",
+            },
+            title="Frozen May PMF and MC daily-high medians",
+        ).add_scatter(
+            x=daily["target_date"],
+            y=daily["actual_high_f"],
+            mode="markers",
+            name="Actual",
+            marker={"color": COLORS["Actual"], "size": 7},
+        ),
+        width="stretch",
+    )
+    gate_table = pd.DataFrame(
+        [{"Gate": key, "Passed": bool(value)} for key, value in gates.items()]
+    )
+    st.dataframe(gate_table, width="stretch", hide_index=True)
 
 
 def _may_signal(data: SignalEvaluationData) -> None:

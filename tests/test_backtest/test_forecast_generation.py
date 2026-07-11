@@ -4,12 +4,134 @@ import numpy as np
 import pandas as pd
 
 from training.backtest_forecast_generation import (
+    build_pmf_forecast_cache,
     build_forecast_cache,
     contiguous_oof_assignments,
     fit_oof_calibrations,
 )
+from training.daily_high_pmf import DailyHighPmfEvaluation
 from model.daily_high import PartialDayBiasCalibration
 from model.mc_calibration import McCalibration
+
+
+def test_build_pmf_forecast_cache_keeps_parallel_distribution_lineage() -> None:
+    evaluation = DailyHighPmfEvaluation(
+        snapshots=pd.DataFrame(
+            [
+                {
+                    "snapshot_id": "pmf-1",
+                    "source_snapshot_id": "mc-1",
+                    "init_time": "2026-05-01T00:00:00Z",
+                    "target_date": "2026-05-01",
+                    "p10_f": 69.0,
+                    "p50_f": 70.0,
+                    "p90_f": 71.0,
+                    "coverage_type": "forecast_only",
+                    "observed_high_f": 0.0,
+                    "observed_hour_count": 0,
+                    "forecast_hour_count": 24,
+                    "target_hour_count": 24,
+                }
+            ]
+        ),
+        temperature_probabilities=pd.DataFrame(
+            {
+                "snapshot_id": ["pmf-1", "pmf-1"],
+                "temperature_f": [69, 70],
+                "pmf_probability": [0.25, 0.75],
+            }
+        ),
+    )
+    source = pd.DataFrame(
+        [
+            {
+                "snapshot_id": "mc-1",
+                "available_at": "2026-05-01T01:00:00Z",
+                "observed_high_f": float("nan"),
+                "observed_through": pd.NaT,
+                "forecast_start_at": "2026-05-01T01:00:00Z",
+                "forecast_through": "2026-05-02T00:00:00Z",
+            }
+        ]
+    )
+    markets = pd.DataFrame(
+        [
+            {
+                "target_date": "2026-05-01",
+                "condition_id": "below-70",
+                "bucket_lo_f": float("-inf"),
+                "bucket_hi_f": 70.0,
+            },
+            {
+                "target_date": "2026-05-01",
+                "condition_id": "at-least-70",
+                "bucket_lo_f": 70.0,
+                "bucket_hi_f": float("inf"),
+            },
+        ]
+    )
+
+    cache = build_pmf_forecast_cache(
+        evaluation=evaluation,
+        source_snapshots=source,
+        markets=markets,
+        station_id="KLGA",
+        split_role="model_test",
+        tft_checkpoint_sha256="a" * 64,
+        pmf_artifact_sha256="b" * 64,
+        feature_schema_version=1,
+    )
+
+    assert cache.snapshots.iloc[0]["distribution_source"] == "daily_high_pmf_pilot"
+    assert cache.lineages.iloc[0]["distribution_artifact_sha256"] == "b" * 64
+    assert cache.probabilities.set_index("condition_id")["yes_probability"].to_dict() == {
+        "at-least-70": 0.75,
+        "below-70": 0.25,
+    }
+
+
+def test_build_pmf_forecast_cache_clips_only_float_sum_boundary_noise() -> None:
+    evaluation = DailyHighPmfEvaluation(
+        snapshots=pd.DataFrame(
+            [{
+                "snapshot_id": "pmf", "source_snapshot_id": "mc",
+                "init_time": "2026-05-01T00:00:00Z", "target_date": "2026-05-01",
+                "p10_f": 68.0, "p50_f": 69.0, "p90_f": 70.0,
+                "coverage_type": "forecast_only", "observed_high_f": 0.0,
+                "observed_hour_count": 0, "forecast_hour_count": 24,
+                "target_hour_count": 24,
+            }]
+        ),
+        temperature_probabilities=pd.DataFrame(
+            {
+                "snapshot_id": ["pmf"] * 3,
+                "temperature_f": [68, 69, 70],
+                "pmf_probability": [0.1, 0.2, 0.7000000000000002],
+            }
+        ),
+    )
+    cache = build_pmf_forecast_cache(
+        evaluation=evaluation,
+        source_snapshots=pd.DataFrame(
+            [{
+                "snapshot_id": "mc", "available_at": "2026-05-01T01:00:00Z",
+                "observed_high_f": float("nan"), "observed_through": pd.NaT,
+                "forecast_start_at": "2026-05-01T01:00:00Z",
+                "forecast_through": "2026-05-02T00:00:00Z",
+            }]
+        ),
+        markets=pd.DataFrame(
+            [{
+                "target_date": "2026-05-01", "condition_id": "all",
+                "bucket_lo_f": float("-inf"), "bucket_hi_f": float("inf"),
+            }]
+        ),
+        station_id="KLGA", split_role="model_test",
+        tft_checkpoint_sha256="a" * 64, pmf_artifact_sha256="b" * 64,
+        feature_schema_version=1,
+    )
+
+    assert cache.probabilities.iloc[0]["yes_probability"] == 1.0
 
 
 def test_build_forecast_cache_uses_predictions_even_when_label_weight_is_zero() -> None:

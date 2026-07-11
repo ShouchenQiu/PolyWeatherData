@@ -11,6 +11,7 @@ import pytest
 from model.mc_calibration import McCalibration
 from ui.model_evaluation import (
     daily_target_summary,
+    load_daily_high_pmf_pilot,
     discover_evaluations,
     evaluation_metrics,
     load_evaluation,
@@ -134,6 +135,35 @@ def test_model_performance_table_compares_tft_and_mc_with_their_baselines(
     assert table["MAE (°F)"].tolist() == pytest.approx([0.9, 0.5])
     assert table["Skill vs baseline (%)"].tolist() == pytest.approx([50.0, 50.0])
     assert table["Samples"].tolist() == [2, 1]
+
+
+def test_load_daily_high_pmf_pilot_requires_unconsumed_june_and_tables(tmp_path) -> None:
+    root = tmp_path / "pilot"
+    root.mkdir()
+    (root / "report.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "june_consumed": False,
+                "gates": {"eligible_for_cross_fit_goal": False},
+            }
+        ),
+        encoding="ascii",
+    )
+    pd.DataFrame([{"stratum": "overall", "candidate_rps": 0.2, "mc_rps": 0.1}]).to_csv(
+        root / "april_summary.csv", index=False
+    )
+    pd.DataFrame([{"stratum": "overall", "candidate_rps": 0.3, "mc_rps": 0.1}]).to_csv(
+        root / "may_summary.csv", index=False
+    )
+    pd.DataFrame([{"target_date": "2026-05-01", "candidate_rps": 0.3, "mc_rps": 0.1}]).to_parquet(
+        root / "may_parallel_scores.parquet", index=False
+    )
+
+    pilot = load_daily_high_pmf_pilot(root)
+
+    assert pilot.report["gates"]["eligible_for_cross_fit_goal"] is False
+    assert pilot.may_summary.iloc[0]["candidate_rps"] == 0.3
 
 
 def test_model_evaluation_page_renders_complete_artifacts(tmp_path) -> None:

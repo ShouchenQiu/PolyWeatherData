@@ -36,6 +36,32 @@ class SignalEvaluationData:
     panel: pd.DataFrame
 
 
+@dataclass(frozen=True)
+class DailyHighPmfPilotData:
+    root: Path
+    report: dict[str, object]
+    april_summary: pd.DataFrame
+    may_summary: pd.DataFrame
+    may_scores: pd.DataFrame
+
+
+def load_daily_high_pmf_pilot(root: Path | str) -> DailyHighPmfPilotData:
+    """Load read-only PMF pilot evidence; June must remain unconsumed."""
+    path = Path(root)
+    report = json.loads((path / "report.json").read_text(encoding="ascii"))
+    if report.get("schema_version") != 1:
+        raise ValueError("unsupported daily-high PMF pilot report")
+    if report.get("june_consumed") is not False:
+        raise ValueError("daily-high PMF pilot must not consume June")
+    return DailyHighPmfPilotData(
+        root=path,
+        report=report,
+        april_summary=pd.read_csv(path / "april_summary.csv"),
+        may_summary=pd.read_csv(path / "may_summary.csv"),
+        may_scores=pd.read_parquet(path / "may_parallel_scores.parquet"),
+    )
+
+
 def discover_evaluations(runs_root: Path | str) -> list[EvaluationArtifact]:
     """Find complete local-day calibrated validation artifact directories."""
     root = Path(runs_root)

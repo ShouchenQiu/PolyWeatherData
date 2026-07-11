@@ -24,9 +24,122 @@ from training.mc_calibration import (
     fit_mc_calibration,
     local_calendar_day_groups,
 )
+from training.daily_high_pmf import DailyHighPmfEvaluation
 
 
 _NORMAL_P90 = 1.2815515655446004
+
+
+def build_pmf_forecast_cache(
+    *,
+    evaluation: DailyHighPmfEvaluation,
+    source_snapshots: pd.DataFrame,
+    markets: pd.DataFrame,
+    station_id: str,
+    split_role: str,
+    tft_checkpoint_sha256: str,
+    pmf_artifact_sha256: str,
+    feature_schema_version: int,
+) -> ForecastCache:
+    """Build a parallel pilot cache without altering the MC source cache."""
+    required_source = {
+        "snapshot_id", "available_at", "observed_through",
+        "forecast_start_at", "forecast_through", "observed_high_f",
+    }
+    _require_columns(source_snapshots, required_source, "source_snapshots")
+    _require_columns(
+        evaluation.snapshots,
+        {
+            "snapshot_id", "source_snapshot_id", "init_time", "target_date",
+            "p10_f", "p50_f", "p90_f", "coverage_type",
+            "observed_high_f", "observed_hour_count", "forecast_hour_count",
+            "target_hour_count",
+        },
+        "PMF evaluation snapshots",
+    )
+    _require_columns(
+        evaluation.temperature_probabilities,
+        {"snapshot_id", "temperature_f", "pmf_probability"},
+        "PMF temperature probabilities",
+    )
+    pmf_values = evaluation.temperature_probabilities["pmf_probability"].astype(float)
+    if not pmf_values.between(-1e-12, 1.0 + 1e-12).all():
+        raise ValueError("PMF temperature probabilities fall outside [0, 1]")
+    pmf_sums = evaluation.temperature_probabilities.groupby("snapshot_id")[
+        "pmf_probability"
+    ].sum()
+    if not np.allclose(pmf_sums.to_numpy(dtype=float), 1.0, atol=1e-10):
+        raise ValueError("PMF temperature probabilities must sum to one")
+    _require_columns(
+        markets,
+        {"target_date", "condition_id", "bucket_lo_f", "bucket_hi_f"},
+        "markets",
+    )
+    source = source_snapshots[list(required_source)].rename(
+        columns={"snapshot_id": "source_snapshot_id"}
+    )
+    snapshots = evaluation.snapshots.merge(
+        source,
+        on="source_snapshot_id",
+        how="inner",
+        validate="one_to_one",
+        suffixes=("", "_source"),
+    )
+    if len(snapshots) != len(evaluation.snapshots):
+        raise ValueError("PMF evaluation references missing source snapshots")
+    snapshots["observed_high_f"] = snapshots.pop("observed_high_f_source")
+    lineage_id = f"daily-high-pmf-pilot-{split_role.replace('_', '-')}"
+    snapshots["station_id"] = station_id
+    snapshots["lineage_id"] = lineage_id
+    snapshots["distribution_source"] = "daily_high_pmf_pilot"
+    snapshots["distribution_artifact_sha256"] = pmf_artifact_sha256
+    snapshots["feature_schema_version"] = int(feature_schema_version)
+
+    market_rows = markets.copy()
+    market_rows["target_date"] = market_rows["target_date"].astype(str)
+    temperatures = evaluation.temperature_probabilities.merge(
+        snapshots[["snapshot_id", "target_date"]],
+        on="snapshot_id",
+        how="inner",
+        validate="many_to_one",
+    ).merge(
+        market_rows[
+            ["target_date", "condition_id", "bucket_lo_f", "bucket_hi_f"]
+        ],
+        on="target_date",
+        how="inner",
+        validate="many_to_many",
+    )
+    temperatures = temperatures[
+        (temperatures["temperature_f"] >= temperatures["bucket_lo_f"])
+        & (temperatures["temperature_f"] < temperatures["bucket_hi_f"])
+    ]
+    probabilities = (
+        temperatures.groupby(
+            ["snapshot_id", "condition_id"], as_index=False
+        )["pmf_probability"]
+        .sum()
+        .rename(columns={"pmf_probability": "yes_probability"})
+    )
+    probabilities["yes_probability"] = probabilities[
+        "yes_probability"
+    ].clip(0.0, 1.0)
+    lineages = pd.DataFrame(
+        [
+            {
+                "lineage_id": lineage_id,
+                "checkpoint_sha256": tft_checkpoint_sha256,
+                "calibration_sha256": pmf_artifact_sha256,
+                "split_role": split_role,
+                "mc_seed": 0,
+                "mc_samples": 1,
+                "distribution_source": "daily_high_pmf_pilot",
+                "distribution_artifact_sha256": pmf_artifact_sha256,
+                "feature_schema_version": int(feature_schema_version),
+            }
+        ]
+    )
+    return ForecastCache(snapshots, probabilities, lineages)
 
 
 def contiguous_oof_assignments(
