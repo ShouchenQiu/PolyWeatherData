@@ -25,6 +25,8 @@ from training.mc_calibration import (
     local_calendar_day_groups,
 )
 from training.daily_high_pmf import DailyHighPmfEvaluation
+from training.daily_high_gaussian import GaussianEvaluation
+from model.daily_high_gaussian import TruncatedNormal, compose_daily_high
 
 
 _NORMAL_P90 = 1.2815515655446004
@@ -139,6 +141,68 @@ def build_pmf_forecast_cache(
             }
         ]
     )
+    return ForecastCache(snapshots, probabilities, lineages)
+
+
+def build_gaussian_forecast_cache(
+    *,
+    evaluation: GaussianEvaluation,
+    source_snapshots: pd.DataFrame,
+    markets: pd.DataFrame,
+    station_id: str,
+    split_role: str,
+    tft_checkpoint_sha256: str,
+    artifact_sha256: str,
+) -> ForecastCache:
+    """Build a parallel cache from analytic future-max Gaussian probabilities."""
+    required = {
+        "snapshot_id", "source_snapshot_id", "init_time", "target_date",
+        "coverage_type", "observed_high_f", "observed_high_mask",
+        "observed_hour_count", "forecast_hour_count", "target_hour_count",
+        "mean_f", "sigma_f", "p10_f", "p50_f", "p90_f",
+    }
+    _require_columns(evaluation.snapshots, required, "Gaussian evaluation snapshots")
+    source_required = {
+        "snapshot_id", "available_at", "observed_through", "forecast_start_at",
+        "forecast_through", "observed_high_f",
+    }
+    _require_columns(source_snapshots, source_required, "source_snapshots")
+    _require_columns(markets, {"target_date", "condition_id", "bucket_lo_f", "bucket_hi_f"}, "markets")
+    source = source_snapshots[list(source_required)].rename(columns={"snapshot_id": "source_snapshot_id"})
+    snapshots = evaluation.snapshots.merge(source, on="source_snapshot_id", how="inner", validate="one_to_one", suffixes=("", "_source"))
+    if len(snapshots) != len(evaluation.snapshots):
+        raise ValueError("Gaussian evaluation references missing source snapshots")
+    snapshots["observed_high_f"] = snapshots.pop("observed_high_f_source")
+    lineage_id = f"future-max-gaussian-pilot-{split_role.replace('_', '-')}"
+    snapshots["station_id"] = station_id
+    snapshots["lineage_id"] = lineage_id
+    snapshots["distribution_source"] = "future_max_truncated_gaussian_pilot"
+    snapshots["distribution_artifact_sha256"] = artifact_sha256
+    probability_rows = []
+    markets_by_date = {
+        str(date): group for date, group in markets.assign(target_date=markets["target_date"].astype(str)).groupby("target_date", sort=False)
+    }
+    for row in snapshots.itertuples(index=False):
+        future = TruncatedNormal(float(row.mean_f), float(row.sigma_f))
+        observed = float(row.observed_high_f) if pd.notna(row.observed_high_f) else None
+        daily = compose_daily_high(future, observed_high_f=observed)
+        for market in markets_by_date.get(str(row.target_date), pd.DataFrame()).itertuples(index=False):
+            probability_rows.append({
+                "snapshot_id": row.snapshot_id,
+                "condition_id": str(market.condition_id),
+                "yes_probability": daily.probability_for_bucket(float(market.bucket_lo_f), float(market.bucket_hi_f)),
+            })
+    probabilities = pd.DataFrame(probability_rows)
+    lineages = pd.DataFrame([{
+        "lineage_id": lineage_id,
+        "checkpoint_sha256": tft_checkpoint_sha256,
+        "calibration_sha256": artifact_sha256,
+        "split_role": split_role,
+        "mc_seed": 0,
+        "mc_samples": 1,
+        "distribution_source": "future_max_truncated_gaussian_pilot",
+        "distribution_artifact_sha256": artifact_sha256,
+    }])
     return ForecastCache(snapshots, probabilities, lineages)
 
 

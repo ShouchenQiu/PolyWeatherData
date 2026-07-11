@@ -9,14 +9,13 @@ import pandas as pd
 from backtest.forecast_cache import ForecastCache
 
 
-class DailyHighPmfEvaluationLike(Protocol):
+class DailyHighEvaluationLike(Protocol):
     snapshots: pd.DataFrame
-    temperature_probabilities: pd.DataFrame
 
 
 def score_parallel_forecasts(
     *,
-    evaluation: DailyHighPmfEvaluationLike,
+    evaluation: DailyHighEvaluationLike,
     candidate_cache: ForecastCache,
     mc_cache: ForecastCache,
     markets: pd.DataFrame,
@@ -250,6 +249,70 @@ def build_pilot_report(
         "june_consumed": False,
         "april_examples": april_manifest,
         "april_temperature_oof": april_climatology,
+        "april_parallel_summary": april_summary.to_dict("records"),
+        "may_parallel_summary": may_summary.to_dict("records"),
+        "april_event_day_bootstrap": event_day_bootstrap(
+            april_scores, samples=bootstrap_samples, seed=42
+        ),
+        "may_event_day_bootstrap": event_day_bootstrap(
+            may_scores, samples=bootstrap_samples, seed=43
+        ),
+        "gates": gates,
+    }
+
+
+def build_gaussian_pilot_report(
+    *,
+    april_oof: pd.DataFrame,
+    april_summary: pd.DataFrame,
+    may_summary: pd.DataFrame,
+    april_scores: pd.DataFrame,
+    may_scores: pd.DataFrame,
+    bootstrap_samples: int,
+    april_manifest: dict[str, object],
+) -> dict[str, object]:
+    """Apply the frozen pilot gates for the future-maximum Gaussian candidate."""
+    may_overall = _summary_row(may_summary, "overall")
+    coverage_rows = may_summary[
+        may_summary["stratum"].str.startswith("coverage_type=")
+    ]
+    later = may_scores[may_scores["forecast_hour_count"] >= 7]
+    april_future_max = {
+        "gaussian_nll": float(april_oof["future_nll"].mean()),
+        "climatology_nll": float(april_oof["climatology_future_nll"].mean()),
+    }
+    gates = {
+        "april_beats_future_max_climatology_nll": (
+            april_future_max["gaussian_nll"] < april_future_max["climatology_nll"]
+        ),
+        "may_beats_mc_rps": may_overall["candidate_rps"] < may_overall["mc_rps"],
+        "may_log_loss_within_0_01": (
+            may_overall["candidate_log_loss"]
+            <= may_overall["mc_log_loss"] + 0.01
+        ),
+        "may_each_coverage_type_rps_not_worse": bool(
+            len(coverage_rows) == 2
+            and (coverage_rows["candidate_rps"] <= coverage_rows["mc_rps"]).all()
+        ),
+        "may_coverage_closer_to_80pct": (
+            abs(may_overall["candidate_coverage"] - 0.8)
+            < abs(may_overall["mc_coverage"] - 0.8)
+        ),
+        "may_mae_within_0_1f": (
+            may_overall["candidate_mae_f"] <= may_overall["mc_mae_f"] + 0.1
+        ),
+        "may_7_to_24h_rps_not_worse": bool(
+            not later.empty
+            and later["candidate_rps"].mean() <= later["mc_rps"].mean()
+        ),
+    }
+    gates["eligible_for_cross_fit_goal"] = bool(all(gates.values()))
+    return {
+        "schema_version": 1,
+        "goal": "point_in_time_future_max_gaussian_structural_pilot",
+        "june_consumed": False,
+        "april_examples": april_manifest,
+        "april_future_max_oof": april_future_max,
         "april_parallel_summary": april_summary.to_dict("records"),
         "may_parallel_summary": may_summary.to_dict("records"),
         "april_event_day_bootstrap": event_day_bootstrap(

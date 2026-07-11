@@ -2,16 +2,62 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from training.backtest_forecast_generation import (
+    build_gaussian_forecast_cache,
     build_pmf_forecast_cache,
     build_forecast_cache,
     contiguous_oof_assignments,
     fit_oof_calibrations,
 )
+from training.daily_high_gaussian import GaussianEvaluation
 from training.daily_high_pmf import DailyHighPmfEvaluation
 from model.daily_high import PartialDayBiasCalibration
 from model.mc_calibration import McCalibration
+
+
+def test_build_gaussian_forecast_cache_preserves_observed_high_atom() -> None:
+    evaluation = GaussianEvaluation(
+        snapshots=pd.DataFrame(
+            [{
+                "snapshot_id": "gaussian-1", "source_snapshot_id": "mc-1",
+                "init_time": "2026-05-01T12:00:00Z", "target_date": "2026-05-01",
+                "coverage_type": "observed_plus_forecast", "observed_high_f": 72.0,
+                "observed_high_mask": 1.0, "observed_hour_count": 12,
+                "forecast_hour_count": 12, "target_hour_count": 24,
+                "mean_f": 70.0, "sigma_f": 2.0,
+                "p10_f": 72.0, "p50_f": 72.0, "p90_f": 73.0,
+            }]
+        )
+    )
+    source = pd.DataFrame(
+        [{
+            "snapshot_id": "mc-1", "available_at": "2026-05-01T12:01:00Z",
+            "observed_high_f": 72.0, "observed_through": "2026-05-01T12:00:00Z",
+            "forecast_start_at": "2026-05-01T13:00:00Z",
+            "forecast_through": "2026-05-02T00:00:00Z",
+        }]
+    )
+    markets = pd.DataFrame(
+        [
+            {"target_date": "2026-05-01", "condition_id": "below-72", "bucket_lo_f": float("-inf"), "bucket_hi_f": 72.0},
+            {"target_date": "2026-05-01", "condition_id": "72", "bucket_lo_f": 72.0, "bucket_hi_f": 73.0},
+            {"target_date": "2026-05-01", "condition_id": "above-72", "bucket_lo_f": 73.0, "bucket_hi_f": float("inf")},
+        ]
+    )
+
+    cache = build_gaussian_forecast_cache(
+        evaluation=evaluation, source_snapshots=source, markets=markets,
+        station_id="KLGA", split_role="model_test", tft_checkpoint_sha256="a" * 64,
+        artifact_sha256="b" * 64,
+    )
+
+    probabilities = cache.probabilities.set_index("condition_id")["yes_probability"]
+    assert cache.snapshots.iloc[0]["distribution_source"] == "future_max_truncated_gaussian_pilot"
+    assert probabilities.sum() == pytest.approx(1.0)
+    assert probabilities["below-72"] == 0.0
+    assert probabilities["72"] > 0.5
 
 
 def test_build_pmf_forecast_cache_keeps_parallel_distribution_lineage() -> None:

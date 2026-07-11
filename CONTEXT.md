@@ -160,6 +160,13 @@ chronological OOF training and frozen May diagnosis, without consuming June or s
 production probabilities.
 _Avoid_: production model, MC recalibration
 
+**future-max Gaussian pilot**: An offline, low-capacity alternative that predicts a
+truncated-normal distribution for the still-unobserved local-day maximum, then composes
+the final daily high exactly as `max(observed_high, future_max)`. It is parallel to the
+PMF pilot, preserves ForecastCache bucket semantics, and never serves production
+probabilities.
+_Avoid_: final-high truncation, production Gaussian
+
 **point-in-time partial-day daily high**: A target local-day distribution whose elapsed
 hours come from observations visible by `init_time` and whose later hours come from
 non-extrapolated MC forecasts over aligned slots `(local D 00:00, local D+1 00:00]`,
@@ -320,6 +327,9 @@ _Avoid_: parquet file, storage file
   time to the venue's later close.
 - An in-progress Event uses a **point-in-time partial-day daily high**; uncovered
   right-tail hours or extrapolated decoder cells suppress the snapshot.
+- Offline distribution pilots may write a parallel ForecastCache only; neither the
+  production `ModelPipeline` nor `ProbabilityStore` may select them without an explicit
+  promotion decision and separate holdout evidence.
 - **ForecastLoop** -> **TFT** -> **McSampler** -> bucket probabilities -> **TradingLoop**
 - **DiscoveryLoop** owns **Event** / **Market** / **Token** records; **TradingLoop**
   references them by slug only. At any given time 2-3 Events may be concurrently active.
