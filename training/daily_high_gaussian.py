@@ -108,6 +108,24 @@ class GaussianEvaluation:
         return manifest
 
 
+@dataclass(frozen=True)
+class SeasonalFutureMaxClimatology:
+    coefficients: np.ndarray
+    sigma_f: float
+
+    @classmethod
+    def fit(cls, frame: pd.DataFrame) -> "SeasonalFutureMaxClimatology":
+        design = _climatology_design(frame)
+        labels = frame["future_max_f"].to_numpy(dtype=float)
+        coefficients, *_ = np.linalg.lstsq(design, labels, rcond=None)
+        residuals = labels - design @ coefficients
+        return cls(coefficients, max(float(np.std(residuals, ddof=0)), 0.5))
+
+    def predict(self, row: pd.Series) -> TruncatedNormal:
+        design = _climatology_design(pd.DataFrame([row]))[0]
+        return TruncatedNormal(float(design @ self.coefficients), self.sigma_f)
+
+
 def fit_gaussian_future_max_model(
     frame: pd.DataFrame,
     *,
@@ -141,6 +159,7 @@ def fit_gaussian_future_max_model(
     x = torch.from_numpy(normalized)
     y = torch.from_numpy(labels)
     base = torch.from_numpy(frame["tft_future_peak_p50_f"].to_numpy(dtype=np.float32))
+    weights = torch.from_numpy(event_day_sample_weights(frame).astype(np.float32))
     for _ in range(epochs):
         optimizer.zero_grad()
         output = network(x)
@@ -150,7 +169,8 @@ def fit_gaussian_future_max_model(
         log_pdf = -0.5 * z.square() - torch.log(sigma) - 0.5 * np.log(2.0 * np.pi)
         lower = torch.special.ndtr((SUPPORT_MIN_F - mu) / sigma)
         upper = torch.special.ndtr((SUPPORT_MAX_F - mu) / sigma)
-        loss = -(log_pdf - torch.log((upper - lower).clamp_min(1e-12))).mean()
+        nll = -(log_pdf - torch.log((upper - lower).clamp_min(1e-12)))
+        loss = (nll * weights).sum() / weights.sum()
         loss.backward()
         optimizer.step()
     return GaussianFutureMaxModel(network=network, feature_columns=feature_columns, feature_mean=mean, feature_scale=scale, tft_checkpoint_sha256=tft_checkpoint_sha256, training_manifest_sha256=training_manifest_sha256)
@@ -175,12 +195,14 @@ def run_expanding_gaussian_oof(
             training_manifest_sha256=training_manifest_sha256,
             epochs=epochs, seed=seed + fold,
         )
-        climatology = TruncatedNormal(
-            float(train["future_max_f"].mean()),
-            max(float(train["future_max_f"].std(ddof=0)), 0.5),
-        )
+        climatology = SeasonalFutureMaxClimatology.fit(train)
         rows.extend(
-            _evaluation_row(model, pd.Series(row._asdict()), fold, climatology)
+            _evaluation_row(
+                model,
+                pd.Series(row._asdict()),
+                fold,
+                climatology.predict(pd.Series(row._asdict())),
+            )
             for row in validation.itertuples(index=False)
         )
     return GaussianEvaluation(pd.DataFrame(rows))
@@ -198,6 +220,62 @@ def predict_gaussian_examples(
             for row in examples.frame.itertuples(index=False)
         ])
     )
+
+
+def summarize_future_max_evaluation(evaluation: GaussianEvaluation) -> pd.DataFrame:
+    """Summarize future-maximum OOF likelihood and interval diagnostics."""
+    frame = evaluation.snapshots.copy()
+    if frame.empty:
+        return pd.DataFrame()
+    future_p10 = []
+    future_p50 = []
+    future_p90 = []
+    for row in frame.itertuples(index=False):
+        distribution = TruncatedNormal(float(row.mean_f), float(row.sigma_f))
+        future_p10.append(distribution.quantile(0.1))
+        future_p50.append(distribution.quantile(0.5))
+        future_p90.append(distribution.quantile(0.9))
+    frame["future_p10_f"] = future_p10
+    frame["future_p50_f"] = future_p50
+    frame["future_p90_f"] = future_p90
+    frame["forecast_hour_band"] = pd.cut(
+        frame["forecast_hour_count"],
+        bins=[0, 6, 12, 18, 24, 25],
+        labels=["1-6", "7-12", "13-18", "19-24", "25"],
+        include_lowest=True,
+    ).astype(str)
+    groups: list[tuple[str, pd.DataFrame]] = [("overall", frame)]
+    groups.extend(
+        (f"coverage_type={key}", group)
+        for key, group in frame.groupby("coverage_type", sort=True)
+    )
+    groups.extend(
+        (f"forecast_hours={key}", group)
+        for key, group in frame.groupby("forecast_hour_band", sort=True)
+    )
+    rows = []
+    for stratum, group in groups:
+        label = group["future_max_f"]
+        rows.append(
+            {
+                "stratum": stratum,
+                "snapshots": len(group),
+                "event_days": group["target_date"].nunique(),
+                "gaussian_future_nll": group["future_nll"].mean(),
+                "climatology_future_nll": group.get(
+                    "climatology_future_nll", pd.Series(dtype=float)
+                ).mean(),
+                "future_p50_mae_f": (group["future_p50_f"] - label).abs().mean(),
+                "future_p10_p90_coverage": (
+                    (label >= group["future_p10_f"])
+                    & (label <= group["future_p90_f"])
+                ).mean(),
+                "future_p10_p90_width_f": (
+                    group["future_p90_f"] - group["future_p10_f"]
+                ).mean(),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def _evaluation_row(
@@ -251,6 +329,53 @@ def _normal_cdf(value: float) -> float:
     return float(0.5 * (1.0 + math.erf(value / np.sqrt(2.0))))
 
 
+def event_day_sample_weights(frame: pd.DataFrame) -> np.ndarray:
+    """Give each Event day one unit of likelihood mass during Gaussian fitting."""
+    if "target_date" not in frame:
+        return np.ones(len(frame), dtype=float)
+    counts = frame["target_date"].astype(str).value_counts()
+    return frame["target_date"].astype(str).map(lambda value: 1.0 / counts[value]).to_numpy(dtype=float)
+
+
+def require_training_target_dates_before(
+    frame: pd.DataFrame,
+    *,
+    cutoff_date: str,
+) -> None:
+    """Reject a frozen training set that contains its evaluation period."""
+    if "target_date" not in frame:
+        raise ValueError("Gaussian training frame missing: target_date")
+    target_dates = pd.to_datetime(frame["target_date"], errors="raise").dt.date
+    cutoff = pd.Timestamp(cutoff_date).date()
+    leaked = target_dates[target_dates >= cutoff]
+    if not leaked.empty:
+        raise ValueError(
+            "Gaussian frozen training includes target dates on or after "
+            f"{cutoff.isoformat()}: {leaked.min().isoformat()}"
+        )
+
+
+def _climatology_design(frame: pd.DataFrame) -> np.ndarray:
+    required = {
+        "day_of_year_sin", "day_of_year_cos", "forecast_hour_fraction",
+        "observed_high_f", "observed_high_mask",
+    }
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError("seasonal climatology features missing: " + ", ".join(missing))
+    mask = frame["observed_high_mask"].to_numpy(dtype=float)
+    return np.column_stack(
+        [
+            np.ones(len(frame), dtype=float),
+            frame["day_of_year_sin"].to_numpy(dtype=float),
+            frame["day_of_year_cos"].to_numpy(dtype=float),
+            frame["forecast_hour_fraction"].to_numpy(dtype=float),
+            mask,
+            frame["observed_high_f"].to_numpy(dtype=float) * mask,
+        ]
+    )
+
+
 def build_future_max_examples(
     *,
     hourly_predictions: pd.DataFrame,
@@ -272,8 +397,12 @@ def build_future_max_examples(
     obs = observations.copy()
     obs["valid_time"] = pd.to_datetime(obs["valid_time"], utc=True)
     obs["available_at"] = pd.to_datetime(obs["available_at"], utc=True)
-    all_truth = obs.sort_values("available_at").drop_duplicates("valid_time", keep="last")
-    truth_by_time = all_truth.set_index("valid_time")["temperature_c"]
+    all_truth = (
+        obs.sort_values(["valid_time", "available_at"], kind="stable")
+        .drop_duplicates("valid_time", keep="last")
+        .set_index("valid_time")
+    )
+    truth_by_time = all_truth["temperature_c"]
     cases = snapshots.copy()
     cases["init_time"] = pd.to_datetime(cases["init_time"], utc=True)
     cases["target_date"] = cases["target_date"].astype(str)
@@ -288,11 +417,12 @@ def build_future_max_examples(
         target_date = str(case.target_date)
         expected = _target_hours(target_date, station_timezone)
         expected_set = set(expected)
-        visible = obs[
-            obs["valid_time"].isin(expected_set)
-            & (obs["valid_time"] <= init)
-            & (obs["available_at"] <= init)
-        ].sort_values("valid_time").drop_duplicates("valid_time", keep="last")
+        observed_slots = all_truth.reindex(expected)
+        visible = observed_slots[
+            (observed_slots.index <= init)
+            & (observed_slots["available_at"] <= init)
+            & observed_slots["temperature_c"].notna()
+        ]
         future = by_init[init].copy()
         extrapolated = future.get(
             "is_extrapolated", pd.Series(False, index=future.index)
@@ -302,16 +432,17 @@ def build_future_max_examples(
             & (future["valid_time"] > init)
             & ~extrapolated
         ].sort_values("valid_time").drop_duplicates("valid_time", keep="last")
-        if set(visible["valid_time"]) | set(future["valid_time"]) != expected_set:
+        if set(visible.index) | set(future["valid_time"]) != expected_set:
             continue
-        if future.empty or not set(future["valid_time"]).issubset(truth_by_time.index):
+        future_truth_c = truth_by_time.reindex(future["valid_time"])
+        if future.empty or future_truth_c.isna().any():
             continue
         base = future["base_temp_c"].to_numpy(dtype=float)
         p10 = (base + future["p10"].to_numpy(dtype=float)) * 1.8 + 32.0
         p50 = (base + future["p50"].to_numpy(dtype=float)) * 1.8 + 32.0
         p90 = (base + future["p90"].to_numpy(dtype=float)) * 1.8 + 32.0
         observed_values = visible["temperature_c"].to_numpy(dtype=float) * 1.8 + 32.0
-        future_truth = truth_by_time.loc[list(future["valid_time"])].to_numpy(dtype=float) * 1.8 + 32.0
+        future_truth = future_truth_c.to_numpy(dtype=float) * 1.8 + 32.0
         peak_index = int(np.argmax(p50))
         angle = 2.0 * np.pi * float(pd.Timestamp(target_date).dayofyear) / 366.0
         row: dict[str, object] = {
@@ -344,6 +475,35 @@ def build_future_max_examples(
                 row["source_snapshot_id" if optional == "snapshot_id" else optional] = getattr(case, optional)
         rows.append(row)
     return FutureMaxExamples(pd.DataFrame(rows))
+
+
+def build_historical_snapshot_cases(
+    hourly_predictions: pd.DataFrame,
+    *,
+    station_timezone: str,
+    target_start: str,
+    target_end: str,
+) -> pd.DataFrame:
+    """Enumerate research-only local target days represented by one OOF trajectory."""
+    _require(hourly_predictions, {"init_time", "valid_time"}, "hourly_predictions")
+    work = hourly_predictions[["init_time", "valid_time"]].copy()
+    work["init_time"] = pd.to_datetime(work["init_time"], utc=True)
+    local_dates = pd.to_datetime(work["valid_time"], utc=True).dt.tz_convert(
+        ZoneInfo(station_timezone)
+    ).dt.strftime("%Y-%m-%d")
+    work["target_date"] = local_dates
+    work = work[
+        (work["target_date"] >= target_start)
+        & (work["target_date"] <= target_end)
+    ].drop_duplicates(["init_time", "target_date"], keep="first")
+    work = work.sort_values(["init_time", "target_date"], kind="stable").reset_index(drop=True)
+    work["snapshot_id"] = [
+        "historical-" + hashlib.sha256(
+            f"{init.isoformat()}|{target_date}".encode("ascii")
+        ).hexdigest()
+        for init, target_date in zip(work["init_time"], work["target_date"], strict=True)
+    ]
+    return work[["snapshot_id", "init_time", "target_date"]]
 
 
 def _target_hours(target_date: str, timezone: str) -> pd.DatetimeIndex:

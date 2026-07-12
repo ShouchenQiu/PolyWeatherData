@@ -167,6 +167,12 @@ PMF pilot, preserves ForecastCache bucket semantics, and never serves production
 probabilities.
 _Avoid_: final-high truncation, production Gaussian
 
+**historical cross-fit TFT trajectory**: A point-in-time hourly prediction produced by
+a TFT trained and early-stopped only on earlier calendar ranges. It supplies offline
+distribution-model training features but is neither a production checkpoint nor a
+market-probability source.
+_Avoid_: historical in-sample prediction, promoted TFT
+
 **point-in-time partial-day daily high**: A target local-day distribution whose elapsed
 hours come from observations visible by `init_time` and whose later hours come from
 non-extrapolated MC forecasts over aligned slots `(local D 00:00, local D+1 00:00]`,
