@@ -167,6 +167,13 @@ PMF pilot, preserves ForecastCache bucket semantics, and never serves production
 probabilities.
 _Avoid_: final-high truncation, production Gaussian
 
+**conditional residual-path MC pilot**: A training-only daily-high candidate that
+retrieves complete, strictly historical OOF standardized residual trajectories by an
+ex-ante forecast state, then resamples their cross-hour dependence under the current
+TFT marginal uncertainty. It emits parallel ForecastCache artifacts with support and
+OOD diagnostics; it is not a production MC calibration or probability source.
+_Avoid_: dynamic production correlation, online May calibration
+
 **historical cross-fit TFT trajectory**: A point-in-time hourly prediction produced by
 a TFT trained and early-stopped only on earlier calendar ranges. It supplies offline
 distribution-model training features but is neither a production checkpoint nor a
