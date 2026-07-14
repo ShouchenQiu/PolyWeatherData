@@ -29,7 +29,16 @@ def main(
     )
     args = parser.parse_args(argv)
 
+    if args.output.exists():
+        raise FileExistsError(
+            f"immutable historical CLOB output already exists: {args.output}"
+        )
     cache_dir = args.cache_dir or Path(f"{args.output}.raw-cache")
+    print(
+        f"[start] historical CLOB download range={args.start}..{args.end} "
+        f"output={args.output} raw_cache={cache_dir}",
+        flush=True,
+    )
     downloader = source or HistoricalClobSource(
         cache_dir=cache_dir,
         progress_callback=lambda completed, total, day, markets, trades: print(
@@ -42,8 +51,19 @@ def main(
         end_date=args.end,
         station=STATIONS[args.station],
     )
+    print(
+        f"[complete] historical CLOB fetch events={len(dataset.events)} "
+        f"markets={len(dataset.markets)} trades={len(dataset.trades)}",
+        flush=True,
+    )
     manifest = dataset.save(args.output)
-    print(json.dumps(manifest, indent=2, sort_keys=True))
+    print(
+        f"[complete] immutable artifact coverage_days="
+        f"{len(dataset.coverage())} output={args.output}",
+        flush=True,
+    )
+    print(json.dumps(manifest, indent=2, sort_keys=True), flush=True)
+    print(f"[done] historical CLOB artifact={args.output}", flush=True)
     return 0
 
 

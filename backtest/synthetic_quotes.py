@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -171,6 +171,7 @@ def build_synthetic_quotes(
     max_staleness: str = "30min",
     min_tick_size: float = 0.01,
     min_tick_sizes: Mapping[str, float] | None = None,
+    progress_callback: Callable[[int, int, str, int], None] | None = None,
 ) -> pd.DataFrame:
     """Estimate 5-minute quotes using information observable by each tick."""
     missing = sorted(_REQUIRED_TRADE_COLUMNS - set(trades.columns))
@@ -212,9 +213,12 @@ def build_synthetic_quotes(
     work = work.sort_values(["condition_id", "timestamp"]).reset_index(drop=True)
     ticks = pd.date_range(start_at, end_at, freq=decision_tick)
     rows: list[dict] = []
-    for condition_id, condition_trades in work.groupby(
+    grouped_conditions = list(work.groupby(
         "condition_id",
         sort=True,
+    ))
+    for completed, (condition_id, condition_trades) in enumerate(
+        grouped_conditions, start=1
     ):
         condition_trades = condition_trades.sort_values("timestamp")
         condition_tick_size = float(
@@ -317,6 +321,13 @@ def build_synthetic_quotes(
                     "quote_quality": quality,
                     "source": "past_public_trades",
                 }
+            )
+        if progress_callback is not None:
+            progress_callback(
+                completed,
+                len(grouped_conditions),
+                str(condition_id),
+                len(rows),
             )
     columns = [
         "condition_id",

@@ -7,7 +7,11 @@ from scripts.download_historical_clob import main
 
 
 class _Source:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def fetch(self, **kwargs) -> HistoricalClobDataset:
+        self.calls += 1
         assert kwargs["start_date"] == "2026-04-01"
         assert kwargs["end_date"] == "2026-04-02"
         assert kwargs["station"].station_id == "KLGA"
@@ -76,3 +80,23 @@ def test_download_historical_clob_cli_writes_artifact(tmp_path) -> None:
     assert result == 0
     assert (output / "manifest.json").exists()
     assert (output / "coverage.parquet").exists()
+
+
+def test_download_historical_clob_rejects_an_existing_artifact(tmp_path) -> None:
+    output = tmp_path / "artifact"
+    output.mkdir()
+    source = _Source()
+
+    try:
+        main(
+            [
+                "--start", "2026-04-01", "--end", "2026-04-02",
+                "--output", str(output),
+            ],
+            source=source,
+        )
+    except FileExistsError as exc:
+        assert str(output) in str(exc)
+    else:
+        raise AssertionError("expected immutable artifact output to be rejected")
+    assert source.calls == 0

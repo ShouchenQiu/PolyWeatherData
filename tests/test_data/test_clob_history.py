@@ -5,7 +5,11 @@ import json
 import pytest
 
 from config.stations import STATIONS
-from data.clob.history import HistoricalClobSource, HistoricalDataIncomplete
+from data.clob.history import (
+    HistoricalClobSource,
+    HistoricalDataIncomplete,
+    _events_by_target_date,
+)
 
 
 class _FakeTransport:
@@ -41,6 +45,8 @@ class _CoverageTransport(_FakeTransport):
     def get_json(self, url: str, params: dict) -> object:
         self.calls.append((url, dict(params)))
         if url.endswith("/events"):
+            if params.get("series_id") == "10005":
+                return []
             return [self._event] if "april-2-" in params["slug"] else []
         if url.endswith("/public-search"):
             return {"events": [], "pagination": {"hasMore": False}}
@@ -68,6 +74,20 @@ class _ArchivedEventTransport(_FakeTransport):
             }
         if url.endswith("/trades"):
             return list(self._trades)
+        raise AssertionError(f"unexpected URL {url}")
+
+
+class _SeriesTransport(_FakeTransport):
+    def get_json(self, url: str, params: dict) -> object:
+        self.calls.append((url, dict(params)))
+        if url.endswith("/events") and params.get("series_id") == "10005":
+            return [self._event] if int(params["offset"]) == 0 else []
+        if url.endswith("/events"):
+            return []
+        if url.endswith("/trades"):
+            return list(self._trades)
+        if url.endswith("/public-search"):
+            return {"events": []}
         raise AssertionError(f"unexpected URL {url}")
 
 
@@ -174,6 +194,51 @@ def test_historical_source_normalizes_current_api_rows_without_synthetic_fill() 
     assert "is_filled" not in dataset.trades.columns
     trade_call = next(call for call in transport.calls if call[0].endswith("/trades"))
     assert trade_call[1]["takerOnly"] == "true"
+
+
+def test_historical_source_recovers_legacy_events_from_daily_weather_series() -> None:
+    event = {
+        "id": "legacy-event",
+        "slug": "highest-temperature-in-nyc-on-april-2",
+        "endDate": "2025-04-02T12:00:00Z",
+        "markets": [
+            {
+                "id": "legacy-market",
+                "conditionId": "legacy-condition",
+                "slug": "highest-temperature-in-nyc-on-april-2-70-71f",
+                "clobTokenIds": ["yes", "no"],
+                "outcomes": ["Yes", "No"],
+            }
+        ],
+    }
+    transport = _SeriesTransport(event, [])
+
+    dataset = HistoricalClobSource(transport=transport).fetch(
+        start_date="2025-04-02",
+        end_date="2025-04-02",
+        station=STATIONS["KLGA"],
+    )
+
+    assert dataset.events[["event_id", "target_date"]].to_dict("records") == [
+        {"event_id": "legacy-event", "target_date": "2025-04-02"}
+    ]
+    calls = [params for url, params in transport.calls if url.endswith("/events")]
+    assert calls == [
+        {"series_id": "10005", "closed": "true", "limit": 100, "offset": 0}
+    ]
+
+
+def test_series_target_date_comes_from_legacy_event_slug_not_close_date() -> None:
+    indexed = _events_by_target_date(
+        [
+            {
+                "slug": "highest-temperature-in-nyc-on-may-12",
+                "endDate": "2025-05-13T12:00:00Z",
+            }
+        ]
+    )
+
+    assert list(indexed) == ["2025-05-12"]
 
 
 def test_historical_source_recovers_archived_event_by_exact_slug(tmp_path) -> None:
@@ -655,9 +720,12 @@ def test_historical_source_reuses_completed_raw_api_cache(tmp_path) -> None:
     )
 
     assert second.trades.equals(first.trades)
-    assert [url for url, _params in transport.calls].count(
-        "https://gamma-api.polymarket.com/events"
-    ) == 1
+    event_calls = [
+        params for url, params in transport.calls
+        if url == "https://gamma-api.polymarket.com/events"
+    ]
+    assert sum("series_id" in params for params in event_calls) == 1
+    assert sum("slug" in params for params in event_calls) == 0
     assert [url for url, _params in transport.calls].count(
         "https://data-api.polymarket.com/trades"
     ) == 1

@@ -6,6 +6,7 @@ from data.forecast.availability import (
     HrrrAvailabilityDataset,
     HrrrS3ObjectSource,
     build_hrrr_availability,
+    build_virtual_tft_availability,
 )
 
 
@@ -103,6 +104,28 @@ def test_availability_marks_cycle_incomplete_when_required_object_is_missing() -
     assert pd.isna(row["available_at"])
     assert row["missing_objects"] == [
         "2026-06-30T12:00:00+00:00/f48"
+    ]
+
+
+def test_virtual_tft_availability_uses_fixed_latency_without_hrrr_dependencies() -> None:
+    availability = build_virtual_tft_availability(
+        init_times=pd.to_datetime(
+            ["2026-06-30T12:01:00Z", "2026-06-30T13:00:00Z"]
+        ),
+        latency="2h",
+        decision_tick="5min",
+    )
+
+    assert availability["available_at"].tolist() == [
+        pd.Timestamp("2026-06-30T14:05:00Z"),
+        pd.Timestamp("2026-06-30T15:00:00Z"),
+    ]
+    assert availability["complete"].tolist() == [True, True]
+    assert availability["required_object_count"].tolist() == [0, 0]
+    assert availability["missing_objects"].tolist() == [[], []]
+    assert availability["source_ready_at"].tolist() == [
+        pd.Timestamp("2026-06-30T12:01:00Z"),
+        pd.Timestamp("2026-06-30T13:00:00Z"),
     ]
 
 

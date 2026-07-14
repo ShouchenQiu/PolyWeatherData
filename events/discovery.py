@@ -57,6 +57,11 @@ _SLUG_REGISTRY = [
         re.compile(r"(?:be-)?(\d+)f(?:-or-below|orbelow)"),
         _lo_bound,
     ),
+    # Legacy NYC markets compact two two-digit endpoints: between-6263f.
+    (
+        re.compile(r"between-(\d{2})(\d{2})f"),
+        _range_bound,
+    ),
     # X-Yf  (range)
     (
         re.compile(r"(\d+)-(\d+)f"),

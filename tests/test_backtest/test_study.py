@@ -209,6 +209,31 @@ def test_public_input_contract_validates_oof_without_catalog(tmp_path) -> None:
     assert not (tmp_path / "studies.sqlite").exists()
 
 
+def test_input_contract_excludes_only_quality_declared_market_unavailable_days(
+    tmp_path,
+) -> None:
+    inputs = _study_inputs(tmp_path)
+    quality_path = inputs.clob_root.with_suffix(".quality.json")
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    quality["status"] = "accepted_with_exclusions"
+    quality["excluded_days"] = {
+        "2026-04-02": "event_absent_from_provider_series"
+    }
+    quality_path.write_text(json.dumps(quality), encoding="utf-8")
+
+    validated = validate_study_inputs(
+        study_id="signal-study",
+        station_id="KLGA",
+        start_target="2026-04-01",
+        end_target="2026-04-02",
+        inputs=inputs,
+        expected_split_role="oof_development",
+    )
+
+    assert validated.actuals["target_date"].tolist() == ["2026-04-01"]
+    assert validated.excluded_target_dates == ("2026-04-02",)
+
+
 def test_development_study_rejects_model_test_forecasts(tmp_path) -> None:
     study = BacktestStudy(tmp_path / "studies.sqlite")
     inputs = _study_inputs(tmp_path, split_role="model_test")

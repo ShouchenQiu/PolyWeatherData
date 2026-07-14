@@ -112,6 +112,7 @@ class HrrrAvailabilityDataset:
     end_date: str
     compute_budget: str
     decision_tick: str
+    provider: str = "noaa_hrrr_bdp_pds_s3"
 
     def save(
         self,
@@ -142,7 +143,7 @@ class HrrrAvailabilityDataset:
         manifest = {
             "schema_version": 1,
             "data_class": "hrrr_point_in_time_availability",
-            "provider": "noaa_hrrr_bdp_pds_s3",
+            "provider": self.provider,
             "requested_range": [self.start_date, self.end_date],
             "compute_budget": self.compute_budget,
             "decision_tick": self.decision_tick,
@@ -196,6 +197,7 @@ class HrrrAvailabilityDataset:
             end_date=str(end_date),
             compute_budget=str(manifest["compute_budget"]),
             decision_tick=str(manifest["decision_tick"]),
+            provider=str(manifest.get("provider", "noaa_hrrr_bdp_pds_s3")),
         )
 
 
@@ -267,6 +269,36 @@ def build_hrrr_availability(
                 "required_object_count": len(required),
                 "missing_objects": missing,
                 "complete": complete,
+            }
+        )
+    return pd.DataFrame(rows).sort_values("init_time").reset_index(drop=True)
+
+
+def build_virtual_tft_availability(
+    *,
+    init_times: Iterable[pd.Timestamp],
+    latency: str | pd.Timedelta = "2h",
+    decision_tick: str = "5min",
+) -> pd.DataFrame:
+    """Build an explicitly approximate fixed-latency TFT visibility clock."""
+    delay = pd.Timedelta(latency)
+    if delay < pd.Timedelta(0):
+        raise ValueError("virtual TFT latency must be non-negative")
+    rows: list[dict] = []
+    for value in init_times:
+        init = pd.Timestamp(value)
+        init = init.tz_localize("UTC") if init.tzinfo is None else init.tz_convert("UTC")
+        rows.append(
+            {
+                "init_time": init,
+                "is_major": pd.NA,
+                "own_max_fxx": pd.NA,
+                "dependency_major_init": pd.NaT,
+                "source_ready_at": init,
+                "available_at": (init + delay).ceil(decision_tick),
+                "required_object_count": 0,
+                "missing_objects": [],
+                "complete": True,
             }
         )
     return pd.DataFrame(rows).sort_values("init_time").reset_index(drop=True)

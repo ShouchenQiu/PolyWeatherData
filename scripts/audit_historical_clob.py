@@ -26,6 +26,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.output.exists():
+        raise FileExistsError(f"immutable CLOB audit output exists: {args.output}")
+    print(
+        f"[start] historical CLOB audit clob={args.clob_root} output={args.output}",
+        flush=True,
+    )
     exclusions = _parse_exclusions(args.exclude)
     manifest_path = args.clob_root / "manifest.json"
     dataset = HistoricalClobDataset.load(args.clob_root)
@@ -37,7 +43,13 @@ def main(argv: list[str] | None = None) -> int:
     with args.output.open("x", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, sort_keys=True)
         handle.write("\n")
+    print(
+        f"[complete] historical CLOB audit status={report.get('status')} "
+        f"output={args.output}",
+        flush=True,
+    )
     print(json.dumps(report, indent=2, sort_keys=True), flush=True)
+    print(f"[done] historical CLOB audit output={args.output}", flush=True)
     return 0
 
 

@@ -36,6 +36,8 @@ def main(
     source: HrrrS3ObjectSource | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
+    if args.output.exists():
+        raise FileExistsError(f"immutable HRRR availability output exists: {args.output}")
     start = pd.Timestamp(args.start, tz="UTC").normalize()
     end = pd.Timestamp(args.end, tz="UTC").normalize()
     if end < start:
@@ -43,6 +45,11 @@ def main(
 
     cache_dir = args.cache_dir or Path(f"{args.output}.raw-cache")
     cache_dir.mkdir(parents=True, exist_ok=True)
+    print(
+        f"[start] HRRR availability range={args.start}..{args.end} "
+        f"output={args.output} raw_cache={cache_dir}",
+        flush=True,
+    )
     object_source = source or HrrrS3ObjectSource()
     frames: list[pd.DataFrame] = []
     listing_days = pd.date_range(start - pd.Timedelta(days=1), end, freq="D")
@@ -85,10 +92,11 @@ def main(
     manifest = dataset.save(args.output)
     complete = int(cycles["complete"].sum())
     print(
-        f"Saved {len(cycles)} cycles ({complete} complete) to {args.output}; "
-        f"manifest rows={manifest['row_counts']}",
+        f"[complete] HRRR availability cycles={len(cycles)} complete={complete} "
+        f"output={args.output}",
         flush=True,
     )
+    print(f"[done] HRRR availability output={args.output}", flush=True)
     return 0
 
 

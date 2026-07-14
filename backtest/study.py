@@ -59,6 +59,7 @@ class StudyValidation:
     quotes: SyntheticQuoteDataset
     clob: HistoricalClobDataset
     actuals: pd.DataFrame
+    excluded_target_dates: tuple[str, ...] = ()
 
 
 class BacktestStudy:
@@ -468,19 +469,24 @@ class BacktestStudy:
         }
         if not requested:
             raise ValueError("study target range is empty")
+        declared_exclusions = _quality_exclusions(quality)
+        excluded_target_dates = tuple(sorted(requested & set(declared_exclusions)))
+        eligible_requested = requested - set(excluded_target_dates)
+        if not eligible_requested:
+            raise ValueError("study target range has no market-eligible dates")
         coverage = clob.coverage()
         covered = set(
             coverage.loc[coverage["complete"], "target_date"].astype(str)
         )
-        if not requested.issubset(covered):
-            missing = sorted(requested - covered)
+        if not eligible_requested.issubset(covered):
+            missing = sorted(eligible_requested - covered)
             raise ValueError(f"CLOB coverage missing target dates: {missing}")
         event_dates = set(clob.events["target_date"].astype(str))
-        if not requested.issubset(event_dates):
+        if not eligible_requested.issubset(event_dates):
             raise ValueError("CLOB events do not cover the study target range")
         event_ids = set(
             clob.events.loc[
-                clob.events["target_date"].astype(str).isin(requested),
+                clob.events["target_date"].astype(str).isin(eligible_requested),
                 "event_id",
             ].astype(str)
         )
@@ -494,16 +500,16 @@ class BacktestStudy:
         if actuals["target_date"].duplicated().any():
             raise ValueError("actual highs contain duplicate target_date")
         actual_dates = set(actuals["target_date"])
-        if not requested.issubset(actual_dates):
-            missing = sorted(requested - actual_dates)
+        if not eligible_requested.issubset(actual_dates):
+            missing = sorted(eligible_requested - actual_dates)
             raise ValueError(
                 f"actual-highs coverage missing target dates: {missing}"
             )
-        actuals = actuals[actuals["target_date"].isin(requested)].reset_index(
+        actuals = actuals[actuals["target_date"].isin(eligible_requested)].reset_index(
             drop=True
         )
         snapshot_dates = set(forecast.snapshots["target_date"].astype(str))
-        if not requested.issubset(snapshot_dates):
+        if not eligible_requested.issubset(snapshot_dates):
             raise ValueError("forecast cache does not cover the study target range")
         return StudyValidation(
             study_id=study_id,
@@ -517,6 +523,7 @@ class BacktestStudy:
             quotes=quotes,
             clob=clob,
             actuals=actuals,
+            excluded_target_dates=excluded_target_dates,
         )
 
     def _initialize(self) -> None:
@@ -650,6 +657,23 @@ def _load_actuals(path: Path, manifest: dict) -> pd.DataFrame:
     if len(work) != int(manifest.get("row_count", -1)):
         raise ValueError("actual-highs row count does not match manifest")
     return work
+
+
+def _quality_exclusions(quality: dict) -> dict[str, str]:
+    """Normalize accepted market-unavailable dates from the CLOB audit."""
+    raw = quality.get("excluded_days", {})
+    if not isinstance(raw, dict):
+        raise ValueError("CLOB eligibility exclusions must be a date/reason mapping")
+    exclusions: dict[str, str] = {}
+    for value, reason in raw.items():
+        try:
+            date = pd.Timestamp(value).date().isoformat()
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid CLOB exclusion date: {value!r}") from exc
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"CLOB exclusion requires a reason: {date}")
+        exclusions[date] = reason
+    return exclusions
 
 
 def _read_json(path: Path, label: str) -> dict:

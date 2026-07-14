@@ -4,6 +4,7 @@ from __future__ import annotations
 import calendar
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -195,6 +196,9 @@ class HistoricalClobDataset:
 class HistoricalClobSource:
     """Download canonical NYC daily-high events and their public trades."""
 
+    _NYC_DAILY_WEATHER_SERIES_ID = "10005"
+    _SERIES_PAGE_SIZE = 100
+
     def __init__(
         self,
         *,
@@ -227,16 +231,20 @@ class HistoricalClobSource:
     ) -> HistoricalClobDataset:
         """Fetch raw point-in-time records for an inclusive target-date range."""
         days = pd.date_range(start_date, end_date, freq="D")
+        series_events = self._fetch_nyc_daily_weather_series()
+        events_by_target = _events_by_target_date(series_events)
         event_rows: list[dict] = []
         market_rows: list[dict] = []
         trade_rows: list[dict] = []
 
         for completed, day in enumerate(days, start=1):
-            slug = (
-                "highest-temperature-in-nyc-on-"
-                f"{calendar.month_name[day.month].lower()}-{day.day}-{day.year}"
-            )
-            events = self._fetch_events(slug)
+            events = events_by_target.get(day.date().isoformat(), [])
+            if not events:
+                slug = (
+                    "highest-temperature-in-nyc-on-"
+                    f"{calendar.month_name[day.month].lower()}-{day.day}-{day.year}"
+                )
+                events = self._fetch_events(slug)
             for event in events:
                 event_id = str(event.get("id") or "")
                 event_rows.append(
@@ -321,6 +329,32 @@ class HistoricalClobSource:
             end_date=str(end_date),
             station_id=str(getattr(station, "station_id")),
         )
+
+    def _fetch_nyc_daily_weather_series(self) -> list[dict]:
+        """Load the series because older events did not use date/year slugs."""
+        key = "nyc-daily-weather"
+        cached = self._read_cache("series", key)
+        if isinstance(cached, dict) and cached.get("complete") is True:
+            rows = cached.get("rows", [])
+            return [item for item in rows if isinstance(item, dict)]
+        rows: list[dict] = []
+        offset = 0
+        while True:
+            payload = self._transport.get_json(
+                f"{self._gamma_api}/events",
+                {
+                    "series_id": self._NYC_DAILY_WEATHER_SERIES_ID,
+                    "closed": "true",
+                    "limit": self._SERIES_PAGE_SIZE,
+                    "offset": offset,
+                },
+            )
+            page = list(payload) if isinstance(payload, list) else []
+            rows.extend(item for item in page if isinstance(item, dict))
+            if len(page) < self._SERIES_PAGE_SIZE:
+                self._write_cache("series", key, {"complete": True, "rows": rows})
+                return rows
+            offset += self._SERIES_PAGE_SIZE
 
     @staticmethod
     def _normalize_market(event_id: str, market: dict) -> dict | None:
@@ -528,6 +562,53 @@ class HistoricalClobSource:
             )
             .reset_index(drop=True)
         )
+
+
+def _events_by_target_date(events: list[dict]) -> dict[str, list[dict]]:
+    """Index series records by the local day named in their event slug."""
+    indexed: dict[str, list[dict]] = {}
+    for event in events:
+        target_date = _event_target_date(event)
+        if target_date is None:
+            continue
+        indexed.setdefault(target_date, []).append(event)
+    return indexed
+
+
+def _event_target_date(event: dict) -> str | None:
+    """Parse legacy/current event target dates without trusting close time."""
+    slug = str(event.get("slug") or "").lower()
+    match = re.search(
+        r"-on-([a-z]+)-(\d{1,2})(?:-(\d{4}))?(?:-|$)", slug
+    )
+    if match is None:
+        return None
+    month_name, day_text, explicit_year = match.groups()
+    try:
+        month = list(calendar.month_name).index(month_name.capitalize())
+    except ValueError:
+        abbreviations = {
+            name.lower(): index
+            for index, name in enumerate(calendar.month_abbr)
+            if name
+        }
+        month = abbreviations.get(month_name)
+        if month is None:
+            return None
+    end_at = pd.to_datetime(event.get("endDate"), utc=True, errors="coerce")
+    if explicit_year is not None:
+        year = int(explicit_year)
+    elif not pd.isna(end_at):
+        year = int(end_at.year)
+    else:
+        return None
+    try:
+        target = pd.Timestamp(year=year, month=month, day=int(day_text))
+    except ValueError:
+        return None
+    if explicit_year is None and not pd.isna(end_at) and target.date() > end_at.date():
+        target = target - pd.DateOffset(years=1)
+    return target.date().isoformat()
 
 
 def _json_list(value: object) -> list:

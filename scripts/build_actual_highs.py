@@ -23,6 +23,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    print(
+        f"[start] market-resolution actual highs range={args.start}..{args.end} "
+        f"output={args.output}",
+        flush=True,
+    )
     rows: list[dict] = []
     source_hasher = hashlib.sha256()
     for stamp in pd.date_range(args.start, args.end, freq="D"):
@@ -81,9 +86,11 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     print(
-        f"Saved {len(rows)} actual daily highs to {args.output}",
+        f"[complete] market-resolution actual highs rows={len(rows)} "
+        f"output={args.output}",
         flush=True,
     )
+    print(f"[done] market-resolution actual highs output={args.output}", flush=True)
     return 0
 
 

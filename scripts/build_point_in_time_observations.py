@@ -23,6 +23,14 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.output.exists():
+        raise FileExistsError(
+            f"immutable point-in-time observation output exists: {args.output}"
+        )
+    print(
+        f"[start] point-in-time observations output={args.output}",
+        flush=True,
+    )
     frame = pd.concat(
         [pd.read_parquet(path) for path in args.input],
         ignore_index=True,
@@ -65,10 +73,11 @@ def main(argv: list[str] | None = None) -> int:
         },
     )
     print(
-        f"Saved {manifest['row_count']} point-in-time observations "
-        f"to {args.output}",
+        f"[complete] point-in-time observations rows={manifest['row_count']} "
+        f"output={args.output}",
         flush=True,
     )
+    print(f"[done] point-in-time observations output={args.output}", flush=True)
     return 0
 
 

@@ -34,6 +34,8 @@ from events.discovery import EventDiscovery, parse_slug
     ("highest-temperature-in-nyc-on-june-5-2026-81forbelow", (float("-inf"), 82.0)),
     ("highest-temperature-in-nyc-on-june-5-2026-82-83f", (82.0, 84.0)),
     ("highest-temperature-in-nyc-on-june-5-2026-100forhigher", (100.0, float("inf"))),
+    ("will-the-highest-temperature-in-new-york-city-be-between-69-70f-on-may-7", (69.0, 71.0)),
+    ("will-the-highest-temperature-in-new-york-city-be-between-6263f-on-may-14", (62.0, 64.0)),
 ])
 def test_parse_slug(slug, expected):
     result = parse_slug(slug)

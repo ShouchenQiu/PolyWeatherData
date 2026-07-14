@@ -98,6 +98,26 @@ def test_synthetic_quotes_do_not_backfill_or_carry_stale_prices() -> None:
     assert quotes["timestamp"].max() == pd.Timestamp("2026-06-05T12:30:00Z")
 
 
+def test_synthetic_quotes_report_progress_per_condition() -> None:
+    calls: list[tuple[int, int, str, int]] = []
+    trades = pd.concat(
+        [_trades(), _trades().assign(condition_id="c2")], ignore_index=True
+    )
+
+    build_synthetic_quotes(
+        trades,
+        start="2026-06-05T12:05:00Z",
+        end="2026-06-05T12:05:00Z",
+        progress_callback=lambda done, total, condition, rows: calls.append(
+            (done, total, condition, rows)
+        ),
+    )
+
+    assert [(done, total, condition) for done, total, condition, _ in calls] == [
+        (1, 2, "c1"), (2, 2, "c2")
+    ]
+
+
 def test_synthetic_quote_artifact_is_immutable_and_hash_verified(tmp_path) -> None:
     quotes = build_synthetic_quotes(
         _trades(),

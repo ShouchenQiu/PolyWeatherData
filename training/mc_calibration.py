@@ -29,10 +29,13 @@ def local_calendar_day_groups(
     frame: pd.DataFrame,
     station_timezone: str,
 ) -> list[pd.DataFrame]:
-    """Return complete trusted local-calendar-day windows per forecast cycle."""
+    """Return complete right-closed local-day windows used by daily-high MC."""
     work = _validated_frame(frame)
-    local = work["valid_time"].dt.tz_convert(station_timezone)
-    work["target_date"] = local.dt.date.astype(str)
+    work["target_date"] = (
+        (work["valid_time"] - pd.Timedelta(nanoseconds=1))
+        .dt.tz_convert(station_timezone)
+        .dt.date.astype(str)
+    )
     groups: list[pd.DataFrame] = []
     for (_init_time, target_date), group in work.groupby(
         ["init_time", "target_date"],
@@ -44,7 +47,7 @@ def local_calendar_day_groups(
             start,
             end,
             freq="h",
-            inclusive="left",
+            inclusive="right",
         ).tz_convert("UTC")
         actual = pd.DatetimeIndex(group["valid_time"].sort_values().unique())
         if len(actual) != len(expected) or not actual.equals(expected):
@@ -230,6 +233,11 @@ def _validated_frame(frame: pd.DataFrame) -> pd.DataFrame:
     work["valid_time"] = pd.to_datetime(work["valid_time"], utc=True)
     work["fxx"] = work["fxx"].astype(int)
     work = work[work["weight"].astype(float) > 0].copy()
+    extrapolated = work.get(
+        "is_extrapolated",
+        pd.Series(False, index=work.index),
+    ).fillna(False).astype(bool)
+    work = work[~extrapolated].copy()
     if work.empty:
         raise ValueError("MC calibration has no trusted target cells")
     if not work["fxx"].between(1, 48).all():

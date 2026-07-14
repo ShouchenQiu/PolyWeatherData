@@ -83,6 +83,9 @@ def build_signal_panel(validation: StudyValidation) -> pd.DataFrame:
             validation.start_target, validation.end_target
         )
     ].copy()
+    events = events[
+        ~events["target_date"].isin(validation.excluded_target_dates)
+    ].copy()
     event_ids = set(events["event_id"].astype(str))
     markets = validation.clob.markets[
         validation.clob.markets["event_id"].astype(str).isin(event_ids)
@@ -456,6 +459,9 @@ def _run_forecast_signal_study(
             validation.start_target, validation.end_target
         )
     ]
+    requested_events = requested_events[
+        ~requested_events["target_date"].isin(validation.excluded_target_dates)
+    ]
     covered_ids = set(panel["event_id"].astype(str))
     exclusions = [
         {
@@ -471,6 +477,9 @@ def _run_forecast_signal_study(
     )
     report.summary["sample"]["excluded_event_count"] = len(exclusions)
     report.summary["coverage_exclusions"] = exclusions
+    report.summary["market_unavailable_days"] = list(
+        validation.excluded_target_dates
+    )
     return save_signal_study_artifact(
         output,
         study_id=validation.study_id,

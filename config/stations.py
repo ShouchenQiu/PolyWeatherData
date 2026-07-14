@@ -30,6 +30,8 @@ STATIONS: dict[str, StationConfig] = {
         hrrr_grid_col_zarr=1556,
         iem_network="NY_ASOS",
         slug_pattern=r"will-the-high.*lga",
-        slug_aliases=["klga", "new-york-lga", "laguardia", "nyc"],
+        slug_aliases=[
+            "klga", "new-york-lga", "new-york-city", "laguardia", "nyc",
+        ],
     ),
 }

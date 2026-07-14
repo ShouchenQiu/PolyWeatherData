@@ -30,6 +30,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.output.exists():
+        raise FileExistsError(f"immutable synthetic quote output exists: {args.output}")
+    print(
+        f"[start] synthetic quotes clob={args.clob_root} output={args.output}",
+        flush=True,
+    )
     clob = HistoricalClobDataset.load(args.clob_root)
     if clob.trades.empty:
         raise ValueError("historical CLOB artifact has no trades")
@@ -52,6 +58,14 @@ def main(argv: list[str] | None = None) -> int:
         lookback=args.lookback,
         max_staleness=args.max_staleness,
         min_tick_sizes=tick_sizes,
+        progress_callback=lambda completed, total, _condition, rows: (
+            print(
+                f"[progress] synthetic quotes conditions={completed}/{total} rows={rows}",
+                flush=True,
+            )
+            if completed == total or completed % 25 == 0
+            else None
+        ),
     )
     source_sha = hashlib.sha256(
         (args.clob_root / "manifest.json").read_bytes()
@@ -65,10 +79,11 @@ def main(argv: list[str] | None = None) -> int:
         max_staleness=args.max_staleness,
     ).save(args.output, source_sha256=source_sha)
     print(
-        f"Saved {manifest['row_count']} quotes for "
-        f"{manifest['condition_count']} conditions to {args.output}",
+        f"[complete] synthetic quotes rows={manifest['row_count']} "
+        f"conditions={manifest['condition_count']} output={args.output}",
         flush=True,
     )
+    print(f"[done] synthetic quotes output={args.output}", flush=True)
     return 0
 
 

@@ -47,8 +47,13 @@ def test_local_calendar_days_exclude_partial_days_and_respect_timezone() -> None
     local = pd.to_datetime(group["valid_time"], utc=True).dt.tz_convert(
         "America/New_York"
     )
-    assert local.dt.hour.tolist() == list(range(24))
-    assert local.dt.date.nunique() == 1
+    assert local.dt.hour.tolist() == list(range(1, 24)) + [0]
+    assigned_date = (
+        (pd.to_datetime(group["valid_time"], utc=True) - pd.Timedelta(nanoseconds=1))
+        .dt.tz_convert("America/New_York")
+        .dt.date
+    )
+    assert assigned_date.nunique() == 1
 
 
 def test_fit_mc_calibration_produces_dynamic_sigma_correlation(tmp_path) -> None:
@@ -67,6 +72,24 @@ def test_fit_mc_calibration_produces_dynamic_sigma_correlation(tmp_path) -> None
     assert calibration.sigma_scales.shape == (5,)
     assert (calibration.sigma_scales > 1.0).all()
     assert np.isfinite(calibration.max_bias_f)
+
+
+def test_fit_mc_calibration_excludes_extrapolated_tails(tmp_path) -> None:
+    checkpoint = tmp_path / "model.ckpt"
+    checkpoint.write_bytes(b"model")
+    frame = _prediction_frame()
+    frame["is_extrapolated"] = False
+    first_init = frame["init_time"].min()
+    frame.loc[frame["init_time"] == first_init, "is_extrapolated"] = True
+
+    calibration = fit_mc_calibration(
+        frame,
+        checkpoint,
+        station_timezone="UTC",
+        mc_samples=100,
+    )
+
+    assert calibration.sample_count == 79
 
 
 def test_cross_validation_holds_out_each_cycle_once(tmp_path) -> None:
