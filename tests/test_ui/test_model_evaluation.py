@@ -118,6 +118,28 @@ def test_daily_target_summary_collapses_cycles_to_one_row_per_target_day() -> No
     assert summary.loc[0, "mc_p50_f"] == 70.0
 
 
+def test_model_evaluation_exposes_strict_april_only_when_artifact_is_complete(tmp_path) -> None:
+    project = tmp_path / "project"
+    root = (
+        project / "data_store" / "backtest" / "preapril_fixed_epoch_mc"
+        / "KLGA" / "20260401_20260430_v1"
+    )
+    root.mkdir(parents=True)
+
+    options = model_evaluation._default_backtest_evaluations(project)
+    assert "April 2026 strict pre-April MC" not in options
+
+    (root / "report.json").write_text("{}", encoding="ascii")
+    (root / "april_hourly_predictions.parquet").write_bytes(b"artifact")
+    (root / "forecast_cache").mkdir()
+    (root / "forecast_cache" / "manifest.json").write_text("{}", encoding="ascii")
+
+    options = model_evaluation._default_backtest_evaluations(project)
+    april = options["April 2026 strict pre-April MC"]
+    assert april["target_start"] == "2026-04-01"
+    assert april["target_end"] == "2026-04-30"
+
+
 def test_model_performance_table_compares_tft_and_mc_with_their_baselines(
     tmp_path,
 ) -> None:

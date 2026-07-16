@@ -446,6 +446,10 @@ class TftTrainer:
             if limits is not None
             else self._settings.tft_max_epochs
         )
+        fixed_epochs = self._settings.tft_fixed_epochs
+        if fixed_epochs is not None:
+            min_epochs = int(fixed_epochs)
+            max_epochs = int(fixed_epochs)
 
         try:
             import torch
@@ -564,9 +568,12 @@ class TftTrainer:
         split_frames = self._build_split_frames(
             station_id,
             include_test=include_test,
+            include_validation=fixed_epochs is None,
         )
-        df_train, df_val = split_frames[0], split_frames[1]
-        df_test = split_frames[2] if include_test else None
+        df_train = split_frames[0]
+        df_val = split_frames[1] if fixed_epochs is None else None
+        df_test_index = 2 if fixed_epochs is None else 1
+        df_test = split_frames[df_test_index] if include_test else None
 
         # Winsorise training target
         target_winsor = self._settings.tft_target_winsor
@@ -601,8 +608,12 @@ class TftTrainer:
             add_encoder_length      = True,
             allow_missing_timesteps = False,
         )
-        validation = TimeSeriesDataSet.from_dataset(
-            training, df_val,  predict=False, stop_randomization=True
+        validation = (
+            None
+            if fixed_epochs is not None
+            else TimeSeriesDataSet.from_dataset(
+                training, df_val, predict=False, stop_randomization=True
+            )
         )
         testing = (
             TimeSeriesDataSet.from_dataset(
@@ -618,8 +629,12 @@ class TftTrainer:
             num_workers=num_workers,
             shuffle=True,
         )
-        val_loader = validation.to_dataloader(
-            train=False, batch_size=batch_size, num_workers=num_workers
+        val_loader = (
+            None
+            if validation is None
+            else validation.to_dataloader(
+                train=False, batch_size=batch_size, num_workers=num_workers
+            )
         )
         test_loader = (
             testing.to_dataloader(
@@ -651,24 +666,34 @@ class TftTrainer:
         # -- Callbacks -------------------------------------------------------
         ckpt_dir  = self._out_dir / version
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        early_stop = EarlyStopping(
-            monitor   = "val_loss",
-            patience  = self._settings.tft_early_stop_patience,
-            min_delta = 5e-4,
-            mode      = "min",
-            verbose   = True,
-        )
-        checkpoint = ModelCheckpoint(
-            dirpath   = str(ckpt_dir),
-            filename  = "tft_best_{epoch:02d}_{val_loss:.4f}",
-            monitor   = "val_loss",
-            mode      = "min",
-            save_top_k= 1,
-            verbose   = True,
-        )
+        if fixed_epochs is None:
+            early_stop = EarlyStopping(
+                monitor   = "val_loss",
+                patience  = self._settings.tft_early_stop_patience,
+                min_delta = 5e-4,
+                mode      = "min",
+                verbose   = True,
+            )
+            checkpoint = ModelCheckpoint(
+                dirpath   = str(ckpt_dir),
+                filename  = "tft_best_{epoch:02d}_{val_loss:.4f}",
+                monitor   = "val_loss",
+                mode      = "min",
+                save_top_k= 1,
+                verbose   = True,
+            )
+            callbacks = [early_stop, checkpoint]
+        else:
+            checkpoint = ModelCheckpoint(
+                dirpath=str(ckpt_dir),
+                filename="tft_fixed_{epoch:02d}",
+                save_last=True,
+                save_top_k=0,
+                verbose=True,
+            )
+            callbacks = [checkpoint]
 
         # -- Train -----------------------------------------------------------
-        callbacks = [early_stop, checkpoint]
         if progress_reporter is not None:
             callbacks.append(ExecutionProgressCallback())
         gradient_clip_val = (
@@ -699,14 +724,22 @@ class TftTrainer:
         trainer = pl.Trainer(**trainer_kwargs)
         report(phase="fit", epoch=0)
         fit_started = time.monotonic()
-        trainer.fit(tft, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        if val_loader is None:
+            trainer.fit(tft, train_dataloaders=train_loader)
+        else:
+            trainer.fit(tft, train_dataloaders=train_loader, val_dataloaders=val_loader)
         fit_seconds = time.monotonic() - fit_started
 
-        best_ckpt  = Path(checkpoint.best_model_path)
-        best_loss  = float(checkpoint.best_model_score)
-        final_loss = float(
-            trainer.callback_metrics.get("val_loss", best_loss)
-        )
+        if fixed_epochs is None:
+            best_ckpt = Path(checkpoint.best_model_path)
+            best_loss: float | None = float(checkpoint.best_model_score)
+            final_loss: float | None = float(
+                trainer.callback_metrics.get("val_loss", best_loss)
+            )
+        else:
+            best_ckpt = Path(checkpoint.last_model_path)
+            best_loss = None
+            final_loss = None
         epochs_run = trainer.current_epoch
         report(phase="checkpoint_reload", checkpoint_path=str(best_ckpt))
         reloaded = TemporalFusionTransformer.load_from_checkpoint(str(best_ckpt))
@@ -938,11 +971,11 @@ class TftTrainer:
         station_id: str,
         *,
         include_test: bool = True,
+        include_validation: bool = True,
     ) -> tuple[pd.DataFrame, ...]:
-        ranges = [
-            ("train", self._settings.train_start, self._settings.train_end),
-            ("val", self._settings.val_start, self._settings.val_end),
-        ]
+        ranges = [("train", self._settings.train_start, self._settings.train_end)]
+        if include_validation:
+            ranges.append(("val", self._settings.val_start, self._settings.val_end))
         if include_test:
             ranges.append(
                 ("test", self._settings.test_start, self._settings.test_end)
@@ -995,12 +1028,15 @@ class TftTrainer:
             self._init_times(self._settings.train_start, self._settings.train_end),
             split="train",
         )
-        val = self._dataset_builder.build_frame(
-            station,
-            self._init_times(self._settings.val_start, self._settings.val_end),
-            split="val",
-        )
-        frames = [train, val]
+        frames = [train]
+        if include_validation:
+            frames.append(
+                self._dataset_builder.build_frame(
+                    station,
+                    self._init_times(self._settings.val_start, self._settings.val_end),
+                    split="val",
+                )
+            )
         if include_test:
             frames.append(
                 self._dataset_builder.build_frame(

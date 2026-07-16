@@ -51,6 +51,7 @@ class TrainerConfig:
     num_workers: int = 0
     early_stop_patience: int = 2
     gradient_clip_val: float = 0.1
+    fixed_epochs: int | None = None
 
 
 @dataclass(frozen=True)
@@ -629,6 +630,8 @@ def _validate_common_config(
         raise ValueError("encoder and prediction lengths must be positive")
     if trainer.min_epochs < 0 or trainer.max_epochs < trainer.min_epochs:
         raise ValueError("trainer epoch bounds are invalid")
+    if trainer.fixed_epochs is not None and trainer.fixed_epochs <= 0:
+        raise ValueError("trainer.fixed_epochs must be positive when provided")
     if trainer.batch_size <= 0:
         raise ValueError("trainer.batch_size must be positive")
     if trainer.num_workers < 0 or trainer.gradient_clip_val < 0:
@@ -654,3 +657,4 @@ def _apply_to_settings(config: Any, settings: Any) -> None:
     settings.tft_max_epochs = config.trainer.max_epochs
     settings.tft_batch_size = config.trainer.batch_size
     settings.tft_early_stop_patience = config.trainer.early_stop_patience
+    settings.tft_fixed_epochs = config.trainer.fixed_epochs

@@ -118,8 +118,10 @@ class FakeTrainer:
 class FakeCheckpoint:
     def __init__(self, dirpath, *args, **kwargs):
         self.best_model_path = str(Path(dirpath) / "best.ckpt")
+        self.last_model_path = str(Path(dirpath) / "last.ckpt")
         self.best_model_score = 0.25
         Path(self.best_model_path).write_text("fake", encoding="ascii")
+        Path(self.last_model_path).write_text("fake", encoding="ascii")
 
 
 def _install_training_fakes(monkeypatch):
@@ -973,3 +975,28 @@ def test_tft_trainer_uses_experiment_config_and_publishes_contract(tmp_path, mon
     assert contract["quantiles"] == [0.1, 0.5, 0.9]
     artifact_names = {path.name for path in registry.publish_kwargs["extra_artifacts"]}
     assert {"experiment_config.json", "model_contract.json"} <= artifact_names
+
+
+def test_fixed_epoch_training_does_not_read_or_select_on_validation_data(
+    tmp_path, monkeypatch
+):
+    _install_training_fakes(monkeypatch)
+    settings = Settings(data_store_dir=tmp_path / "data", tft_fixed_epochs=3)
+    builder = FakeBuilder()
+    trainer = TftTrainer(
+        store=None,
+        registry=FakeRegistry(),
+        output_dir=tmp_path / "checkpoints",
+        settings=settings,
+        dataset_builder=builder,
+        station_config=STATIONS["KLGA"],
+    )
+
+    result = trainer.run_validation(station_id="KLGA", execution_id="fixed")
+
+    assert [call[3] for call in builder.calls] == ["train"]
+    assert FakeTrainer.kwargs["min_epochs"] == 3
+    assert FakeTrainer.kwargs["max_epochs"] == 3
+    assert len(FakeTrainer.kwargs["callbacks"]) == 1
+    assert result["checkpoint_path"].endswith("last.ckpt")
+    assert result["best_val_loss"] is None

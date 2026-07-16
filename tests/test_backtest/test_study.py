@@ -8,7 +8,12 @@ import pandas as pd
 import pytest
 
 from backtest.forecast_cache import ForecastCache
-from backtest.study import BacktestStudy, StudyInputs, validate_study_inputs
+from backtest.study import (
+    BacktestStudy,
+    StudyInputs,
+    validate_signal_inputs,
+    validate_study_inputs,
+)
 from backtest.synthetic_quotes import SyntheticQuoteDataset
 from data.clob.history import HistoricalClobDataset
 from data.clob.quality import audit_historical_clob
@@ -246,6 +251,21 @@ def test_development_study_rejects_model_test_forecasts(tmp_path) -> None:
             inputs=inputs,
             strategy={"min_edge": 0.04, "risk_usd": 50.0},
         )
+
+
+def test_signal_validation_allows_model_test_without_enabling_trading(tmp_path) -> None:
+    inputs = _study_inputs(tmp_path, split_role="model_test")
+
+    validated = validate_signal_inputs(
+        study_id="frozen-model-test-diagnostic",
+        station_id="KLGA",
+        start_target="2026-04-01",
+        end_target="2026-04-01",
+        inputs=inputs,
+        expected_split_role="model_test",
+    )
+
+    assert validated.split_role == "model_test"
 
 
 def test_holdout_requires_freeze_and_can_only_be_consumed_once(tmp_path) -> None:

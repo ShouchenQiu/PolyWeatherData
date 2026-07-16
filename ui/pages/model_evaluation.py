@@ -51,12 +51,13 @@ def render(
     prefer_may = (runs_root is None) if use_may_backtest is None else use_may_backtest
     data: EvaluationData | None = None
     if prefer_may:
-        try:
-            data = load_backtest_model_evaluation(
-                **_default_may_backtest_inputs(settings.project_root)
-            )
-        except (OSError, ValueError, KeyError, FileNotFoundError):
-            data = None
+        options = _default_backtest_evaluations(settings.project_root)
+        if options:
+            selected = st.selectbox("Backtest evaluation", list(options))
+            try:
+                data = load_backtest_model_evaluation(**options[selected])
+            except (OSError, ValueError, KeyError, FileNotFoundError):
+                data = None
 
     artifacts = discover_evaluations(root)
     if data is None and not artifacts:
@@ -75,8 +76,8 @@ def render(
             return
     else:
         st.caption(
-            "Showing KLGA May 2026 model_test backtest predictions by default: "
-            "fixed hourly TFT outputs plus MC daily-high snapshots."
+            f"Showing {data.artifact.run_id}: fixed hourly TFT outputs plus "
+            "point-in-time MC daily-high snapshots."
         )
 
     signal_data = load_signal_evaluation(
@@ -164,6 +165,34 @@ def _default_may_backtest_inputs(project_root: Path) -> dict[str, object]:
             / "20260401_20260604.csv"
         ),
     }
+
+
+def _default_backtest_evaluations(project_root: Path) -> dict[str, dict[str, object]]:
+    """Expose strict April evidence only after its complete immutable artifact exists."""
+    options = {"May 2026 model-test MC": _default_may_backtest_inputs(project_root)}
+    root = (
+        project_root / "data_store" / "backtest" / "preapril_fixed_epoch_mc"
+        / "KLGA" / "20260401_20260430_v1"
+    )
+    required = {
+        root / "report.json",
+        root / "april_hourly_predictions.parquet",
+        root / "forecast_cache" / "manifest.json",
+    }
+    if required <= set(root.rglob("*")):
+        options["April 2026 strict pre-April MC"] = {
+            "prediction_paths": (root / "april_hourly_predictions.parquet",),
+            "forecast_root": root / "forecast_cache",
+            "actuals_path": (
+                project_root / "data_store" / "backtest" / "actuals" / "KLGA"
+                / "20260401_20260604.csv"
+            ),
+            "run_id": "KLGA April 2026 strict pre-April MC",
+            "version": "train through 2026-02-28; March frozen MC calibration",
+            "target_start": "2026-04-01",
+            "target_end": "2026-04-30",
+        }
+    return options
 
 
 def _overview(data: EvaluationData) -> None:

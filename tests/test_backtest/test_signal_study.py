@@ -11,9 +11,10 @@ from backtest.signal_study import (
     build_signal_panel,
     load_signal_study_artifact,
     run_forecast_signal_study,
+    run_forecast_signal_validation_study,
     score_signal_panel,
 )
-from backtest.study import BacktestStudy
+from backtest.study import BacktestStudy, validate_signal_inputs
 from backtest.synthetic_quotes import SyntheticQuoteDataset
 from tests.test_backtest.test_study import _study_inputs
 
@@ -87,6 +88,31 @@ def test_signal_panel_requires_complete_vectors_and_normalizes_midpoints(
         "low", "midpoint_probability"
     ] == pytest.approx(0.4 / 1.1)
     assert panel["yes_outcome"].sum() == 1.0
+
+
+def test_signal_validation_study_accepts_frozen_model_test(tmp_path, monkeypatch) -> None:
+    validation = validate_signal_inputs(
+        study_id="frozen-model-test",
+        station_id="KLGA",
+        start_target="2026-04-01",
+        end_target="2026-04-01",
+        inputs=_study_inputs(tmp_path, split_role="model_test"),
+        expected_split_role="model_test",
+    )
+
+    expected = {"split_role": "model_test"}
+    monkeypatch.setattr(
+        "backtest.signal_study._run_forecast_signal_study",
+        lambda actual, **kwargs: expected if actual is validation else None,
+    )
+
+    manifest = run_forecast_signal_validation_study(
+        validation,
+        output=tmp_path / "model-test-signal",
+        bootstrap_samples=20,
+    )
+
+    assert manifest["split_role"] == "model_test"
 
 
 def _metric_panel(

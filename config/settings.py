@@ -118,6 +118,8 @@ class Settings:
     tft_max_epochs: int = 20
     tft_min_epochs: int = 5
     tft_early_stop_patience: int = 2
+    # When set, train exactly this many epochs without validation-based selection.
+    tft_fixed_epochs: int | None = None
     tft_target_winsor: float = 8.0
     tft_max_encoder_length: int = 72
     tft_max_prediction_length: int = 48
