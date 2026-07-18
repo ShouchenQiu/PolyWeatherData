@@ -12,12 +12,14 @@ from config.settings import Settings
 from ui.model_evaluation import (
     DailyHighPmfPilotData,
     EvaluationData,
+    PeakUnionDiagnosticsData,
     SignalEvaluationData,
     daily_target_summary,
     discover_evaluations,
     evaluation_metrics,
     load_backtest_model_evaluation,
     load_daily_high_pmf_pilot,
+    load_peak_union_diagnostics,
     load_signal_evaluation,
     horizon_metrics,
     load_evaluation,
@@ -100,6 +102,15 @@ def render(
             )
         except (OSError, ValueError, KeyError):
             pmf_pilot = None
+    peak_union: PeakUnionDiagnosticsData | None = None
+    if runs_root is None:
+        try:
+            peak_union = load_peak_union_diagnostics(
+                settings.project_root / "data_store" / "backtest"
+                / "peak_union_diagnostics" / "KLGA" / "checkpoint_aligned_v1"
+            )
+        except (OSError, ValueError, KeyError, FileNotFoundError):
+            peak_union = None
 
     tab_labels = [
         "Overview",
@@ -111,6 +122,8 @@ def render(
         tab_labels.append("May Model-Test Signal")
     if pmf_pilot is not None:
         tab_labels.append("Daily High PMF Pilot")
+    if peak_union is not None:
+        tab_labels.append("Peak & Union Diagnostics")
     tabs = st.tabs(tab_labels)
     with tabs[0]:
         _overview(data)
@@ -128,6 +141,10 @@ def render(
     if pmf_pilot is not None:
         with tabs[next_tab]:
             _pmf_pilot(pmf_pilot)
+        next_tab += 1
+    if peak_union is not None:
+        with tabs[next_tab]:
+            _peak_union(peak_union)
 
 
 def _default_may_signal_roots(project_root: Path) -> tuple[Path, ...]:
@@ -723,6 +740,28 @@ def _event_distribution(panel: pd.DataFrame, event_id: str) -> None:
                 line_color=COLORS["Actual"],
             )
         st.plotly_chart(figure, width="stretch")
+
+
+def _peak_union(data: PeakUnionDiagnosticsData) -> None:
+    st.subheader("Peak-State And Contiguous-Union Diagnostics")
+    st.caption("Static MC versus normalized synthetic midpoint. Descriptive only; no trading rule is selected here.")
+    summary = data.report.get("union_summary", {})
+    paired = summary.get("paired", {}) if isinstance(summary, dict) else {}
+    columns = st.columns(3)
+    columns[0].metric("Snapshots", data.report.get("counts", {}).get("snapshots", 0))
+    columns[1].metric("Union rows", data.report.get("counts", {}).get("union_scores", 0))
+    brier = paired.get("brier_delta", {}) if isinstance(paired, dict) else {}
+    columns[2].metric("Union Brier delta", f"{brier.get('model_minus_midpoint', float('nan')):+.4f}")
+    if not data.peak_outcomes.empty:
+        cols = [column for column in (
+            "target_date", "coverage_type", "tft_peak_interval_width_f",
+            "tft_peak_margin_f", "tft_hrrr_peak_gap_f", "normalized_rps",
+            "p50_abs_error_f", "coverage80", "tft_peak_time_error_h",
+        ) if column in data.peak_outcomes]
+        st.dataframe(data.peak_outcomes[cols].sort_values("target_date").round(3), width="stretch", hide_index=True)
+    if not data.union_strata.empty:
+        st.subheader("Union Proper Scores")
+        st.dataframe(data.union_strata.round(5), width="stretch", hide_index=True)
 
 
 def _bucket_label(row: pd.Series) -> str:

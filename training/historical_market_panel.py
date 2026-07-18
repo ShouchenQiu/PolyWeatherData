@@ -17,6 +17,7 @@ from training.backtest_forecast_generation import (
     partial_bias_sha256,
 )
 from training.historical_crossfit import load_historical_crossfit_predictions
+from training.historical_crossfit import historical_six_fold_plan
 from training.mc_attribution import historical_attribution_folds
 from training.mc_calibration import fit_mc_calibration
 
@@ -48,10 +49,19 @@ def build_checkpoint_aligned_historical_market_panel_cache(
     root = Path(crossfit_root)
     tune_root = Path(tune_predictions_root)
     all_predictions = load_historical_crossfit_predictions(root)
+    folds_by_id = {fold.fold_id: fold for fold in historical_six_fold_plan().folds}
     caches: list[ForecastCache] = []
     audits: list[dict[str, object]] = []
     for fold_id in sorted(all_predictions["fold_id"].unique()):
-        evaluation = all_predictions[all_predictions["fold_id"] == fold_id].copy()
+        if str(fold_id) not in folds_by_id:
+            raise ValueError(f"cross-fit fold is absent from the fixed plan: {fold_id}")
+        evaluation = filter_evaluation_prediction_window(
+            all_predictions[all_predictions["fold_id"] == fold_id],
+            predict=folds_by_id[str(fold_id)].predict,
+            station_timezone=station_timezone,
+        )
+        if evaluation.empty:
+            raise ValueError(f"evaluation prediction window is empty: {fold_id}")
         checkpoint = _fold_checkpoint(root, str(fold_id))
         tuning = _load_checkpoint_aligned_tune_predictions(
             root=root,
@@ -87,7 +97,7 @@ def build_checkpoint_aligned_historical_market_panel_cache(
             "init_time": sorted(evaluation["init_time"].unique()),
             "lineage_id": lineage_id,
         })
-        target_dates = _target_dates(evaluation, station_timezone)
+        target_dates = _strict_target_dates(evaluation, station_timezone)
         cache = build_forecast_cache(
             hourly_predictions=evaluation,
             observations=observations,
@@ -195,7 +205,7 @@ def build_historical_market_panel_cache(
                 "lineage_id": lineage_id,
             }
         )
-        target_dates = _target_dates(evaluation, station_timezone)
+        target_dates = _strict_target_dates(evaluation, station_timezone)
         cache = build_forecast_cache(
             hourly_predictions=evaluation,
             observations=observations,
@@ -297,6 +307,31 @@ def _right_closed_target_dates(frame: pd.DataFrame, timezone: str) -> pd.Series:
         .dt.tz_convert(timezone)
         .dt.date.astype(str)
     )
+
+
+def filter_evaluation_prediction_window(
+    frame: pd.DataFrame,
+    *,
+    predict: tuple[str, str],
+    station_timezone: str,
+) -> pd.DataFrame:
+    """Keep only hourly cells belonging to a fold's declared local dates.
+
+    Cross-fit prediction files can include the first hour of the following
+    local day.  Letting that tail into ForecastCache creates an undeclared
+    target day, then later PIT candidate reconstruction cannot legitimately
+    find its full 24-hour forecast.
+    """
+    dates = _right_closed_target_dates(frame, station_timezone)
+    return frame.loc[dates.between(*predict)].copy()
+
+
+def _strict_target_dates(frame: pd.DataFrame, timezone: str) -> list[str]:
+    """Return local target days using the same right-closed contract as folds."""
+    dates = sorted(_right_closed_target_dates(frame, timezone).unique().tolist())
+    if not dates:
+        raise ValueError("evaluation predictions have no strict target dates")
+    return dates
 
 
 def _sha256(path: Path) -> str:

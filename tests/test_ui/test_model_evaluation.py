@@ -12,6 +12,7 @@ from model.mc_calibration import McCalibration
 from ui.model_evaluation import (
     daily_target_summary,
     load_daily_high_pmf_pilot,
+    load_peak_union_diagnostics,
     discover_evaluations,
     evaluation_metrics,
     load_evaluation,
@@ -186,6 +187,31 @@ def test_load_daily_high_pmf_pilot_requires_unconsumed_june_and_tables(tmp_path)
 
     assert pilot.report["gates"]["eligible_for_cross_fit_goal"] is False
     assert pilot.may_summary.iloc[0]["candidate_rps"] == 0.3
+
+
+def test_load_peak_union_diagnostics_requires_complete_hashed_artifact(tmp_path) -> None:
+    root = tmp_path / "peak-union"
+    root.mkdir()
+    payloads = {
+        "snapshot_diagnostics.parquet": pd.DataFrame([{"snapshot_id": "s1"}]),
+        "peak_outcomes.parquet": pd.DataFrame([{"snapshot_id": "s1"}]),
+        "union_scores.parquet": pd.DataFrame([{"snapshot_id": "s1", "brier_delta": -0.01}]),
+        "union_strata.parquet": pd.DataFrame([{"union_width": 1}]),
+    }
+    import hashlib
+    hashes = {}
+    for name, frame in payloads.items():
+        path = root / name
+        frame.to_parquet(path, index=False)
+        hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    report = root / "report.json"
+    report.write_text(json.dumps({"schema_version": 1, "scope": "normalized_synthetic_midpoint_only"}), encoding="ascii")
+    hashes[report.name] = hashlib.sha256(report.read_bytes()).hexdigest()
+    (root / "manifest.json").write_text(json.dumps({"schema_version": 1, "data_class": "peak_union_diagnostics", "sha256": hashes}), encoding="ascii")
+
+    diagnostic = load_peak_union_diagnostics(root)
+
+    assert diagnostic.union_scores.iloc[0]["brier_delta"] == pytest.approx(-0.01)
 
 
 def test_model_evaluation_page_renders_complete_artifacts(tmp_path) -> None:

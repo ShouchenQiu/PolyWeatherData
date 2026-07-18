@@ -45,6 +45,48 @@ class DailyHighPmfPilotData:
     may_scores: pd.DataFrame
 
 
+@dataclass(frozen=True)
+class PeakUnionDiagnosticsData:
+    root: Path
+    report: dict[str, object]
+    snapshot_diagnostics: pd.DataFrame
+    peak_outcomes: pd.DataFrame
+    union_scores: pd.DataFrame
+    union_strata: pd.DataFrame
+
+
+def load_peak_union_diagnostics(root: Path | str) -> PeakUnionDiagnosticsData:
+    """Load a complete peak/union diagnostic artifact after hash validation."""
+    path = Path(root)
+    manifest = json.loads((path / "manifest.json").read_text(encoding="ascii"))
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("data_class") != "peak_union_diagnostics"
+    ):
+        raise ValueError("unsupported peak/union diagnostics manifest")
+    expected = {
+        "snapshot_diagnostics.parquet", "peak_outcomes.parquet",
+        "union_scores.parquet", "union_strata.parquet", "report.json",
+    }
+    hashes = manifest.get("sha256", {})
+    if set(hashes) != expected:
+        raise ValueError("peak/union diagnostics manifest is incomplete")
+    for name, value in hashes.items():
+        import hashlib
+        if hashlib.sha256((path / name).read_bytes()).hexdigest() != value:
+            raise ValueError(f"peak/union diagnostics checksum mismatch: {name}")
+    report = json.loads((path / "report.json").read_text(encoding="ascii"))
+    if report.get("scope") != "normalized_synthetic_midpoint_only":
+        raise ValueError("peak/union diagnostics has an unsupported benchmark scope")
+    return PeakUnionDiagnosticsData(
+        root=path, report=report,
+        snapshot_diagnostics=pd.read_parquet(path / "snapshot_diagnostics.parquet"),
+        peak_outcomes=pd.read_parquet(path / "peak_outcomes.parquet"),
+        union_scores=pd.read_parquet(path / "union_scores.parquet"),
+        union_strata=pd.read_parquet(path / "union_strata.parquet"),
+    )
+
+
 def load_daily_high_pmf_pilot(root: Path | str) -> DailyHighPmfPilotData:
     """Load read-only PMF pilot evidence; June must remain unconsumed."""
     path = Path(root)

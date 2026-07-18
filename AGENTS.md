@@ -44,3 +44,41 @@ Do not create, continue, update, or complete a Goal unless the user explicitly
 asks to use Goal form or Goal execution. Normal implementation work should use
 the relevant skills, such as TDD, without a Goal. This prevents autonomous Goal
 continuations from conflicting with a long-running command the user is running.
+
+## Experimental Analysis Closure
+
+For every analysis, diagnostic, ablation, or modelling plan, Codex must retain
+the concrete questions and mechanism hypotheses stated when the plan was
+approved. Completion analysis must answer each item explicitly, not merely
+summarize aggregate metrics.
+
+- Report every original question as **supported**, **contradicted**,
+  **inconclusive**, or **not measured**, with the relevant artifact,
+  stratum/fold evidence, and any sample-size or data-contract limitation.
+- Do not infer a cross-fold mechanism from one month, one fold, a descriptive
+  aggregate, or a state feature that is constant or unavailable in the panel.
+- Separate what the completed experiment establishes from follow-up work still
+  required to answer an original question. Name missing data or implementation
+  explicitly when a diagnostic was not measured.
+- Before proposing the next experiment, use this question-by-question ledger
+  to state which uncertainty it resolves and why it is necessary.
+
+## Experiment Intent Before Execution
+
+Before implementing or running a costly experiment, Codex must write a compact
+decision ledger from the approved plan: the original decision question, the
+required estimand, the data regime, and the artifact that will answer it.
+
+- Do not substitute a stricter, adjacent, or easier estimand for the requested
+  one.  In particular, an oracle ceiling, a frozen deployment estimate, and a
+  descriptive ablation are different deliverables and must be named and
+  reported separately.
+- If an experiment needs both an oracle ceiling and a deployment estimate,
+  implement and report the ceiling first unless the user explicitly orders the
+  reverse.  Do not declare the experiment complete when either required answer
+  is missing.
+- Before requesting a long run, verify that the runner can produce every
+  promised decision artifact.  A probe may validate mechanics, but cannot be
+  presented as an answer to an unmeasured estimand.
+- At completion, begin with the original decision questions and their answers;
+  aggregate metrics and implementation detail are supporting evidence only.
