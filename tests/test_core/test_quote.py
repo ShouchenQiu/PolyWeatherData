@@ -6,6 +6,7 @@ from core.pricing.quote import (
     Quote,
     compute_book_metrics,
     compute_quote,
+    compute_quote_for_shares,
 )
 from config.settings import Settings
 
@@ -79,6 +80,23 @@ def test_compute_quote_buy_multi_level_slippage() -> None:
     assert q.slippage_bps == pytest.approx(
         (q.vwap_price - 0.60) / 0.60 * 10_000, rel=1e-3
     )
+
+
+def test_compute_quote_for_shares_walks_depth_to_equal_share_target() -> None:
+    book = {
+        "bids": [],
+        "asks": [
+            {"price": 0.40, "size": 10.0},
+            {"price": 0.50, "size": 20.0},
+        ],
+    }
+
+    quote = compute_quote_for_shares(book, "BUY", 25.0)
+
+    assert quote.complete_fill is True
+    assert quote.filled_shares == pytest.approx(25.0)
+    assert quote.max_fillable_usd == pytest.approx(11.5)
+    assert quote.vwap_price == pytest.approx(0.46)
 
 
 def test_compute_quote_buy_insufficient_depth() -> None:

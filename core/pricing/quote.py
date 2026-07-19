@@ -192,3 +192,71 @@ def compute_quote(book: NormalizedBook, side: str, size_usd: float) -> Quote:
         mid_price=mid_price,
         complete_fill=complete_fill,
     )
+
+
+def compute_quote_for_shares(
+    book: NormalizedBook,
+    side: str,
+    target_shares: float,
+) -> Quote:
+    """Walk L2 depth to a target share quantity.
+
+    This is the share-denominated companion to :func:`compute_quote`.  It is
+    useful for multi-leg contracts whose payout requires equal quantities on
+    every leg.  ``max_fillable_usd`` remains the notional consumed by the
+    returned fill so callers can use the existing ``Quote`` contract.
+    """
+    side = side.upper()
+    if side not in ("BUY", "SELL"):
+        raise ValueError(f"side must be 'BUY' or 'SELL', got {side!r}")
+    if target_shares <= 0:
+        raise ValueError(
+            f"target_shares must be positive, got {target_shares!r}"
+        )
+
+    bids: list[dict] = sorted(
+        book.get("bids", []),
+        key=lambda level: float(level["price"]),
+        reverse=True,
+    )
+    asks: list[dict] = sorted(
+        book.get("asks", []),
+        key=lambda level: float(level["price"]),
+    )
+    metrics = compute_book_metrics(book)
+    levels = asks if side == "BUY" else bids
+    remaining = float(target_shares)
+    filled_shares = 0.0
+    total_cost = 0.0
+    for level in levels:
+        price = float(level["price"])
+        available = max(0.0, float(level["size"]))
+        shares_taken = min(remaining, available)
+        filled_shares += shares_taken
+        total_cost += shares_taken * price
+        remaining -= shares_taken
+        if remaining <= 1e-9:
+            break
+
+    complete_fill = remaining <= 1e-9
+    vwap_price = total_cost / filled_shares if filled_shares > 0 else 0.0
+    if side == "BUY" and metrics.best_ask is not None and filled_shares > 0:
+        slippage_bps = (
+            (vwap_price - metrics.best_ask) / metrics.best_ask * 10_000.0
+        )
+    elif side == "SELL" and metrics.best_bid is not None and filled_shares > 0:
+        slippage_bps = (
+            (metrics.best_bid - vwap_price) / metrics.best_bid * 10_000.0
+        )
+    else:
+        slippage_bps = 0.0
+    return Quote(
+        vwap_price=vwap_price,
+        max_fillable_usd=total_cost,
+        filled_shares=filled_shares,
+        slippage_bps=slippage_bps,
+        best_bid=metrics.best_bid,
+        best_ask=metrics.best_ask,
+        mid_price=metrics.mid_price,
+        complete_fill=complete_fill,
+    )
