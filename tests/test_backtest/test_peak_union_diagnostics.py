@@ -69,6 +69,7 @@ def test_peak_diagnostics_excludes_future_observations_and_uses_target_day_slots
     row = result.iloc[0]
     assert row["observed_high_f"] == pytest.approx(53.6)
     assert row["tft_peak_f"] == pytest.approx(55.4)
+    assert row["tft_peak_margin_f"] == pytest.approx(3.6)
     assert row["tft_peak_interval_width_f"] == pytest.approx(14.4)
     assert row["observed_future_peak_gap_f"] == pytest.approx(-1.8)
 
