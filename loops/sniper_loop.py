@@ -287,12 +287,23 @@ class SniperLoop:
                     continue
 
                 price = sized.vwap_price
+                limit_price = float(
+                    sized.limit_price
+                    if sized.limit_price is not None
+                    else price
+                )
 
                 logger.info(
                     "SniperLoop: placing BUY {} token {} @ {:.3f} size={:.2f}",
                     outcome_key, token_id, price, size,
                 )
-                order_id = self.exchange.place_order(token_id, "BUY", size, price)
+                order_id = self.exchange.place_order(
+                    token_id,
+                    "BUY",
+                    size,
+                    limit_price,
+                    shares=sized.filled_shares,
+                )
                 if not order_id:
                     logger.error(
                         "SniperLoop: empty order_id for token {}; order not recorded",
@@ -305,7 +316,7 @@ class SniperLoop:
                     condition_id     = condition_id,
                     side             = "BUY",
                     size_usd         = size,
-                    price            = price,
+                    price            = limit_price,
                     is_paper         = self._is_paper,
                     executable_price = price,
                 )

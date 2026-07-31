@@ -1328,12 +1328,13 @@ def test_tick_paper_order_recorded_with_is_paper_and_executable_price(db) -> Non
     assert len(result) == 1
 
     row = db._conn.execute(
-        "SELECT is_paper, executable_price, status, fill_price, filled_shares"
+        "SELECT price, is_paper, executable_price, status, fill_price, filled_shares"
         " FROM orders WHERE order_id=?",
         (result[0],),
     ).fetchone()
     assert row is not None
     assert row["is_paper"]         == 1
+    assert row["price"]            == pytest.approx(expected_quote.limit_price)
     assert row["status"]           == "filled"
     assert row["executable_price"] == pytest.approx(expected_vwap, rel=1e-6)
     assert row["fill_price"]       == pytest.approx(expected_vwap, rel=1e-6)

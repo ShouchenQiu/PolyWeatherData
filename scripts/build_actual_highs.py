@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from config.stations import STATIONS
+from data.obs.weather_com import local_day_hour_coverage
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -47,6 +48,18 @@ def main(argv: list[str] | None = None) -> int:
         frame = pd.read_parquet(path)
         if "weather_com_temp_f" not in frame:
             raise ValueError(f"truth file missing weather_com_temp_f: {path}")
+        observed_hours, expected_hours = local_day_hour_coverage(
+            frame,
+            local_date=target_date,
+            timezone=STATIONS[args.station].timezone,
+        )
+        if observed_hours != expected_hours:
+            raise ValueError(
+                "incomplete Weather.com local day "
+                f"station={args.station} date={target_date} "
+                f"observed_hours={observed_hours} expected_hours={expected_hours}: "
+                f"{path}"
+            )
         temperatures = pd.to_numeric(
             frame["weather_com_temp_f"],
             errors="coerce",
@@ -69,8 +82,9 @@ def main(argv: list[str] | None = None) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(args.output, index=False)
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "data_class": "market_resolution_actual_highs",
+        "hour_coverage_contract": "complete_station_local_day",
         "station_id": args.station,
         "requested_range": [args.start, args.end],
         "row_count": len(rows),

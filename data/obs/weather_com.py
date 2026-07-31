@@ -8,6 +8,8 @@ from typing import Any
 import pandas as pd
 import requests
 
+from config.stations import STATIONS
+
 DEFAULT_WEATHER_COM_API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
 _ALIGNMENT_VERSION = "iem_representative_hour_v2"
 
@@ -18,6 +20,38 @@ class WeatherComApiKeyMissing(RuntimeError):
 
 class WeatherComFetchError(RuntimeError):
     """Raised when Weather.com cannot return a usable response."""
+
+
+def local_day_hour_coverage(
+    frame: pd.DataFrame,
+    *,
+    local_date: str | pd.Timestamp,
+    timezone: str,
+) -> tuple[int, int]:
+    """Return observed and expected hourly slots for one station-local day."""
+    day = pd.Timestamp(local_date).date().isoformat()
+    start_naive = pd.Timestamp(day)
+    end_naive = start_naive + pd.Timedelta(days=1)
+    start_utc = start_naive.tz_localize(timezone).tz_convert("UTC")
+    end_utc = end_naive.tz_localize(timezone).tz_convert("UTC")
+    expected_hours = int((end_utc - start_utc) / pd.Timedelta(hours=1))
+    if "valid_time" not in frame.columns:
+        return 0, expected_hours
+    valid_time = pd.to_datetime(frame["valid_time"], utc=True, errors="coerce")
+    in_day = valid_time.notna() & (valid_time >= start_utc) & (valid_time < end_utc)
+    if "valid_hour" in frame.columns:
+        hourly_slots = pd.to_datetime(
+            frame.loc[in_day, "valid_hour"], utc=True, errors="coerce"
+        )
+    else:
+        hourly_slots = valid_time.loc[in_day].dt.round("h")
+    expected_slots = pd.date_range(
+        start_utc + pd.Timedelta(hours=1),
+        end_utc,
+        freq="h",
+    )
+    observed_slots = set(hourly_slots.dropna().tolist())
+    return len(observed_slots.intersection(expected_slots)), expected_hours
 
 
 class WeatherComTruthClient:
@@ -52,10 +86,19 @@ class WeatherComTruthClient:
     def fetch_date(self, station_id: str, local_date: str | pd.Timestamp) -> pd.DataFrame:
         """Return normalized truth rows for one station-local date."""
         day = pd.Timestamp(local_date).date().isoformat()
+        timezone = STATIONS[station_id].timezone
         path = self._cache_path(station_id, day)
         if path.exists():
             cached = self._read_cache(path)
-            if self._cache_is_current(cached) or not self._api_key:
+            observed, expected = local_day_hour_coverage(
+                cached,
+                local_date=day,
+                timezone=timezone,
+            )
+            if (
+                observed == expected
+                and (self._cache_is_current(cached) or not self._api_key)
+            ):
                 return self._public_columns(cached)
 
         if not self._api_key:
@@ -65,12 +108,15 @@ class WeatherComTruthClient:
 
         location = self.location_code(station_id)
         date_param = day.replace("-", "")
+        next_date_param = (
+            pd.Timestamp(day) + pd.Timedelta(days=1)
+        ).strftime("%Y%m%d")
         url = self._BASE_URL.format(location=location)
         params = {
             "apiKey": self._api_key,
             "units": "e",
             "startDate": date_param,
-            "endDate": date_param,
+            "endDate": next_date_param,
         }
         try:
             response = self._session.get(url, params=params, timeout=self._timeout)
@@ -82,6 +128,18 @@ class WeatherComTruthClient:
             ) from exc
 
         frame = self._normalize(station_id, payload)
+        frame = self._filter_local_day(frame, day=day, timezone=timezone)
+        observed, expected = local_day_hour_coverage(
+            frame,
+            local_date=day,
+            timezone=timezone,
+        )
+        if observed != expected:
+            raise WeatherComFetchError(
+                "Weather.com returned an incomplete local day "
+                f"station={station_id} date={day} "
+                f"observed_hours={observed} expected_hours={expected}"
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
         frame.to_parquet(path, index=False)
         return self._public_columns(frame)
@@ -174,6 +232,19 @@ class WeatherComTruthClient:
             .drop(columns=["_representative_distance_s"])
             .reset_index(drop=True)
         )
+
+    @staticmethod
+    def _filter_local_day(
+        frame: pd.DataFrame,
+        *,
+        day: str,
+        timezone: str,
+    ) -> pd.DataFrame:
+        if frame.empty:
+            return frame
+        valid_time = pd.to_datetime(frame["valid_time"], utc=True)
+        local_day = valid_time.dt.tz_convert(timezone).dt.date.astype(str)
+        return frame.loc[local_day == day].reset_index(drop=True)
 
     @staticmethod
     def _cache_is_current(frame: pd.DataFrame) -> bool:

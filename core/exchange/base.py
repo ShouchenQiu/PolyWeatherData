@@ -43,6 +43,7 @@ class BaseExchange(ABC):
         side:     str,
         size_usd: float,
         price:    float,
+        shares:   float | None = None,
     ) -> str:
         """Submit an order and return the exchange order ID.
 
@@ -56,6 +57,9 @@ class BaseExchange(ABC):
             Nominal USDC amount.
         price:
             Limit price (0..1, binary market convention).
+        shares:
+            Exact target shares when already resolved from an L2 depth walk.
+            When omitted, adapters may retain their legacy size conversion.
 
         Returns
         -------

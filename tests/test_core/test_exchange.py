@@ -175,6 +175,35 @@ def test_clob_exchange_place_order_calls_place_limit_order():
     assert placed[0]["side"] == "BUY"
 
 
+def test_clob_exchange_uses_target_shares_independently_of_limit_price():
+    """A multi-level VWAP quote submits shares at its marginal limit price."""
+    from types import SimpleNamespace
+    from core.exchange.clob import ClobExchange
+
+    placed: list[dict] = []
+
+    class FakeSecureClient:
+        def place_limit_order(self, *, token_id, price, size, side):
+            placed.append(
+                {"token_id": token_id, "price": price, "size": size, "side": side}
+            )
+            return SimpleNamespace(order_id="ord-multi", error_msg=None)
+
+    exch = ClobExchange(clob_client=FakeSecureClient())
+
+    oid = exch.place_order(
+        "tok1",
+        "BUY",
+        size_usd=50.0,
+        price=0.70,
+        shares=78.5714285714,
+    )
+
+    assert oid == "ord-multi"
+    assert placed[0]["price"] == pytest.approx(0.70)
+    assert placed[0]["size"] == pytest.approx(78.5714285714)
+
+
 def test_clob_exchange_rejects_sdk_not_ok_response():
     """Unified SDK order responses must check ok before reading order_id."""
     from types import SimpleNamespace

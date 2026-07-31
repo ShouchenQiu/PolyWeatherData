@@ -161,6 +161,7 @@ def build_clob_audit_report(
                 "actual_high_f": None,
                 "winning_bucket_count": None,
                 "resolution_status": "NOT_AVAILABLE",
+                "resolved_reconciliation_status": "NOT_AVAILABLE",
             }
         )
     add_check("bucket_partitions", bad_partitions)
@@ -238,6 +239,8 @@ def build_clob_audit_report(
                 for row in actual_highs.itertuples(index=False)
             }
             resolution_failures = 0
+            resolved_reconciliation_failures = 0
+            resolved_reconciliation_events = 0
             for index, row in event_checks.iterrows():
                 target_date = str(row["target_date"])
                 if target_date not in actual_map:
@@ -254,13 +257,42 @@ def build_clob_audit_report(
                         & (actual < event_markets["bucket_hi_f"].astype(float))
                     ).sum()
                 )
+                actual_winner = (
+                    (actual >= event_markets["bucket_lo_f"].astype(float))
+                    & (actual < event_markets["bucket_hi_f"].astype(float))
+                )
                 resolution_failures += int(winners != 1)
                 event_checks.loc[index, "actual_high_f"] = actual
                 event_checks.loc[index, "winning_bucket_count"] = winners
                 event_checks.loc[index, "resolution_status"] = (
                     "PASS" if winners == 1 else "FAIL"
                 )
+                if "resolved_yes" in event_markets.columns:
+                    resolved = event_markets["resolved_yes"]
+                    if resolved.notna().any():
+                        resolved_reconciliation_events += 1
+                        complete_resolution = bool(resolved.notna().all())
+                        resolved_winner = resolved.fillna(False).astype(bool)
+                        agrees = bool(
+                            complete_resolution
+                            and int(resolved_winner.sum()) == 1
+                            and actual_winner.reset_index(drop=True).equals(
+                                resolved_winner.reset_index(drop=True)
+                            )
+                        )
+                        resolved_reconciliation_failures += int(not agrees)
+                        event_checks.loc[
+                            index, "resolved_reconciliation_status"
+                        ] = "PASS" if agrees else "FAIL"
             add_check("actual_bucket_resolution", resolution_failures)
+            add_check(
+                "resolved_outcome_reconciliation",
+                resolved_reconciliation_failures,
+                f"checked_events={resolved_reconciliation_events}",
+                status=(
+                    None if resolved_reconciliation_events else "NOT_MEASURED"
+                ),
+            )
 
     quote_checks = pd.DataFrame()
     quote_count = 0

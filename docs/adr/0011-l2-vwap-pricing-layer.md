@@ -2,17 +2,20 @@
 
 **Status**: accepted
 
-Three distinct price concepts previously conflated in strategy, paper exchange, and
+Four distinct price concepts previously conflated in strategy, paper exchange, and
 backtest must be separated: **mark price** (best-bid/best-ask midpoint, for display and
 staleness estimation), **executable price** (VWAP computed by walking L2 depth for a
-given side and size, used for edge calculation and limit order submission), and **fill
+given side and size, used for edge calculation), **marginal limit price** (the worst
+price consumed by that depth walk, used for live limit order submission), and **fill
 price** (the price at which an order actually settles; in paper mode equals executable
-VWAP; in live mode equals the true CLOB fill). A new module `core/pricing/quote.py`
+VWAP; in live mode equals the true CLOB fill). The module `core/pricing/quote.py`
 owns the single `compute_quote(book, side, size_usd) -> Quote` function; `Quote` carries
 `vwap_price`, `max_fillable_usd`, `filled_shares`, `slippage_bps`, `best_bid`,
-`best_ask`, `mid_price`, and `complete_fill`. BUY walks asks (ascending), SELL walks
-bids (descending); `OrderbookFetcher` must defensively sort both sides before returning.
-When `complete_fill=False`, callers skip or cancel -- no partial fills in v1.
+`best_ask`, `mid_price`, `limit_price`, and `complete_fill`. BUY walks asks (ascending),
+SELL walks bids (descending); `OrderbookFetcher` must defensively sort both sides before
+returning. Live submission passes `filled_shares` independently from `limit_price`;
+deriving shares as `notional / limit_price` is incorrect for a multi-level fill. When
+`complete_fill=False`, callers skip or cancel -- no partial fills in v1.
 
 `EdgeStrategy` replaces `mid_price` with `quote.vwap_price` for edge computation,
 using a configurable `quote_size_usd` as a proxy order size at signal time.

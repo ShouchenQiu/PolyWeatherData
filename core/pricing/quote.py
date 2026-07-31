@@ -38,6 +38,7 @@ class Quote:
     best_ask: float | None
     mid_price: float | None
     complete_fill: bool
+    limit_price: float | None = None
 
 
 @dataclass(frozen=True)
@@ -155,17 +156,21 @@ def compute_quote(book: NormalizedBook, side: str, size_usd: float) -> Quote:
     remaining = size_usd
     filled_shares = 0.0
     total_cost = 0.0
+    limit_price: float | None = None
 
     for level in levels:
         price = float(level["price"])
         avail_shares = float(level["size"])
         usd_at_level = price * avail_shares
         usd_to_spend = min(remaining, usd_at_level)
+        if usd_to_spend <= 0.0:
+            continue
         shares_taken = usd_to_spend / price
 
         filled_shares += shares_taken
         total_cost += usd_to_spend
         remaining -= usd_to_spend
+        limit_price = price
 
         if remaining <= 1e-9:
             break
@@ -191,6 +196,7 @@ def compute_quote(book: NormalizedBook, side: str, size_usd: float) -> Quote:
         best_ask=best_ask,
         mid_price=mid_price,
         complete_fill=complete_fill,
+        limit_price=limit_price,
     )
 
 
@@ -228,13 +234,17 @@ def compute_quote_for_shares(
     remaining = float(target_shares)
     filled_shares = 0.0
     total_cost = 0.0
+    limit_price: float | None = None
     for level in levels:
         price = float(level["price"])
         available = max(0.0, float(level["size"]))
         shares_taken = min(remaining, available)
+        if shares_taken <= 0.0:
+            continue
         filled_shares += shares_taken
         total_cost += shares_taken * price
         remaining -= shares_taken
+        limit_price = price
         if remaining <= 1e-9:
             break
 
@@ -259,4 +269,5 @@ def compute_quote_for_shares(
         best_ask=metrics.best_ask,
         mid_price=metrics.mid_price,
         complete_fill=complete_fill,
+        limit_price=limit_price,
     )

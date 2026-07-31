@@ -104,6 +104,7 @@ def test_historical_source_normalizes_current_api_rows_without_synthetic_fill() 
                 "slug": "highest-temperature-in-nyc-on-april-2-2026-70-71f",
                 "clobTokenIds": json.dumps(["yes-1", "no-1"]),
                 "outcomes": json.dumps(["Yes", "No"]),
+                "outcomePrices": json.dumps(["1", "0"]),
                 "feesEnabled": True,
                 "feeType": "weather_fees",
                 "feeSchedule": {
@@ -187,6 +188,9 @@ def test_historical_source_normalizes_current_api_rows_without_synthetic_fill() 
     assert market["taker_base_fee"] == 1000.0
     assert market["min_tick_size"] == 0.01
     assert market["min_order_size"] == 5.0
+    assert market["yes_outcome_price"] == 1.0
+    assert market["no_outcome_price"] == 0.0
+    assert market["resolved_yes"]
     assert str(market["accepting_orders_at"]) == "2026-04-01 12:00:00+00:00"
     assert str(market["closed_at"]) == "2026-04-03 04:00:00+00:00"
     assert dataset.trades["transaction_hash"].tolist() == ["tx-1", "tx-2"]
@@ -566,7 +570,7 @@ def test_historical_dataset_save_writes_immutable_manifest(tmp_path) -> None:
         (artifact_dir / "manifest.json").read_text(encoding="utf-8")
     )
     assert persisted == manifest
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["data_class"] == "raw_point_in_time"
     assert manifest["requested_range"] == ["2026-04-02", "2026-04-02"]
     assert manifest["row_counts"] == {

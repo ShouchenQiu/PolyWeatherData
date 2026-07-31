@@ -1,9 +1,10 @@
-"""Paper exchange: simulates order execution without sending real orders.
+"""Paper exchange: accepts validated orders without sending live orders.
 
 Depth validation is the responsibility of TradingLoop (two compute_quote()
-passes before this is called).  This class trusts the validated limit price
-passed by the caller and returns a UUID order_id on any valid order, or an
-empty string for degenerate inputs.  No in-memory state is held.
+passes before this is called). This class accepts the validated marginal limit
+price and returns a UUID order_id on any valid order, or an empty string for
+degenerate inputs. Paper fill accounting remains upstream at executable VWAP.
+No in-memory state is held.
 """
 from __future__ import annotations
 
@@ -47,17 +48,19 @@ class PaperExchange(BaseExchange):
         side:     str,
         size_usd: float,
         price:    float,
+        shares:   float | None = None,
     ) -> str:
-        """Simulate a fill at the caller-validated limit price.
+        """Accept a caller-validated paper order.
 
         Returns a UUID order_id on success, or an empty string for
         degenerate inputs (``price <= 0`` or ``size_usd <= 0``).
 
         Depth has already been verified by TradingLoop via two
-        ``compute_quote()`` calls; this adapter trusts the validated
-        ``price`` and does not re-fetch the book.
+        ``compute_quote()`` calls; this adapter trusts the validated marginal
+        limit ``price`` and does not re-fetch the book. TradingLoop records the
+        simulated fill separately at executable VWAP.
         """
-        if price <= 0 or size_usd <= 0:
+        if price <= 0 or size_usd <= 0 or (shares is not None and shares <= 0):
             logger.warning(
                 "[PAPER] Degenerate order rejected: {} {} size={} price={}",
                 side.upper(), token_id, size_usd, price,

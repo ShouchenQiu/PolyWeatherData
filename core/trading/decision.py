@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from core.pricing.fees import taker_fee_usdc
-from core.pricing.quote import compute_quote
+from core.pricing.quote import compute_quote, compute_quote_for_shares
 from core.types import DirectionalSignal
 
 
@@ -38,6 +38,8 @@ class TradingDecision:
     reason: str | None
     fee_usd: float = 0.0
     cash_delta_usd: float = 0.0
+    limit_price: float | None = None
+    filled_shares: float = 0.0
 
 
 class TradingDecisionKernel:
@@ -79,10 +81,16 @@ class TradingDecisionKernel:
             portfolio.shares_by_token.get(opposing_token, 0.0)
         )
         if opposing_token and held_shares > 0:
-            quote = _sell_all_quote(books.get(opposing_token, {}), held_shares)
-            if quote is None:
+            try:
+                quote = compute_quote_for_shares(
+                    books.get(opposing_token, {}), "SELL", held_shares
+                )
+            except (KeyError, TypeError, ValueError):
+                return self._reject(signal, "quote_error")
+            if not quote.complete_fill:
                 return self._reject(signal, "insufficient_depth")
-            proceeds, vwap = quote
+            proceeds = quote.max_fillable_usd
+            vwap = quote.vwap_price
             model_probability = (
                 1.0 - signal.model_prob
                 if opposing_token == signal.no_token_id
@@ -109,6 +117,8 @@ class TradingDecisionKernel:
                 reason=None,
                 fee_usd=fee,
                 cash_delta_usd=net_proceeds,
+                limit_price=quote.limit_price,
+                filled_shares=quote.filled_shares,
             )
 
         if not buy_token:
@@ -173,6 +183,8 @@ class TradingDecisionKernel:
             reason=None,
             fee_usd=fee,
             cash_delta_usd=-total_cost,
+            limit_price=quote.limit_price,
+            filled_shares=quote.filled_shares,
         )
 
     @staticmethod
@@ -191,28 +203,3 @@ class TradingDecisionKernel:
             edge=edge,
             reason=reason,
         )
-
-
-def _sell_all_quote(
-    book: dict,
-    shares: float,
-) -> tuple[float, float] | None:
-    remaining = shares
-    proceeds = 0.0
-    sold = 0.0
-    for level in sorted(
-        book.get("bids", []),
-        key=lambda item: float(item["price"]),
-        reverse=True,
-    ):
-        available = max(0.0, float(level["size"]))
-        taken = min(remaining, available)
-        price = float(level["price"])
-        proceeds += taken * price
-        sold += taken
-        remaining -= taken
-        if remaining <= 1e-9:
-            break
-    if remaining > 1e-9 or sold <= 0:
-        return None
-    return proceeds, proceeds / sold

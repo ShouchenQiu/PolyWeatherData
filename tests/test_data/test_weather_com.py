@@ -27,14 +27,56 @@ class _Session:
         return _Response(self.payload)
 
 
+def _complete_payload(
+    day: str,
+    *,
+    default_temp: float = 50.0,
+    extras: list[dict] | None = None,
+) -> dict:
+    start = pd.Timestamp(day).tz_localize("America/New_York").tz_convert("UTC")
+    end = (
+        (pd.Timestamp(day) + pd.Timedelta(days=1))
+        .tz_localize("America/New_York")
+        .tz_convert("UTC")
+    )
+    valid_hours = pd.date_range(
+        start + pd.Timedelta(hours=1),
+        end,
+        freq="h",
+    )
+    observations = [
+        {
+            "valid_time_gmt": int(
+                (valid_hour - pd.Timedelta(minutes=9)).timestamp()
+            ),
+            "temp": default_temp,
+        }
+        for valid_hour in valid_hours
+    ]
+    observations.extend(extras or [])
+    return {"observations": observations}
+
+
+def _complete_cached_frame(day: str, *, temp_f: float = 70.0) -> pd.DataFrame:
+    payload = _complete_payload(day, default_temp=temp_f)
+    rows = payload["observations"]
+    valid_time = pd.to_datetime(
+        [row["valid_time_gmt"] for row in rows], unit="s", utc=True
+    )
+    return pd.DataFrame(
+        {
+            "station_id": ["KLGA"] * len(rows),
+            "valid_time": valid_time,
+            "valid_hour": valid_time.round("h"),
+            "weather_com_temp_f": [temp_f] * len(rows),
+            "weather_com_temp_c": [(temp_f - 32.0) * 5.0 / 9.0] * len(rows),
+        }
+    )
+
+
 def test_weather_com_fetch_parses_hourly_temperatures_and_writes_cache(tmp_path):
-    payload = {
-        "observations": [
-            {"valid_time_gmt": 1_780_000_000, "temp": 50},
-            {"valid_time_gmt": 1_780_003_600, "temp": None},
-            {"valid_time_gmt": 1_780_007_200, "temp": 54},
-        ]
-    }
+    payload = _complete_payload("2026-06-04", default_temp=50.0)
+    payload["observations"][-1]["temp"] = 54.0
     session = _Session(payload)
     client = WeatherComTruthClient(
         tmp_path / "truth",
@@ -44,42 +86,32 @@ def test_weather_com_fetch_parses_hourly_temperatures_and_writes_cache(tmp_path)
 
     frame = client.fetch_date("KLGA", "2026-06-04")
 
-    assert len(frame) == 2
-    assert frame["station_id"].tolist() == ["KLGA", "KLGA"]
-    assert frame["weather_com_temp_f"].tolist() == [50.0, 54.0]
-    assert frame["weather_com_temp_c"].tolist() == pytest.approx(
-        [10.0, 12.2222],
-        abs=1e-4,
+    assert len(frame) == 24
+    assert set(frame["station_id"]) == {"KLGA"}
+    assert frame["weather_com_temp_f"].iloc[[0, -1]].tolist() == [50.0, 54.0]
+    assert frame["weather_com_temp_c"].iloc[[0, -1]].tolist() == pytest.approx(
+        [10.0, 12.2222], abs=1e-4
     )
     assert pd.to_datetime(frame["valid_time"], utc=True).dt.tz is not None
     assert (tmp_path / "truth" / "KLGA" / "2026-06-04.parquet").exists()
     assert session.calls[0]["params"]["apiKey"] == "secret"
     assert session.calls[0]["params"]["units"] == "e"
     assert session.calls[0]["params"]["startDate"] == "20260604"
-    assert session.calls[0]["params"]["endDate"] == "20260604"
+    assert session.calls[0]["params"]["endDate"] == "20260605"
 
 
 def test_weather_com_fetch_uses_cache_without_api_key_or_http(tmp_path):
     cache_dir = tmp_path / "truth" / "KLGA"
     cache_dir.mkdir(parents=True)
-    cached = pd.DataFrame(
-        [
-            {
-                "station_id": "KLGA",
-                "valid_time": pd.Timestamp("2026-06-04 01:00:00", tz="UTC"),
-                "valid_hour": pd.Timestamp("2026-06-04 01:00:00", tz="UTC"),
-                "weather_com_temp_f": 70.0,
-                "weather_com_temp_c": 21.111111,
-            }
-        ]
-    )
+    cached = _complete_cached_frame("2026-06-04")
     cached.to_parquet(cache_dir / "2026-06-04.parquet", index=False)
     session = _Session({"observations": []})
     client = WeatherComTruthClient(tmp_path / "truth", api_key="", session=session)
 
     frame = client.fetch_date("KLGA", "2026-06-04")
 
-    assert frame["weather_com_temp_f"].tolist() == [70.0]
+    assert len(frame) == 24
+    assert set(frame["weather_com_temp_f"]) == {70.0}
     assert session.calls == []
 
 
@@ -105,7 +137,7 @@ def test_weather_com_read_cached_date_never_fetches_missing_day(tmp_path):
 
 
 def test_weather_com_client_uses_reference_default_key_when_env_missing(tmp_path, monkeypatch):
-    payload = {"observations": [{"valid_time_gmt": 1_780_000_000, "temp": 50}]}
+    payload = _complete_payload("2026-06-04")
     session = _Session(payload)
     monkeypatch.delenv("WEATHER_COM_API_KEY", raising=False)
     client = WeatherComTruthClient(tmp_path / "truth", session=session)
@@ -117,18 +149,21 @@ def test_weather_com_client_uses_reference_default_key_when_env_missing(tmp_path
 
 def test_weather_com_prefers_iem_representative_hour_candidate(tmp_path):
     valid_hour = pd.Timestamp("2026-05-24 12:00:00", tz="UTC")
-    payload = {
-        "observations": [
-            {
-                "valid_time_gmt": int((valid_hour - pd.Timedelta(minutes=9)).timestamp()),
-                "temp": 53,
-            },
-            {
-                "valid_time_gmt": int((valid_hour + pd.Timedelta(minutes=19)).timestamp()),
-                "temp": 54,
-            },
-        ]
-    }
+    payload = _complete_payload("2026-05-24")
+    representative_ts = int(
+        (valid_hour - pd.Timedelta(minutes=9)).timestamp()
+    )
+    for observation in payload["observations"]:
+        if observation["valid_time_gmt"] == representative_ts:
+            observation["temp"] = 53
+    payload["observations"].append(
+        {
+            "valid_time_gmt": int(
+                (valid_hour + pd.Timedelta(minutes=19)).timestamp()
+            ),
+            "temp": 54,
+        }
+    )
     client = WeatherComTruthClient(
         tmp_path / "truth",
         api_key="secret",
@@ -137,9 +172,9 @@ def test_weather_com_prefers_iem_representative_hour_candidate(tmp_path):
 
     frame = client.fetch_date("KLGA", "2026-05-24")
 
-    assert frame["valid_hour"].tolist() == [valid_hour]
-    assert frame["valid_time"].tolist() == [valid_hour - pd.Timedelta(minutes=9)]
-    assert frame["weather_com_temp_f"].tolist() == [53.0]
+    selected = frame.loc[frame["valid_hour"] == valid_hour].iloc[0]
+    assert selected["valid_time"] == valid_hour - pd.Timedelta(minutes=9)
+    assert selected["weather_com_temp_f"] == 53.0
 
 
 def test_weather_com_refetches_stale_alignment_cache_when_key_available(tmp_path):
@@ -157,23 +192,52 @@ def test_weather_com_refetches_stale_alignment_cache_when_key_available(tmp_path
             }
         ]
     ).to_parquet(cache_dir / "2026-05-20.parquet", index=False)
-    payload = {
-        "observations": [
-            {
-                "valid_time_gmt": int((valid_hour - pd.Timedelta(minutes=9)).timestamp()),
-                "temp": 74,
-            },
-            {
-                "valid_time_gmt": int((valid_hour + pd.Timedelta(minutes=23)).timestamp()),
-                "temp": 70,
-            },
-        ]
-    }
+    payload = _complete_payload("2026-05-20", default_temp=60.0)
+    representative_ts = int(
+        (valid_hour - pd.Timedelta(minutes=9)).timestamp()
+    )
+    for observation in payload["observations"]:
+        if observation["valid_time_gmt"] == representative_ts:
+            observation["temp"] = 74
+    payload["observations"].append(
+        {
+            "valid_time_gmt": int(
+                (valid_hour + pd.Timedelta(minutes=23)).timestamp()
+            ),
+            "temp": 70,
+        }
+    )
     session = _Session(payload)
     client = WeatherComTruthClient(tmp_path / "truth", api_key="secret", session=session)
 
     frame = client.fetch_date("KLGA", "2026-05-20")
 
     assert len(session.calls) == 1
-    assert frame["valid_time"].tolist() == [valid_hour - pd.Timedelta(minutes=9)]
-    assert frame["weather_com_temp_f"].tolist() == [74.0]
+    selected = frame.loc[frame["valid_hour"] == valid_hour].iloc[0]
+    assert selected["valid_time"] == valid_hour - pd.Timedelta(minutes=9)
+    assert selected["weather_com_temp_f"] == 74.0
+
+
+def test_weather_com_fetch_uses_extended_range_and_keeps_requested_dst_day(tmp_path):
+    payload = _complete_payload("2026-03-08", default_temp=48.0)
+    payload["observations"].append(
+        {
+            "valid_time_gmt": int(
+                pd.Timestamp("2026-03-09T12:51:00Z").timestamp()
+            ),
+            "temp": 99.0,
+        }
+    )
+    session = _Session(payload)
+    client = WeatherComTruthClient(
+        tmp_path / "truth",
+        api_key="secret",
+        session=session,
+    )
+
+    frame = client.fetch_date("KLGA", "2026-03-08")
+
+    assert len(frame) == 23
+    assert frame["weather_com_temp_f"].max() == 48.0
+    assert session.calls[0]["params"]["startDate"] == "20260308"
+    assert session.calls[0]["params"]["endDate"] == "20260309"

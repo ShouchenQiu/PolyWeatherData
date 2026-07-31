@@ -41,24 +41,31 @@ class ClobExchange(BaseExchange):
         side:     str,
         size_usd: float,
         price:    float,
+        shares:   float | None = None,
     ) -> str:
         """Submit a limit order via the CLOB API.
 
         Delegates to ``SecureClient.place_limit_order()``.  Converts
-        size_usd to shares (size_usd / price) since the CLOB API ``size``
-        parameter is in outcome shares, not USD notional.
+        The CLOB API ``size`` parameter is in outcome shares.  Callers that
+        already walked depth pass the exact target ``shares`` independently
+        from the marginal limit ``price``.  Legacy callers fall back to
+        ``size_usd / price``.
 
         Returns the exchange-assigned order ID, or an empty string on
         rejection.
         """
         # Convert USD notional to shares: size_usd / price.
         # price is in (0,1]; size_usd is in USD.
-        shares = size_usd / price if price > 0 else 0.0
+        target_shares = (
+            float(shares)
+            if shares is not None
+            else (size_usd / price if price > 0 else 0.0)
+        )
         try:
             resp = self._client.place_limit_order(
                 token_id=token_id,
                 price=price,
-                size=shares,
+                size=target_shares,
                 side=side.upper(),
             )
         except Exception as exc:

@@ -372,6 +372,11 @@ class TradingLoop:
                     intent_side = str(decision.side)
                     size_usd = float(decision.size_usd)
                     executable_price = float(decision.executable_price)
+                    limit_price = float(
+                        decision.limit_price
+                        if decision.limit_price is not None
+                        else executable_price
+                    )
                     self._db.update_signal_decision(
                         signal_id=signal_id,
                         final_token_id=intent_token_id,
@@ -386,7 +391,8 @@ class TradingLoop:
                             token_id=intent_token_id,
                             side=intent_side,
                             size_usd=size_usd,
-                            price=executable_price,
+                            price=limit_price,
+                            shares=decision.filled_shares or None,
                         )
                         if not order_id:
                             self._reject_signal(
@@ -404,7 +410,7 @@ class TradingLoop:
                             condition_id=condition_id,
                             side=intent_side,
                             size_usd=size_usd,
-                            price=executable_price,
+                            price=limit_price,
                             is_paper=self._is_paper,
                             executable_price=executable_price,
                             fee_usd=decision.fee_usd,
@@ -541,6 +547,11 @@ class TradingLoop:
                     continue
                 executable_price        = fresh_quote.vwap_price
                 intent.executable_price = executable_price
+                limit_price = float(
+                    fresh_quote.limit_price
+                    if fresh_quote.limit_price is not None
+                    else executable_price
+                )
 
                 # 8. Record approved decision
                 self._db.update_signal_decision(
@@ -559,7 +570,8 @@ class TradingLoop:
                         token_id = intent_token_id,
                         side     = intent_side,
                         size_usd = size_usd,
-                        price    = executable_price,
+                        price    = limit_price,
+                        shares   = fresh_quote.filled_shares,
                     )
                     if not order_id:
                         logger.error(
@@ -577,7 +589,7 @@ class TradingLoop:
                         condition_id     = condition_id,
                         side             = intent_side,
                         size_usd         = size_usd,
-                        price            = executable_price,
+                        price            = limit_price,
                         is_paper         = self._is_paper,
                         executable_price = executable_price,
                     )
@@ -602,7 +614,7 @@ class TradingLoop:
                         # to or below zero after this SELL.
                         remaining = self._positions.position_shares(
                             intent_token_id, is_paper=self._is_paper,
-                        ) - (size_usd / executable_price if executable_price > 0 else 0)
+                        ) - fresh_quote.filled_shares
                         if remaining <= 0 and intent_token_id in local_yes_buys:
                             local_yes_buys.discard(intent_token_id)
 

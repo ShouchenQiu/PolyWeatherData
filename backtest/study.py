@@ -402,12 +402,12 @@ class BacktestStudy:
             ),
             "clob_manifest": _load_manifest(
                 clob_manifest_path,
-                schema_version=1,
+                schema_version={1, 2},
                 data_class="raw_point_in_time",
             ),
             "actuals_manifest": _load_manifest(
                 actuals_manifest_path,
-                schema_version=1,
+                schema_version={1, 2},
                 data_class="market_resolution_actual_highs",
             ),
         }
@@ -626,11 +626,14 @@ def _record(row: sqlite3.Row) -> StudyRecord:
 def _load_manifest(
     path: Path,
     *,
-    schema_version: int,
+    schema_version: int | set[int],
     data_class: str,
 ) -> dict:
     manifest = _read_json(path, f"{data_class} manifest")
-    if manifest.get("schema_version") != schema_version:
+    allowed_versions = (
+        schema_version if isinstance(schema_version, set) else {schema_version}
+    )
+    if manifest.get("schema_version") not in allowed_versions:
         raise ValueError(f"unsupported {data_class} schema_version")
     if manifest.get("data_class") != data_class:
         raise ValueError(f"invalid artifact data_class for {path}")

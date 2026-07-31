@@ -77,6 +77,7 @@ def test_compute_quote_buy_multi_level_slippage() -> None:
     expected_shares = 50.0 + 20.0 / 0.70
     assert q.filled_shares == pytest.approx(expected_shares, rel=1e-4)
     assert q.vwap_price == pytest.approx(50.0 / expected_shares, rel=1e-4)
+    assert q.limit_price == pytest.approx(0.70)
     assert q.slippage_bps == pytest.approx(
         (q.vwap_price - 0.60) / 0.60 * 10_000, rel=1e-3
     )
@@ -97,6 +98,7 @@ def test_compute_quote_for_shares_walks_depth_to_equal_share_target() -> None:
     assert quote.filled_shares == pytest.approx(25.0)
     assert quote.max_fillable_usd == pytest.approx(11.5)
     assert quote.vwap_price == pytest.approx(0.46)
+    assert quote.limit_price == pytest.approx(0.50)
 
 
 def test_compute_quote_buy_insufficient_depth() -> None:
@@ -152,6 +154,7 @@ def test_compute_quote_sell_multi_level_slippage() -> None:
     expected_shares = 40.0 + 25.2 / 0.58
     assert q.filled_shares == pytest.approx(expected_shares, rel=1e-4)
     assert q.vwap_price == pytest.approx(50.0 / expected_shares, rel=1e-4)
+    assert q.limit_price == pytest.approx(0.58)
     # slippage: (best_bid - vwap) / best_bid * 10000
     assert q.slippage_bps == pytest.approx(
         (0.62 - q.vwap_price) / 0.62 * 10_000, rel=1e-3

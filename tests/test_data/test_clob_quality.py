@@ -260,8 +260,76 @@ def test_clob_audit_report_accepts_consistent_quotes_and_actuals() -> None:
     assert report.failures == ()
     assert report.summary["quotes"] == 1
     assert report.summary["actual_days"] == 1
-    assert set(report.checks["status"]) == {"PASS"}
+    assert set(report.checks["status"]) == {"PASS", "NOT_MEASURED"}
+    assert report.checks.loc[
+        report.checks["check"] == "resolved_outcome_reconciliation", "status"
+    ].item() == "NOT_MEASURED"
     assert report.quote_checks.iloc[0]["status"] == "PASS"
+
+
+@pytest.mark.parametrize(
+    ("actual_high_f", "expected_pass"),
+    [(61.0, True), (48.0, False)],
+)
+def test_clob_audit_report_reconciles_actual_bucket_with_resolution(
+    actual_high_f: float,
+    expected_pass: bool,
+) -> None:
+    dataset = HistoricalClobDataset(
+        events=pd.DataFrame(
+            [{"event_id": "event-1", "target_date": "2026-03-08"}]
+        ),
+        markets=pd.DataFrame(
+            [
+                {
+                    "event_id": "event-1",
+                    "condition_id": "low",
+                    "yes_token_id": "low-yes",
+                    "no_token_id": "low-no",
+                    "bucket_lo_f": float("-inf"),
+                    "bucket_hi_f": 60.0,
+                    "resolved_yes": False,
+                },
+                {
+                    "event_id": "event-1",
+                    "condition_id": "high",
+                    "yes_token_id": "high-yes",
+                    "no_token_id": "high-no",
+                    "bucket_lo_f": 60.0,
+                    "bucket_hi_f": float("inf"),
+                    "resolved_yes": True,
+                },
+            ]
+        ),
+        trades=pd.DataFrame(
+            [
+                {
+                    "condition_id": "high",
+                    "token_id": "high-yes",
+                    "timestamp": "2026-03-08T12:00:00Z",
+                    "price": 0.9,
+                    "size": 10.0,
+                    "usdc": 9.0,
+                }
+            ]
+        ),
+        start_date="2026-03-08",
+        end_date="2026-03-08",
+        station_id="KLGA",
+    )
+
+    report = build_clob_audit_report(
+        dataset,
+        actual_highs=pd.DataFrame(
+            [{"target_date": "2026-03-08", "actual_high_f": actual_high_f}]
+        ),
+    )
+
+    assert report.passed is expected_pass
+    reconciliation = report.checks.loc[
+        report.checks["check"] == "resolved_outcome_reconciliation", "status"
+    ].item()
+    assert reconciliation == ("PASS" if expected_pass else "FAIL")
 
 
 def test_clob_audit_report_rejects_token_from_another_market() -> None:

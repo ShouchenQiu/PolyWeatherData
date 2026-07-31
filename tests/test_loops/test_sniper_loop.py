@@ -217,8 +217,8 @@ def test_handle_observation_skips_invalid_bucket(db, tracker):
 class TestV2V11SniperQuotePricing:
     """SniperLoop prices via compute_quote instead of best_ask/mid fallback."""
 
-    def test_multi_level_vwap_not_best_ask(self, db, tracker):
-        """Two ask levels ensure VWAP differs from best_ask.
+    def test_multi_level_order_uses_marginal_limit_and_records_vwap(self, db, tracker):
+        """Two ask levels separate the live limit from expected fill VWAP.
 
         $20 BUY: first 5 shares @ 0.80 = $4, remaining $16 @ 0.90
         VWAP = 20 / (5 + 17.778) = 20 / 22.778 = 0.8780...
@@ -236,12 +236,12 @@ class TestV2V11SniperQuotePricing:
 
         asyncio.run(loop._handle_observation(metar, "NOAA", None))
 
-        rows = db.query("SELECT price FROM orders WHERE status='filled'")
+        rows = db.query(
+            "SELECT price, executable_price FROM orders WHERE status='filled'"
+        )
         assert rows
-        # VWAP should be between 0.80 and 0.90, not equal to best_ask
-        price = rows[0]["price"]
-        assert 0.85 < price < 0.90
-        assert price != pytest.approx(0.80)
+        assert rows[0]["price"] == pytest.approx(0.90)
+        assert 0.85 < rows[0]["executable_price"] < 0.90
 
 
 class TestV2V11SniperOrderRecording:

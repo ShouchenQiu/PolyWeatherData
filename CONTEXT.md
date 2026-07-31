@@ -80,6 +80,14 @@ fee-adjusted executable price for the intended order size; the primary trading s
 Mid-price is display evidence, not an executable edge input.
 _Avoid_: alpha, signal (edge has a precise meaning here)
 
+**executable VWAP**: The depth-weighted expected fill price for an intended share or
+notional size. It is used for edge, fees, paper fills, and expected cash flow, but is
+not necessarily a live limit price when the order consumes multiple L2 levels.
+
+**marginal limit price**: The worst L2 price consumed by a full depth walk: highest
+consumed ask for BUY and lowest consumed bid for SELL. Live orders submit this price
+with the depth walk's exact target shares so every assumed level is marketable.
+
 **conservative executable edge**: The lower confidence bound of the calibrated Token
 probability minus its fee-adjusted executable price. Diagnostic replay may enter only
 when this value clears its frozen threshold.

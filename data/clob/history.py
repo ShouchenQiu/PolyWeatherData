@@ -69,7 +69,7 @@ class HistoricalClobDataset:
             raise HistoricalDataIncomplete(
                 f"invalid historical manifest at {manifest_path}: {exc}"
             ) from exc
-        if manifest.get("schema_version") != 1:
+        if manifest.get("schema_version") not in {1, 2}:
             raise HistoricalDataIncomplete(
                 "unsupported historical artifact schema_version="
                 f"{manifest.get('schema_version')!r}"
@@ -169,7 +169,7 @@ class HistoricalClobDataset:
         else:
             fetched = fetched.tz_convert("UTC")
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "data_class": "raw_point_in_time",
             "provider": "polymarket_public_api",
             "station_id": self.station_id,
@@ -300,6 +300,9 @@ class HistoricalClobSource:
                 "no_token_id",
                 "bucket_lo_f",
                 "bucket_hi_f",
+                "yes_outcome_price",
+                "no_outcome_price",
+                "resolved_yes",
                 "fees_enabled",
                 "fee_type",
                 "fee_rate",
@@ -373,6 +376,22 @@ class HistoricalClobSource:
         if bucket is None:
             return None
         lo_f, hi_f = bucket
+        outcome_prices = _json_list(market.get("outcomePrices"))
+        prices = (
+            {
+                str(outcome).upper(): _optional_float(price)
+                for outcome, price in zip(outcomes, outcome_prices)
+            }
+            if len(outcome_prices) == len(outcomes)
+            else {}
+        )
+        yes_outcome_price = prices.get("YES")
+        no_outcome_price = prices.get("NO")
+        resolved_yes: bool | None = None
+        if yes_outcome_price == 1.0 and no_outcome_price == 0.0:
+            resolved_yes = True
+        elif yes_outcome_price == 0.0 and no_outcome_price == 1.0:
+            resolved_yes = False
         fee_schedule = _json_object(market.get("feeSchedule"))
         return {
             "event_id": event_id,
@@ -383,6 +402,9 @@ class HistoricalClobSource:
             "no_token_id": tokens["NO"],
             "bucket_lo_f": float(lo_f),
             "bucket_hi_f": float(hi_f),
+            "yes_outcome_price": yes_outcome_price,
+            "no_outcome_price": no_outcome_price,
+            "resolved_yes": resolved_yes,
             "fees_enabled": bool(market.get("feesEnabled", False)),
             "fee_type": str(market.get("feeType") or ""),
             "fee_rate": _optional_float(fee_schedule.get("rate")),

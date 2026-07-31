@@ -12,7 +12,7 @@ import pandas as pd
 
 from config.settings import Settings
 from config.stations import STATIONS
-from data.obs.weather_com import WeatherComTruthClient
+from data.obs.weather_com import WeatherComTruthClient, local_day_hour_coverage
 from data.storage.parquet_store import ParquetStore
 
 
@@ -51,17 +51,40 @@ def prefetch_weather_com_truth(
     )
 
     cache_reader = client_cls(truth_root)
-    pending = [
-        day
-        for day in local_dates
-        if cache_reader.read_cached_date(station_id, day) is None
-    ]
+    timezone = STATIONS[station_id].timezone
+
+    def complete_local_day(frame: pd.DataFrame | None, day: str) -> bool:
+        if frame is None:
+            return False
+        observed, expected = local_day_hour_coverage(
+            frame,
+            local_date=day,
+            timezone=timezone,
+        )
+        return observed == expected
+
+    pending = []
+    for day in local_dates:
+        cached = cache_reader.read_cached_date(station_id, day)
+        if not complete_local_day(cached, day):
+            pending.append(day)
     cached_count = len(local_dates) - len(pending)
     fetched_count = 0
     errors: list[dict[str, str]] = []
 
     def fetch(day: str) -> str:
-        client_cls(truth_root).fetch_date(station_id, day)
+        frame = client_cls(truth_root).fetch_date(station_id, day)
+        observed, expected = local_day_hour_coverage(
+            frame,
+            local_date=day,
+            timezone=timezone,
+        )
+        if observed != expected:
+            raise ValueError(
+                "incomplete Weather.com local day after fetch "
+                f"station={station_id} date={day} "
+                f"observed_hours={observed} expected_hours={expected}"
+            )
         return day
 
     with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
