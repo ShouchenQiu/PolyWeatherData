@@ -23,32 +23,34 @@ def prefetch_weather_com_truth(
     start: str | None = None,
     end: str | None = None,
     workers: int = 4,
+    force_refresh: bool = False,
     client_cls: Any = WeatherComTruthClient,
 ) -> dict[str, Any]:
-    """Fetch uncached Weather.com local dates represented by IEM observations."""
+    """Fetch Weather.com local dates from IEM coverage or an explicit range."""
     data_root = Path(data_store_dir)
     truth_root = Path(truth_store_dir)
-    obs = ParquetStore(data_root / "obs").read(
-        station_id,
-        start=pd.Timestamp("2000-01-01", tz="UTC"),
-        end=pd.Timestamp("2100-01-01", tz="UTC"),
-    )
-    if obs.empty or "valid_time" not in obs.columns:
-        return _prefetch_summary(station_id, [], 0, 0, [])
-
-    valid_times = pd.to_datetime(obs["valid_time"], utc=True)
-    if start is not None:
-        valid_times = valid_times[valid_times >= _utc_day(start)]
-    if end is not None:
-        valid_times = valid_times[
-            valid_times < _utc_day(end) + pd.Timedelta(days=1)
+    if (start is None) != (end is None):
+        raise ValueError("--start and --end must be provided together")
+    if start is not None and end is not None:
+        local_dates = [
+            stamp.date().isoformat()
+            for stamp in pd.date_range(start, end, freq="D")
         ]
-    local_dates = sorted(
-        valid_times.dt.tz_convert(STATIONS[station_id].timezone)
-        .dt.date.astype(str)
-        .drop_duplicates()
-        .tolist()
-    )
+    else:
+        obs = ParquetStore(data_root / "obs").read(
+            station_id,
+            start=pd.Timestamp("2000-01-01", tz="UTC"),
+            end=pd.Timestamp("2100-01-01", tz="UTC"),
+        )
+        if obs.empty or "valid_time" not in obs.columns:
+            return _prefetch_summary(station_id, [], 0, 0, [])
+        valid_times = pd.to_datetime(obs["valid_time"], utc=True)
+        local_dates = sorted(
+            valid_times.dt.tz_convert(STATIONS[station_id].timezone)
+            .dt.date.astype(str)
+            .drop_duplicates()
+            .tolist()
+        )
 
     cache_reader = client_cls(truth_root)
     timezone = STATIONS[station_id].timezone
@@ -66,7 +68,7 @@ def prefetch_weather_com_truth(
     pending = []
     for day in local_dates:
         cached = cache_reader.read_cached_date(station_id, day)
-        if not complete_local_day(cached, day):
+        if force_refresh or not complete_local_day(cached, day):
             pending.append(day)
     cached_count = len(local_dates) - len(pending)
     fetched_count = 0
@@ -138,6 +140,16 @@ def _cli() -> None:
     parser.add_argument("--start")
     parser.add_argument("--end")
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="refetch every requested date even when its hourly cache is complete",
+    )
+    parser.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="finish when only source-incomplete local days remain for exclusion",
+    )
     parser.add_argument("--data-store")
     parser.add_argument("--truth-store")
     args = parser.parse_args()
@@ -152,6 +164,12 @@ def _cli() -> None:
         args.truth_store
         or settings.truth_store_dir
     )
+    print(
+        f"[start] Weather.com truth prefetch station={args.station} "
+        f"range={args.start or 'IEM-derived'}..{args.end or 'IEM-derived'} "
+        f"force_refresh={args.force_refresh}",
+        flush=True,
+    )
     summary = prefetch_weather_com_truth(
         data_store_dir=data_store,
         truth_store_dir=truth_store,
@@ -159,10 +177,30 @@ def _cli() -> None:
         start=args.start,
         end=args.end,
         workers=args.workers,
+        force_refresh=args.force_refresh,
+    )
+    print(
+        f"[complete] Weather.com truth prefetch "
+        f"requested_dates={summary.get('requested_dates', 0)} "
+        f"fetched_dates={summary.get('fetched_dates', 0)} "
+        f"errors={summary.get('errors', 0)}",
+        flush=True,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
-    if summary["errors"]:
+    error_details = list(summary.get("error_details", []))
+    only_incomplete = bool(error_details) and all(
+        "incomplete local day" in str(detail.get("error", ""))
+        for detail in error_details
+    )
+    if summary["errors"] and not (args.allow_incomplete and only_incomplete):
         raise SystemExit(1)
+    if summary["errors"]:
+        print(
+            f"[complete] retained source-incomplete exclusions="
+            f"{len(error_details)}",
+            flush=True,
+        )
+    print("[done] Weather.com truth prefetch", flush=True)
 
 
 if __name__ == "__main__":

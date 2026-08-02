@@ -177,6 +177,32 @@ def test_weather_com_prefers_iem_representative_hour_candidate(tmp_path):
     assert selected["weather_com_temp_f"] == 53.0
 
 
+def test_weather_com_cache_retains_raw_local_day_high_separately_from_hourly_representation(
+    tmp_path,
+):
+    valid_hour = pd.Timestamp("2026-05-24 12:00:00", tz="UTC")
+    payload = _complete_payload("2026-05-24", default_temp=50.0)
+    payload["observations"].append(
+        {
+            "valid_time_gmt": int(
+                (valid_hour + pd.Timedelta(minutes=19)).timestamp()
+            ),
+            "temp": 54,
+        }
+    )
+    client = WeatherComTruthClient(
+        tmp_path / "truth",
+        api_key="secret",
+        session=_Session(payload),
+    )
+
+    hourly = client.fetch_date("KLGA", "2026-05-24")
+    cached = pd.read_parquet(tmp_path / "truth" / "KLGA" / "2026-05-24.parquet")
+
+    assert hourly["weather_com_temp_f"].max() == 50.0
+    assert cached["weather_com_raw_daily_high_f"].unique().tolist() == [54.0]
+
+
 def test_weather_com_refetches_stale_alignment_cache_when_key_available(tmp_path):
     cache_dir = tmp_path / "truth" / "KLGA"
     cache_dir.mkdir(parents=True)

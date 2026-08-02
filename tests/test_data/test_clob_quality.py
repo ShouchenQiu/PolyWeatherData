@@ -69,6 +69,27 @@ def test_clob_audit_accepts_only_explicitly_excluded_missing_dates() -> None:
     }
 
 
+def test_clob_audit_report_excludes_complete_clob_day_with_incomplete_truth() -> None:
+    dataset = _dataset()
+    dataset.markets["bucket_lo_f"] = float("-inf")
+    dataset.markets["bucket_hi_f"] = float("inf")
+    report = build_clob_audit_report(
+        dataset,
+        exclusions={"2026-04-02": "provider_event_unavailable"},
+        analysis_exclusions={
+            "2026-04-01": "incomplete_station_local_day"
+        },
+    )
+
+    coverage = report.daily_coverage.set_index("target_date")
+    assert report.passed
+    assert coverage.loc["2026-04-01", "audit_status"] == "EXCLUDED"
+    assert coverage.loc["2026-04-01", "exclusion_reason"] == (
+        "incomplete_station_local_day"
+    )
+    assert coverage.loc["2026-04-02", "audit_status"] == "EXCLUDED"
+
+
 def test_clob_audit_rejects_unexplained_coverage_gap() -> None:
     with pytest.raises(
         HistoricalDataIncomplete,

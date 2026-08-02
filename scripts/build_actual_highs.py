@@ -30,8 +30,10 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
     rows: list[dict] = []
+    exclusion_rows: list[dict] = []
     source_hasher = hashlib.sha256()
-    for stamp in pd.date_range(args.start, args.end, freq="D"):
+    requested_days = pd.date_range(args.start, args.end, freq="D")
+    for stamp in requested_days:
         target_date = stamp.date().isoformat()
         path = (
             args.truth_store
@@ -46,53 +48,98 @@ def main(argv: list[str] | None = None) -> int:
         source_hasher.update(path.name.encode("ascii"))
         source_hasher.update(payload)
         frame = pd.read_parquet(path)
-        if "weather_com_temp_f" not in frame:
-            raise ValueError(f"truth file missing weather_com_temp_f: {path}")
         observed_hours, expected_hours = local_day_hour_coverage(
             frame,
             local_date=target_date,
             timezone=STATIONS[args.station].timezone,
         )
         if observed_hours != expected_hours:
-            raise ValueError(
-                "incomplete Weather.com local day "
-                f"station={args.station} date={target_date} "
-                f"observed_hours={observed_hours} expected_hours={expected_hours}: "
-                f"{path}"
+            exclusion_rows.append(
+                {
+                    "station_id": args.station,
+                    "target_date": target_date,
+                    "observed_hours": observed_hours,
+                    "expected_hours": expected_hours,
+                    "exclusion_reason": "incomplete_station_local_day",
+                }
             )
-        temperatures = pd.to_numeric(
-            frame["weather_com_temp_f"],
+            print(
+                f"[complete] truth exclusion date={target_date} "
+                f"observed_hours={observed_hours} expected_hours={expected_hours}",
+                flush=True,
+            )
+            continue
+        required_truth_columns = {
+            "weather_com_temp_f",
+            "weather_com_raw_daily_high_f",
+        }
+        missing_truth_columns = required_truth_columns - set(frame)
+        if missing_truth_columns:
+            raise ValueError(
+                "truth file missing resolution daily-high columns "
+                f"{sorted(missing_truth_columns)}: {path}"
+            )
+        daily_highs = pd.to_numeric(
+            frame["weather_com_raw_daily_high_f"],
             errors="coerce",
         ).dropna()
-        if temperatures.empty:
-            raise ValueError(f"truth file has no temperatures: {path}")
+        if daily_highs.empty or daily_highs.nunique() != 1:
+            raise ValueError(
+                "truth file must contain exactly one raw daily high "
+                f"for {target_date}: {path}"
+            )
         rows.append(
             {
                 "target_date": target_date,
-                "actual_high_f": float(temperatures.max()),
+                "actual_high_f": float(daily_highs.iloc[0]),
             }
         )
     if args.output.exists():
         raise FileExistsError(args.output)
+    exclusions_path = args.output.with_suffix(".truth_exclusions.parquet")
+    if exclusions_path.exists():
+        raise FileExistsError(exclusions_path)
     manifest_path = args.output.with_suffix(
         args.output.suffix + ".manifest.json"
     )
     if manifest_path.exists():
         raise FileExistsError(manifest_path)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(rows).to_csv(args.output, index=False)
+    pd.DataFrame(rows, columns=["target_date", "actual_high_f"]).to_csv(
+        args.output,
+        index=False,
+    )
+    pd.DataFrame(
+        exclusion_rows,
+        columns=[
+            "station_id",
+            "target_date",
+            "observed_hours",
+            "expected_hours",
+            "exclusion_reason",
+        ],
+    ).to_parquet(exclusions_path, index=False)
     manifest = {
         "schema_version": 2,
         "data_class": "market_resolution_actual_highs",
-        "hour_coverage_contract": "complete_station_local_day",
+        "daily_high_source": "weather_com_raw_observation_max",
+        "hour_coverage_contract": (
+            "complete_station_local_day_or_explicit_exclusion"
+        ),
         "station_id": args.station,
         "requested_range": [args.start, args.end],
+        "requested_day_count": len(requested_days),
         "row_count": len(rows),
+        "exclusion_count": len(exclusion_rows),
+        "truth_exclusions_file": exclusions_path.name,
         "source_sha256": source_hasher.hexdigest(),
         "sha256": {
             args.output.name: hashlib.sha256(
                 args.output.read_bytes()
-            ).hexdigest()
+            ).hexdigest(),
+            exclusions_path.name: hashlib.sha256(
+                exclusions_path.read_bytes()
+            ).hexdigest(),
         },
     }
     manifest_path.write_text(
@@ -101,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         f"[complete] market-resolution actual highs rows={len(rows)} "
-        f"output={args.output}",
+        f"exclusions={len(exclusion_rows)} output={args.output}",
         flush=True,
     )
     print(f"[done] market-resolution actual highs output={args.output}", flush=True)

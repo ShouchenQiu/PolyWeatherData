@@ -73,6 +73,26 @@ def test_prefetch_infers_local_dates_from_obs_and_skips_cached_days(tmp_path):
     assert _FakeTruthClient.fetched_days == ["2026-06-02"]
 
 
+def test_prefetch_explicit_range_force_refreshes_complete_cache(tmp_path):
+    _FakeTruthClient.fetched_days = []
+
+    summary = prefetch_weather_com_truth(
+        data_store_dir=tmp_path / "data_store",
+        truth_store_dir=tmp_path / "truth",
+        station_id="KLGA",
+        start="2026-06-01",
+        end="2026-06-02",
+        workers=1,
+        force_refresh=True,
+        client_cls=_FakeTruthClient,
+    )
+
+    assert summary["requested_dates"] == 2
+    assert summary["cached_dates"] == 0
+    assert summary["fetched_dates"] == 2
+    assert _FakeTruthClient.fetched_days == ["2026-06-01", "2026-06-02"]
+
+
 def test_prefetch_reports_partial_failures_and_keeps_completed_dates(tmp_path):
     class PartiallyFailingClient(_FakeTruthClient):
         cached_days = set()

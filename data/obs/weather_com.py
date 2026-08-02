@@ -11,7 +11,11 @@ import requests
 from config.stations import STATIONS
 
 DEFAULT_WEATHER_COM_API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
-_ALIGNMENT_VERSION = "iem_representative_hour_v2"
+_ALIGNMENT_VERSION = "iem_representative_hour_v3_with_raw_daily_high"
+_COMPATIBLE_HOURLY_ALIGNMENT_VERSIONS = {
+    "iem_representative_hour_v2",
+    _ALIGNMENT_VERSION,
+}
 
 
 class WeatherComApiKeyMissing(RuntimeError):
@@ -97,7 +101,10 @@ class WeatherComTruthClient:
             )
             if (
                 observed == expected
-                and (self._cache_is_current(cached) or not self._api_key)
+                and (
+                    self._cache_is_resolution_truth_current(cached)
+                    or not self._api_key
+                )
             ):
                 return self._public_columns(cached)
 
@@ -127,8 +134,19 @@ class WeatherComTruthClient:
                 f"Weather.com fetch failed for station={station_id} date={day}: {exc}"
             ) from exc
 
-        frame = self._normalize(station_id, payload)
-        frame = self._filter_local_day(frame, day=day, timezone=timezone)
+        raw_frame = self._observation_frame(station_id, payload)
+        raw_frame = self._filter_local_day(raw_frame, day=day, timezone=timezone)
+        frame = self._select_representative_hours(raw_frame)
+        raw_temps = pd.to_numeric(
+            raw_frame["weather_com_temp_f"], errors="coerce"
+        ).dropna()
+        if raw_temps.empty:
+            raise WeatherComFetchError(
+                "Weather.com returned no usable temperatures "
+                f"station={station_id} date={day}"
+            )
+        frame["weather_com_raw_daily_high_f"] = float(raw_temps.max())
+        frame["_weather_com_alignment_version"] = _ALIGNMENT_VERSION
         observed, expected = local_day_hour_coverage(
             frame,
             local_date=day,
@@ -187,6 +205,19 @@ class WeatherComTruthClient:
 
     @classmethod
     def _normalize(cls, station_id: str, payload: dict[str, Any]) -> pd.DataFrame:
+        frame = cls._observation_frame(station_id, payload)
+        if frame.empty:
+            return frame
+        frame = cls._select_representative_hours(frame)
+        frame["_weather_com_alignment_version"] = _ALIGNMENT_VERSION
+        return frame.reset_index(drop=True)
+
+    @classmethod
+    def _observation_frame(
+        cls,
+        station_id: str,
+        payload: dict[str, Any],
+    ) -> pd.DataFrame:
         rows = []
         for obs in payload.get("observations", []):
             temp_f = obs.get("temp")
@@ -207,10 +238,7 @@ class WeatherComTruthClient:
             )
         if not rows:
             return cls._empty_frame()
-        frame = pd.DataFrame(rows)
-        frame = cls._select_representative_hours(frame)
-        frame["_weather_com_alignment_version"] = _ALIGNMENT_VERSION
-        return frame.reset_index(drop=True)
+        return pd.DataFrame(rows).reset_index(drop=True)
 
     @staticmethod
     def _select_representative_hours(frame: pd.DataFrame) -> pd.DataFrame:
@@ -251,7 +279,16 @@ class WeatherComTruthClient:
         if "_weather_com_alignment_version" not in frame.columns:
             return False
         versions = frame["_weather_com_alignment_version"].dropna().unique().tolist()
-        return versions == [_ALIGNMENT_VERSION]
+        return len(versions) == 1 and versions[0] in _COMPATIBLE_HOURLY_ALIGNMENT_VERSIONS
+
+    @staticmethod
+    def _cache_is_resolution_truth_current(frame: pd.DataFrame) -> bool:
+        return (
+            WeatherComTruthClient._cache_is_current(frame)
+            and "weather_com_raw_daily_high_f" in frame.columns
+            and frame["_weather_com_alignment_version"].dropna().unique().tolist()
+            == [_ALIGNMENT_VERSION]
+        )
 
     @staticmethod
     def _public_columns(frame: pd.DataFrame) -> pd.DataFrame:

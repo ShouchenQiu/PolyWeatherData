@@ -18,6 +18,15 @@ _Avoid_: lead time (ambiguous)
 per init_time in ParquetStore.
 _Avoid_: first-hour forecast
 
+**first-object availability**: The first observed publication of an init_time's f01
+IDX object on a mirror; it is not evidence that the complete decoder window is ready.
+_Avoid_: decoder-ready time
+
+**decoder-ready latency**: The elapsed time from init_time until all required native
+fxx objects and any non-MAJOR dependency are visible on one mirror and the decoder
+contract can be constructed.
+_Avoid_: first-object latency, model latency
+
 **MAJOR hour**: One of the four HRRR init_times per day (00z, 06z, 12z, 18z) that produce
 a full 48-hour forecast horizon; non-MAJOR init_times produce only 18 h.
 _Avoid_: full run, extended run
@@ -98,6 +107,23 @@ past-public-trade synthetic YES midpoints divided by its cross-Bucket sum. The r
 is retained as overround evidence. This is a public-price benchmark for signal
 evaluation, not a historical L2 quote or an executable price.
 _Avoid_: market probability, executable midpoint
+
+**transaction calibration gap**: Within one declared token-price, settlement-lead,
+and weighting cell, the empirical resolved-Token outcome rate minus the mean public
+transaction price. It is descriptive market-calibration evidence, not executable edge;
+repeated fills remain visible in the paper-style view while the primary estimate first
+collapses Event/Market duplicates and weights Events equally.
+_Avoid_: true probability gap, market edge, executable edge
+
+**truth exclusion**: A hash-bound station-local target date omitted from formal analysis
+because the resolution-truth source cannot prove a complete local day; it is never an
+imputed or partially observed daily high.
+_Avoid_: missing value, accepted partial day
+
+**raw-observation daily high**: The maximum temperature across every Weather.com
+observation in one station-local calendar day, retained separately from the hourly
+representative observation sequence for Event-resolution truth.
+_Avoid_: hourly maximum, TFT observation high
 
 **Forecast Signal Study**: A strategy-free `oof_development` comparison of raw
 ForecastCache Bucket probabilities with the normalized synthetic midpoint on identical
@@ -323,6 +349,11 @@ _Avoid_: parquet file, storage file
 
 - One **init_time** may cover up to 48 **fxx** offsets; only **f01** is stored per
   init_time in **ParquetStore**.
+- **first-object availability** is typically near 53 minutes after init_time, while
+  **decoder-ready latency** is approximately 86 minutes for non-MAJOR cycles and 108
+  minutes for MAJOR cycles; these are separate operational clocks.
+- A non-MAJOR's prior-MAJOR dependency is a completeness gate, not a fixed six-hour
+  wait; in normal cycles the prior MAJOR is ready before the non-MAJOR terminal fxx.
 - **encoder window**: 72 rows (-71..0), each = (f01, IEM obs); owned by **Cleaner**
   after all feature engineering is applied.
 - **decoder window**: 48 rows (1..48), each = (HRRR fxx, IEM target).

@@ -27,6 +27,7 @@ def build_clob_audit_report(
     dataset: HistoricalClobDataset,
     *,
     exclusions: Mapping[str, str] | None = None,
+    analysis_exclusions: Mapping[str, str] | None = None,
     quotes: pd.DataFrame | None = None,
     actual_highs: pd.DataFrame | None = None,
     clob_manifest_sha256: str | None = None,
@@ -36,17 +37,28 @@ def build_clob_audit_report(
 ) -> ClobAuditReport:
     """Return non-raising semantic evidence suitable for an audit UI."""
     excluded = {str(day): str(reason) for day, reason in (exclusions or {}).items()}
+    analysis_excluded = {
+        str(day): str(reason)
+        for day, reason in (analysis_exclusions or {}).items()
+    }
     coverage = dataset.coverage()
-    coverage["exclusion_reason"] = (
-        coverage["target_date"].astype(str).map(excluded)
+    coverage_dates = coverage["target_date"].astype(str)
+    coverage["exclusion_reason"] = coverage_dates.map(
+        analysis_excluded
+    ).combine_first(
+        coverage_dates.map(excluded)
     )
     coverage["audit_status"] = np.where(
-        coverage["complete"],
-        "ELIGIBLE",
+        coverage_dates.isin(analysis_excluded),
+        "EXCLUDED",
         np.where(
-            coverage["exclusion_reason"].notna(),
-            "EXCLUDED",
-            "FAIL",
+            coverage["complete"],
+            "ELIGIBLE",
+            np.where(
+                coverage["exclusion_reason"].notna(),
+                "EXCLUDED",
+                "FAIL",
+            ),
         ),
     )
     incomplete = set(
@@ -54,6 +66,7 @@ def build_clob_audit_report(
     )
     unexplained = incomplete - set(excluded)
     unnecessary = set(excluded) - incomplete
+    unknown_analysis_exclusions = set(analysis_excluded) - set(coverage_dates)
     check_rows: list[dict] = []
     failures: list[str] = []
 
@@ -80,6 +93,8 @@ def build_clob_audit_report(
         len(unexplained)
         + len(unnecessary)
         + sum(not reason for reason in excluded.values())
+        + len(unknown_analysis_exclusions)
+        + sum(not reason for reason in analysis_excluded.values())
     )
     coverage_detail = "; ".join(
         part
@@ -92,6 +107,12 @@ def build_clob_audit_report(
             (
                 "unnecessary exclusions: " + ", ".join(sorted(unnecessary))
                 if unnecessary
+                else ""
+            ),
+            (
+                "unknown analysis exclusions: "
+                + ", ".join(sorted(unknown_analysis_exclusions))
+                if unknown_analysis_exclusions
                 else ""
             ),
         ]
@@ -441,8 +462,8 @@ def build_clob_audit_report(
             "quotes": quote_count,
             "actual_days": actual_days,
             "requested_days": len(coverage),
-            "eligible_days": int(coverage["complete"].sum()),
-            "excluded_days": len(excluded),
+            "eligible_days": int(coverage["audit_status"].eq("ELIGIBLE").sum()),
+            "excluded_days": int(coverage["audit_status"].eq("EXCLUDED").sum()),
             "trade_usdc": float(usdcs.sum()),
             "suspected_truncated_markets": suspected_truncated_markets,
             "quote_quality": quality_counts,
