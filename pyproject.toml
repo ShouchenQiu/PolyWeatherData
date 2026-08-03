@@ -10,26 +10,15 @@ dependencies = [
     "numpy",
     "pandas",
     "pyarrow",
-    "xarray",
-    "cfgrib",
-    "eccodes",
-    "zarr",
-    "fsspec",
-    "s3fs",
     "requests",
-    "torch",
-    "pytorch-forecasting",
     "python-dotenv",
     "loguru",
     "streamlit",
     "plotly",
-    "optuna>=4,<5",
 ]
 
 [project.optional-dependencies]
 clob = ["polymarket-client"]
-herbie = ["herbie-data"]
-monitor = ["psutil", "nvidia-ml-py", "tabulate", "colorama"]
 dev = ["pytest", "pytest-cov", "black", "ruff"]
 
 [tool.setuptools.packages.find]
