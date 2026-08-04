@@ -1,35 +1,22 @@
-"""Observability recorder for UI-facing runtime snapshots."""
+"""Observability recorder stub for PolyWeatherData.
+
+PnL, position tracking, and probability store were removed in the
+PolyWeatherBot -> PolyWeatherData migration.  This module is a stub;
+observability will be redesigned for mispricing analysis.
+"""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
-
-import pandas as pd
-
-from core.pnl import PnLCalculator
-from core.pricing.quote import compute_book_metrics
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from core.positions import PositionTracker
-    from core.probability_store import ProbabilitySnapshot
     from db.schema import DbClient
 
 
 class ObservabilityRecorder:
-    """Persist runtime observations without changing trading decisions.
+    """Stub recorder -- future redesign for mispricing analysis."""
 
-    The trading source of truth remains ProbabilityStore and the existing
-    Order/Signal tables; this module records UI-readable snapshots only.
-    """
-
-    def __init__(self, db: "DbClient") -> None:
+    def __init__(self, db: "DbClient | None" = None) -> None:
         self._db = db
-
-    def record_forecast_success(
-        self,
-        event: dict,
-        init_utc: pd.Timestamp,
-        day_offset: int,
         markets: list[dict],
         result: dict,
         snapshot: "ProbabilitySnapshot",

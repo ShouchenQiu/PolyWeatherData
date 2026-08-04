@@ -1,4 +1,4 @@
-"""core package -- strategy, exchange, risk, and position tracking."""
-from core.positions import PositionTracker
+"""core package -- analysis runner and shared types."""
+from core.bot import AnalysisRunner
 
-__all__ = ["PositionTracker"]
+__all__ = ["AnalysisRunner"]

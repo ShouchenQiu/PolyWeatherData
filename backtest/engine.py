@@ -27,10 +27,14 @@ from loguru import logger
 
 if TYPE_CHECKING:
     from config.stations import StationConfig
-    from core.strategy.base import BaseStrategy
     from data.manager import DataManager
     from data.storage.parquet_store import ParquetStore
-    from model.pipeline import ModelPipeline
+
+# NOTE: backtest/engine.py is marked for future rewrite for PolyWeatherData
+# (market-vs-truth mispricing analysis instead of model-vs-CLOB).
+# Historic imports from model.* and core.strategy.* were removed during the
+# PolyWeatherBot -> PolyWeatherData migration.
+# TODO: Rewrite BacktestEngine to compute calibration gap = E[truth] - E[market].
 
 # Matching _sniper_analysis.py: average half-spread cost in probability pts
 HALFSPREAD_DRAG: float = -1.27 / 100.0   # -0.0127 as a fraction of $1
@@ -173,22 +177,13 @@ class BacktestEngine:
             for hour in init_hours:
                 init_utc = day + pd.Timedelta(hours=hour)
                 if self._data_manager is not None:
-                    from model.tft import MAX_ENCODER_LENGTH
-                    status = self._data_manager.inference_readiness(
-                        station, init_utc, MAX_ENCODER_LENGTH
+                    # NOTE: inference_readiness requires model module (removed).
+                    # BacktestEngine is marked for future rewrite.
+                    logger.debug(
+                        "Backtest: data_manager readiness check skipped "
+                        "(model module removed in PolyWeatherData migration)"
                     )
-                    if not status.ready:
-                        logger.debug(
-                            "Backtest: readiness skip init={} reason={}",
-                            init_utc, status.reason,
-                        )
-                        self._readiness_skips.append({
-                            "init_utc":           init_utc,
-                            "reason":             status.reason,
-                            "first_eligible_init": status.first_eligible_init,
-                        })
-                        continue
-                elif init_utc < cold_start_cutoff:
+                if init_utc < cold_start_cutoff:
                     logger.debug("cold-start skip: {}", init_utc)
                     continue
                 self._process_init(init_utc, station, records)
@@ -249,39 +244,11 @@ class BacktestEngine:
         src  = real if len(real) > 0 else win
         qual = "real" if len(real) > 0 else "filled"
 
-        from core.pricing.quote import compute_quote
-
-        # Per-row routing: L2 when non-empty bids+asks exist, else legacy.
-        has_bids_col = "bids" in src.columns
-        has_asks_col = "asks" in src.columns
-
+        # compute_quote was removed in PolyWeatherData migration.
+        # Use mid_price_yes as the reference price (no L2 pricing layer).
         def _row_prices(r: pd.Series) -> tuple[float | None, float | None, float | None]:
-            """Return (ask_vwap, bid_vwap, legacy_mid) for one CLOB row.
-
-            Each side is evaluated independently: ask_vwap is kept when BUY
-            depth is sufficient, bid_vwap when SELL depth is sufficient.
-            Legacy mid is used only when the row has no L2 data at all.
-            """
-            ask = bid = legacy = None
-            attempted_l2 = False
-            if has_bids_col and has_asks_col:
-                bids = r.get("bids")
-                asks = r.get("asks")
-                if isinstance(bids, list) and len(bids) > 0 and isinstance(asks, list) and len(asks) > 0:
-                    attempted_l2 = True
-                    book = {"bids": bids, "asks": asks}
-                    try:
-                        q_ask = compute_quote(book, "BUY", self._quote_size_usd)
-                        q_bid = compute_quote(book, "SELL", self._quote_size_usd)
-                        if q_ask.complete_fill:
-                            ask = q_ask.vwap_price
-                        if q_bid.complete_fill:
-                            bid = q_bid.vwap_price
-                    except Exception:
-                        pass
-            if not attempted_l2:
-                legacy = float(r["mid_price_yes"]) if "mid_price_yes" in r.index and pd.notna(r.get("mid_price_yes")) else None
-            return ask, bid, legacy
+            legacy = float(r["mid_price_yes"]) if "mid_price_yes" in r.index and pd.notna(r.get("mid_price_yes")) else None
+            return None, None, legacy
 
         src = src.copy()
         prices = src.apply(_row_prices, axis=1, result_type="expand")

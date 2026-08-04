@@ -18,13 +18,12 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 if TYPE_CHECKING:
     from config.settings import Settings
-    from core.alerts import AlertBus
     from db.schema import DbClient
 
 
@@ -141,7 +140,8 @@ class EventDiscovery:
         weather temperature events.  Defaults to ``["temperature", "daily-high",
         "high-temp"]`` when None is passed.
     alert_bus:
-        Optional AlertBus for emitting ``discovery_warn`` events.
+        Optional alert bus for emitting discovery_warn events.  In
+        PolyWeatherData this is always None (alert bus was removed).
     """
 
     DEFAULT_SLUG_PATTERNS = ["temperature", "daily-high", "high-temp"]
@@ -152,7 +152,7 @@ class EventDiscovery:
         db: "DbClient",
         settings: "Settings",
         slug_patterns: list[str] | None = None,
-        alert_bus: "AlertBus | None" = None,
+        alert_bus: "Any | None" = None,
     ) -> None:
         self._db             = db
         self._settings       = settings
@@ -569,20 +569,15 @@ class EventDiscovery:
         return rows, unrecog_count
 
     def _emit_discovery_warn(self, market_slug: str, condition_id: str) -> None:
-        """Emit a discovery_warn AlertEvent when a slug is unrecognized."""
-        if self._alert_bus is None:
-            return
-        try:
-            from core.alerts import AlertEvent
-            self._alert_bus.emit_nowait(AlertEvent(
-                alert_type  = "discovery_warn",
-                station     = None,
-                message     = f"Unrecognized slug: {market_slug!r} (condition: {condition_id})",
-                occurred_at = datetime.now(timezone.utc),
-                context     = {"slug": market_slug, "condition_id": condition_id},
-            ))
-        except Exception:
-            logger.exception("EventDiscovery: failed to emit discovery_warn alert")
+        """Log a warning when a slug is unrecognized.
+
+        AlertBus was removed in PolyWeatherData; discovery warnings are logged
+        at WARNING level instead.
+        """
+        logger.warning(
+            "Unrecognized slug: {!r} (condition: {})",
+            market_slug, condition_id,
+        )
 
     def _infer_station(self, slug: str) -> str:
         """Return the station_id that owns *slug* based on slug_aliases.

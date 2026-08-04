@@ -1,20 +1,20 @@
-"""Stateful 5-minute point-in-time market replay."""
+"""Stateful point-in-time market replay stub.
+
+ForecastCache, synthetic quotes, and compute_quote were removed in the
+PolyWeatherBot -> PolyWeatherData migration.  This module is a stub;
+replay will be redesigned for market-vs-truth mispricing analysis.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from types import SimpleNamespace
 
-import pandas as pd
+class PointInTimeReplay:
+    """Stub -- future redesign for mispricing analysis."""
 
-from backtest.forecast_cache import ForecastCache
-from backtest.synthetic_quotes import build_synthetic_book
-from core.pricing.quote import compute_quote
-from core.trading.decision import (
-    FeeSchedule,
-    PortfolioState,
-    TradingDecisionKernel,
-)
-from core.types import DirectionalSignal
+    def __init__(self, **kwargs) -> None:
+        raise NotImplementedError(
+            "PointInTimeReplay is not yet implemented for PolyWeatherData. "
+            "Rewrite pending: market-vs-truth analysis replaces model-vs-CLOB replay."
+        )
 
 
 @dataclass(frozen=True)
