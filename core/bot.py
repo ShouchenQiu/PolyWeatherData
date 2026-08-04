@@ -1,256 +1,28 @@
-"""BotManager: top-level coordinator that owns and starts all loops."""
+"""PolyWeatherData analysis coordinator.
+
+No live trading loops, no model inference.  Loads events/markets from DB
+and coordinates mispricing analysis.
+"""
 from __future__ import annotations
 
-import asyncio
-from typing import TYPE_CHECKING
-
-try:
-    from polymarket import PublicClient, SecureClient  # type: ignore[import-untyped]
-except ImportError:
-    try:
-        from polymarket_client import PublicClient, SecureClient  # type: ignore[import-untyped]
-    except ImportError:
-        PublicClient = None  # type: ignore[assignment,misc]
-        SecureClient = None  # type: ignore[assignment,misc]
-
-if TYPE_CHECKING:
-    from config.settings import Settings
+from config.settings import Settings
+from db.schema import DbClient
 
 
-class BotManager:
-    """Initialise every component from Settings and run all loops concurrently.
-
-    All loop objects are set as instance attributes so unit tests can
-    inject mocks by replacing them after construction.
-
-    Parameters
-    ----------
-    settings:
-        Application-wide settings.
-    db_path:
-        Override the SQLite path.  Defaults to settings.data_store_dir/bot.db.
-    """
+class AnalysisRunner:
+    """Load events and markets from the DB for mispricing analysis."""
 
     def __init__(
         self,
-        settings: "Settings",
+        settings: Settings | None = None,
         db_path: str | None = None,
     ) -> None:
-        self.settings = settings
-        self._db_path = db_path
-        self._build(settings, db_path)
-
-    # ------------------------------------------------------------------
-    # Component wiring
-    # ------------------------------------------------------------------
-
-    def _build(self, settings: "Settings", db_path: str | None) -> None:
-        """Lazily import and construct every component."""
-        from config.stations import STATIONS
-        from core.alerts import AlertBus
-        from core.exchange.clob import ClobExchange
-        from core.exchange.paper import PaperExchange
-        from data.clob.orderbook import OrderbookFetcher
-        from core.positions import PositionTracker
-        from core.trading.decision import TradingDecisionKernel
-        from core.probability_store import ProbabilityStore
-        from core.risk.fixed_fraction import FixedFraction
-        from core.risk.pipeline import RiskPipeline
-        from core.strategy.edge import EdgeStrategy
-        from core.strategy.multi import MultiStrategy
-        from data.forecast.hrrr_nomads import HrrrNomadsSource
-        from data.forecast.hrrr_s3 import HrrrS3Source
-        from data.manager import DataManager
-        from data.obs.iem import IemSource
-        from data.obs.noaa_file import NoaaFileSource
-        from data.storage.parquet_store import ParquetStore
-        from db.schema import DbClient
-        from events.discovery import EventDiscovery
-        from events.lifecycle import EventLifecycle
-        from loops.discovery_loop import DiscoveryLoop
-        from loops.forecast_loop import ForecastLoop
-        from loops.settlement_loop import SettlementLoop
-        from loops.sniper_loop import SniperLoop
-        from loops.trading_loop import TradingLoop
-        from loops.redeem_loop import RedeemLoop
-        from model.mc import McSampler
-        from model.pipeline import ModelPipeline
-        from model.store.registry import ModelRegistry
-        from snipers.awc import AwcSniper
-        from snipers.sniper_manager import SniperManager
-        from snipers.noaa import NoaaSniper
-
-        # DB
-        path   = db_path or str(settings.data_store_dir / "bot.db")
+        self.settings = settings or Settings()
+        path = db_path or str(self.settings.data_store_dir / "polyweather.db")
         self.db = DbClient(path)
 
-        # Data layer
-        forecast_store  = ParquetStore(settings.forecast_store_dir)
-        self.obs_store  = ParquetStore(settings.obs_store_dir)
-        s3_base     = f"https://{settings.hrrr_s3_bucket}.s3.amazonaws.com"
-        nomads_base = settings.hrrr_nomads_base
-        self.data_mgr   = DataManager(
-            forecast_sources = [
-                HrrrS3Source(base_url=s3_base),
-                HrrrNomadsSource(base_url=nomads_base),
-            ],
-            obs_sources      = [IemSource(fallback=NoaaFileSource())],
-            forecast_store   = forecast_store,
-            obs_store        = self.obs_store,
-        )
+    def load_events(self) -> list[dict]:
+        return self.db.get_all_events()
 
-        # Model
-        registry = ModelRegistry(
-            store_dir = settings.model_store_dir,
-            db        = self.db,
-        )
-        try:
-            tft = registry.load_latest()
-        except (RuntimeError, FileNotFoundError) as exc:
-            raise RuntimeError(
-                f"TFT model file not found at {settings.model_store_dir}"
-            ) from exc
-        self.mc       = McSampler(n_samp=settings.mc_n_samp,
-                                  rng_seed=settings.mc_rng_seed)
-        calibration = registry.load_mc_calibration()
-        if calibration is not None:
-            self.mc.set_calibration(calibration)
-        else:
-            cov = registry.load_covariance()
-            if cov is not None:
-                self.mc.set_cov(cov)
-        self.pipeline = ModelPipeline(tft=tft, mc=self.mc,
-                                      data_mgr=self.data_mgr, registry=registry)
-
-        # Station (default KLGA)
-        self.station    = next(iter(STATIONS.values()))
-
-        # Shared ADR-0004 objects
-        self.prob_store = ProbabilityStore()
-        self.alert_bus  = AlertBus()
-
-        # Risk + positions
-        self.risk      = RiskPipeline([FixedFraction.from_settings(settings)])
-        self.positions = PositionTracker(self.db)
-
-        # Strategy
-        self.strategy = MultiStrategy([
-            EdgeStrategy(
-                min_edge       = settings.min_edge,
-                quote_size_usd = settings.quote_size_usd,
-            )
-        ])
-
-        # Exchange wiring [ADR-0009]
-        if settings.trading_mode == "live":
-            if SecureClient is None:
-                raise ImportError(
-                    "polymarket-client is required for live trading mode."
-                )
-            secure = SecureClient.create(
-                private_key = settings.polymarket_private_key,
-                wallet      = settings.polymarket_wallet_address or None,
-            )
-            if PublicClient is not None:
-                self.orderbook = OrderbookFetcher(PublicClient())
-            else:
-                self.orderbook = None
-            self.exchange = ClobExchange(secure, alert_bus=self.alert_bus)
-        else:
-            # Paper mode: never load private key
-            if PublicClient is not None:
-                self.orderbook = OrderbookFetcher(PublicClient())
-            else:
-                self.orderbook = None
-            self.exchange = PaperExchange(alert_bus=self.alert_bus)
-
-        # Events
-        self.discovery  = EventDiscovery(self.db, settings, alert_bus=self.alert_bus)
-        self.lifecycle  = EventLifecycle()
-
-        # Snipers
-        first_station   = self.station.station_id
-        self.snipers    = SniperManager([
-            NoaaSniper(first_station),
-            AwcSniper(first_station),
-        ])
-
-        # Loops (ADR-0004: ForecastLoop writes ProbabilityStore; TradingLoop reads it)
-        self.forecast_loop = ForecastLoop(
-            pipeline     = self.pipeline,
-            prob_store   = self.prob_store,
-            db           = self.db,
-            station      = self.station,
-            data_manager = self.data_mgr,
-        )
-        self.trading_loop  = TradingLoop(
-            prob_store = self.prob_store,
-            alert_bus  = self.alert_bus,
-            settings   = settings,
-            strategy   = self.strategy,
-            risk       = self.risk,
-            exchange   = self.exchange,
-            positions  = self.positions,
-            db         = self.db,
-            orderbook  = self.orderbook,
-            is_paper   = (settings.trading_mode != "live"),
-            decision_kernel = TradingDecisionKernel(
-                min_edge=settings.min_edge,
-                buy_size_usd=settings.max_position_usd,
-                max_gross_usd=settings.max_total_usd,
-                max_event_usd=settings.max_event_usd,
-            ),
-        )
-        self.discovery_loop  = DiscoveryLoop(
-            self.discovery,
-            interval_seconds = settings.discovery_loop_interval_s,
-            db               = self.db,
-            lifecycle        = self.lifecycle,
-        )
-        self.settlement_loop = SettlementLoop(
-            lifecycle  = self.lifecycle,
-            positions  = self.positions,
-            obs_store  = self.obs_store,
-            db         = self.db,
-            is_live    = (settings.trading_mode == "live"),
-        )
-        self.sniper_loop = SniperLoop(
-            sniper_mgr = self.snipers,
-            orderbook  = self.orderbook,
-            risk       = self.risk,
-            exchange   = self.exchange,
-            positions  = self.positions,
-            db         = self.db,
-            settings   = self.settings,
-            station_id = self.station.station_id,
-        )
-
-        # RedeemLoop: only constructed in live mode when SecureClient exists.
-        # Paper mode does not create a RedeemLoop; redeem tasks are marked
-        # skipped_paper by SettlementLoop directly.
-        if settings.trading_mode == "live":
-            self.redeem_loop = RedeemLoop(
-                db            = self.db,
-                secure_client = secure,
-                settings      = self.settings,
-            )
-        else:
-            self.redeem_loop = None
-
-    # ------------------------------------------------------------------
-    # Run
-    # ------------------------------------------------------------------
-
-    async def run(self) -> None:
-        """Launch all loops concurrently.  Runs until cancelled."""
-        tasks = [
-            self.forecast_loop.run(),
-            self.trading_loop.run(),
-            self.discovery_loop.run(),
-            self.settlement_loop.run(),
-        ]
-        if self.settings.enable_sniper:
-            tasks.append(self.sniper_loop.run())
-        if self.redeem_loop is not None:
-            tasks.append(self.redeem_loop.run())
-        await asyncio.gather(*tasks)
+    def load_markets_for_event(self, condition_id: str) -> list[dict]:
+        return self.db.get_markets_for_event(condition_id)

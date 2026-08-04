@@ -1,137 +1,69 @@
-"""Streamlit entry point for PolyWeatherBot UI.
+"""Streamlit entry point for PolyWeatherData UI.
 
 Run with:
     streamlit run ui/app.py
 
 Sidebar navigation:
-    Overview          -- production monitoring summary
-    Data Health       -- ingestion and forecast freshness
-    Polymarket        -- events, markets, tokens, latest prices
-    Historical CLOB   -- immutable historical market-data audit
-    Signals & Orders  -- decision funnel and order lifecycle
-    Forecast & Model  -- forecast snapshots, TFT quantiles, MC buckets
-    Model Evaluation  -- offline HRRR/TFT/MC validation diagnostics
-    PNL & Risk        -- PnL and exposure
-    Backtest & Replay -- backtest result analysis
+    Mispricing Overview        -- calibration gap heatmap by station x period
+    Calendar Stability         -- rolling-window calibration gap trend
+    Cross-Station              -- leave-one-station-out generalisation
 """
 from __future__ import annotations
 
-import os
-
 import streamlit as st
 
-from config.settings import Settings
-from db.schema import DbClient
-from ui.alerts import StalenessState
-
-# ---------------------------------------------------------------------------
-# Page configuration (must be the first Streamlit call)
-# ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="PolyWeatherBot",
+    page_title="PolyWeatherData",
     page_icon=":partly_sunny:",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-# ---------------------------------------------------------------------------
-# Shared state: DbClient (cached for the session)
-# ---------------------------------------------------------------------------
+st.sidebar.title("PolyWeatherData")
+page = st.sidebar.radio(
+    "Navigation",
+    [
+        "Mispricing Overview",
+        "Calendar Stability",
+        "Cross-Station",
+    ],
+)
 
-@st.cache_resource
-def _get_db() -> DbClient:
-    settings  = Settings()
-    db_path   = os.environ.get(
-        "POLYWEATHER_DB",
-        str(settings.project_root / "polyweather.db"),
+st.title(f"PolyWeatherData — {page}")
+
+if page == "Mispricing Overview":
+    st.markdown(
+        """
+        ### Calibration Gap by Station x Period
+
+        **calibration gap** = E[settlement_truth] - E[market_probability]
+
+        - Positive gap -> market underpricing
+        - Negative gap -> market overpricing
+
+        Reported with bootstrap 95% CI per stratum.
+        """
     )
-    return DbClient(db_path)
+    st.info("Dashboard awaiting data. Pull CLOB snapshots to populate charts.")
 
+elif page == "Calendar Stability":
+    st.markdown(
+        """
+        ### Rolling-Window Calibration Gap
 
-def _load_staleness_from_db(db: DbClient) -> StalenessState:
-    """Read current staleness from the shared bot_state DB table.
+        30-day rolling window of the calibration gap, showing how
+        market mispricing evolves over time.
+        """
+    )
+    st.info("Dashboard awaiting data. Pull CLOB snapshots to populate charts.")
 
-    The bot (TradingLoop) writes via db.set_data_stale() when it detects a
-    stale forecast.  Because the bot and UI may run as separate processes,
-    the DB is the canonical cross-process state store for staleness.
-    """
-    state = StalenessState()
-    result = db.get_data_stale()
-    if result is not None:
-        station, occurred_at = result
-        state.mark_stale(occurred_at, station)
-    return state
+elif page == "Cross-Station":
+    st.markdown(
+        """
+        ### Leave-One-Station-Out Generalisation
 
-
-# ---------------------------------------------------------------------------
-# Sidebar navigation
-# ---------------------------------------------------------------------------
-
-PAGES = [
-    "Overview",
-    "Data Health",
-    "Polymarket",
-    "Historical CLOB",
-    "Signals & Orders",
-    "Forecast & Model",
-    "Model Evaluation",
-    "PNL & Risk",
-    "Backtest & Replay",
-]
-
-st.sidebar.title("PolyWeatherBot")
-st.sidebar.markdown("---")
-page = st.sidebar.radio("Navigate", PAGES, index=0)
-
-settings = Settings()
-st.sidebar.markdown("---")
-st.sidebar.markdown(
-    f"**Mode:** `{settings.trading_mode.upper()}`  \n"
-    f"**Min edge:** `{settings.min_edge}`  \n"
-    f"**Max pos:** `${settings.max_position_usd}`"
-)
-
-# ---------------------------------------------------------------------------
-# Page routing
-# ---------------------------------------------------------------------------
-
-db = _get_db()
-staleness_state = _load_staleness_from_db(db)
-
-is_paper = settings.trading_mode != "live"
-
-if page == "Overview":
-    from ui.pages import overview
-    overview.render(db, staleness_state=staleness_state, is_paper=is_paper)
-
-elif page == "Data Health":
-    from ui.pages import data_health
-    data_health.render(db)
-
-elif page == "Polymarket":
-    from ui.pages import polymarket
-    polymarket.render(db)
-
-elif page == "Historical CLOB":
-    from ui.pages import historical_clob
-    historical_clob.render()
-
-elif page == "Signals & Orders":
-    from ui.pages import signals_orders
-    signals_orders.render(db, is_paper=is_paper)
-
-elif page == "Forecast & Model":
-    from ui.pages import forecast_model
-    forecast_model.render(db)
-
-elif page == "Model Evaluation":
-    from ui.pages import model_evaluation
-    model_evaluation.render()
-
-elif page == "PNL & Risk":
-    from ui.pages import pnl_risk
-    pnl_risk.render(db, is_paper=is_paper)
-
-elif page == "Backtest & Replay":
-    from ui.pages import backtest_replay
-    backtest_replay.render()
+        Calibration gap measured on held-out stations (train on 4,
+        test on 1, repeat for all 5). A significant gap on held-out
+        stations indicates the mispricing pattern generalises.
+        """
+    )
+    st.info("Dashboard awaiting data. Pull CLOB snapshots to populate charts.")

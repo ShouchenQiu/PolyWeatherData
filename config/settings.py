@@ -1,5 +1,4 @@
-# config/settings.py - Global Settings dataclass for PolyWeatherBot.
-# All hardcoded constants live here.
+# config/settings.py - Global Settings dataclass for PolyWeatherData.
 # Polymarket API credentials are loaded from environment variables (.env).
 from __future__ import annotations
 
@@ -9,7 +8,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load .env once at import time (no-op if already set or file missing)
 load_dotenv(override=False)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -22,55 +20,12 @@ class Settings:
     data_store_dir: Path = field(
         default_factory=lambda: _PROJECT_ROOT / "data_store"
     )
-    truth_store_dir: Path = field(
-        default_factory=lambda: Path(
-            os.environ.get(
-                "POLYWEATHER_TRUTH_STORE",
-                _PROJECT_ROOT / "data_store" / "_truth_weather_com",
-            )
-        )
-    )
-    forecast_store_dir: Path | None = None
     obs_store_dir: Path | None = None
-    model_store_dir: Path = field(
-        default_factory=lambda: _PROJECT_ROOT / "model" / "store"
-    )
-
-    # Trading
-    trading_mode: str = field(
-        default_factory=lambda: os.environ.get("TRADING_MODE", "paper")
-    )
-    min_edge: float = 0.04
-    max_position_usd: float = 50.0
-    max_total_usd: float = 500.0
-    max_event_usd: float = 150.0
-    starting_cash_usd: float = 500.0
-
-    # HRRR source
-    hrrr_s3_bucket: str = field(
-        default_factory=lambda: os.environ.get("HRRR_S3_BUCKET", "noaa-hrrr-bdp-pds")
-    )
-    hrrr_zarr_bucket: str = field(
-        default_factory=lambda: os.environ.get("HRRR_ZARR_BUCKET", "hrrrzarr")
-    )
-    hrrr_source_priority: list[str] = field(
-        default_factory=lambda: ["s3", "nomads"]
-    )
-
-    # Monte-Carlo
-    mc_n_samp: int = 10000
-    mc_rng_seed: int = 42
+    clob_store_dir: Path | None = None
 
     # Data-source API URLs
     iem_api_url: str = (
         "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
-    )
-    noaa_tgftp_url_tpl: str = (
-        "https://tgftp.nws.noaa.gov/data/observations/metar/stations/{station}.TXT"
-    )
-    awc_metar_url: str = "https://aviationweather.gov/api/data/metar"
-    hrrr_nomads_base: str = (
-        "https://nomads.ncep.noaa.gov/pub/data/nccf/com/hrrr/prod"
     )
     gamma_api_url: str = field(
         default_factory=lambda: os.environ.get(
@@ -83,64 +38,20 @@ class Settings:
         )
     )
 
-    # Scheduling / TradingLoop
-    trading_loop_interval_s:    int = 300
-    discovery_loop_interval_s:  int = 300
-    redeem_loop_interval_s:     int = 3600
-    staleness_threshold_min: int = 65
-    staleness_edge_bump: float = 0.02
-
-    # Feature flags
-    enable_sniper: bool = field(
-        default_factory=lambda: os.environ.get("ENABLE_SNIPER", "").lower() in ("1", "true", "yes")
-    )
-
-    # Model training windows (ISO dates, inclusive)
-    cold_start_hours: int = 72
+    # Analysis split windows (ISO dates, inclusive)
     train_start: str = "2024-10-01"
     train_end: str = "2026-03-31"
     val_start: str = "2026-04-01"
     val_end: str = "2026-04-30"
     test_start: str = "2026-05-01"
     test_end: str = "2026-06-04"
-    training_decoder_cache_dir: Path | None = None
 
-    # TFT training hyperparameters (reference Run-21 defaults)
-    tft_hidden_size: int = 32
-    tft_attention_head_size: int = 4
-    tft_dropout: float = 0.20
-    tft_hidden_continuous_size: int = 16
-    tft_learning_rate: float = 5e-4
-    tft_reduce_lr_patience: int = 3
-    tft_weight_decay: float = 1e-3
-    tft_quantiles: list[float] = field(default_factory=lambda: [0.1, 0.5, 0.9])
-    tft_batch_size: int = 32
-    tft_max_epochs: int = 20
-    tft_min_epochs: int = 5
-    tft_early_stop_patience: int = 2
-    # When set, train exactly this many epochs without validation-based selection.
-    tft_fixed_epochs: int | None = None
-    tft_target_winsor: float = 8.0
-    tft_max_encoder_length: int = 72
-    tft_max_prediction_length: int = 48
-
-    # Risk
-    max_exit_fraction:  float = 1.0
-    quote_size_usd:     float = 50.0
-
-    # Polymarket credentials (V2: private-key wallet pair; read-only properties)
-    @property
-    def polymarket_private_key(self) -> str:
-        return os.environ.get("POLYMARKET_PRIVATE_KEY", "")
-
-    @property
-    def polymarket_wallet_address(self) -> str:
-        return os.environ.get("POLYMARKET_WALLET_ADDRESS", "")
+    # Mispricing analysis
+    clob_snapshot_interval_s: int = 300
+    min_stratum_events: int = 30
 
     def __post_init__(self) -> None:
-        if self.forecast_store_dir is None:
-            self.forecast_store_dir = self.data_store_dir / "hrrr"
         if self.obs_store_dir is None:
             self.obs_store_dir = self.data_store_dir / "obs"
-        if self.training_decoder_cache_dir is None:
-            self.training_decoder_cache_dir = self.data_store_dir / "_decoder_cache"
+        if self.clob_store_dir is None:
+            self.clob_store_dir = self.data_store_dir / "backtest"

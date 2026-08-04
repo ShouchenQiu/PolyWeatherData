@@ -1,4 +1,4 @@
-# Grill Session -- Pending REFACTOR_GUIDE Tasks
+# Grill Session -- PolyWeatherData Cleanup Tasks
 
 Each entry = one confirmed decision from grill Q&A.
 Append immediately after confirmation; never batch.
@@ -10,29 +10,85 @@ Append immediately after confirmation; never batch.
 - VERB  description  [ADR-NNNN]
 ```
 
-Canonical verbs (use exactly these, no others):
-| Verb | Meaning |
-|------|---------|
-| ADD | New field, method, class, or behaviour |
-| REMOVE | Delete field, method, class, or dead code |
-| CHANGE | Modify existing value, signature, or logic |
-| FIX | Correct a known bug |
-| MOVE | Relocate logic to a different module |
-| WIRE | Connect an existing but unconnected component into the data flow |
-
-New files use heading: `### path/to/newfile.py  [NEW]`
+Canonical verbs: ADD / REMOVE / CHANGE / FIX / MOVE / WIRE
+New files: `### path/to/newfile.py  [NEW]`
 
 ---
 
-## Layer 1: config/
+## Layer 0: Project Identity
 
-### config/settings.py
-- REMOVE `klga_grid_row`, `klga_grid_col` (redundant with `config/stations.py` STATIONS dict)
-- REMOVE `mc_rho`, `mc_bias_corr_c` (superseded by empirical covariance -- ADR-0002)
-- REMOVE `cutoff_hour_utc`, `min_hours_before_cutoff` (no cutoff exists -- see CONTEXT.md)
-- REMOVE `forecast_interval_min` (superseded by wall-clock alignment in ForecastLoop)
-- REMOVE `clob_window_min` (dead field -- never read by any business code)
-- CHANGE `mc_n_samp` default: 5000 -> 10000
+### pyproject.toml
+- CHANGE project.name: "polyweatherbot" -> "polyweatherdata"
+
+### CONTEXT.md
+- CHANGE title: "PolyWeatherBot Context" -> "PolyWeatherData Context"
+- CHANGE purpose: no model inference, no HRRR download, no order submission
+- ADD "market probability" term: CLOB-implied YES probability from normalized synthetic midpoint
+- ADD "settlement truth" term: IEM daily-high binary outcome
+- ADD "mispricing" term: persistent deviation between market probability and settlement-truth rate
+- CHANGE settlement truth source: IEM primary, Weather.com supplementary
+
+### config/stations.py
+- REMOVE hrrr_grid_row_zarr, hrrr_grid_col_zarr fields from StationConfig
+- ADD stations: KORD, KATL, KSEA, KDFW (plus keep KLGA = 5 total)
+- KEEP station_id, lat, lon, timezone, tz_offset, iem_network, slug_pattern, slug_aliases
+
+### data/clob/history.py
+- CHANGE: use Gamma API public endpoints for historical trades/orderbook (REST pagination)
+- CHANGE granularity: 5-minute snapshot mid-price / best bid-ask (not tick-level)
+- WIRE ParquetStore: partition by station, compatible with existing data_store/backtest/ layout
+
+### scripts/
+### db/schema.py
+- KEEP tables: stations, events, markets
+- REMOVE tables: signals, orders, model_versions, station_max_bias, bot_state, redeem_tasks, loop_ticks, forecast_snapshots, forecast_bucket_probs, forecast_quantiles
+- ADD market_price_snapshots table: (price_snapshot_id INTEGER PK AUTOINCREMENT, token_id TEXT REFERENCES markets, condition_id TEXT REFERENCES events, tick_utc TEXT NOT NULL, best_bid REAL, best_ask REAL, mid_price REAL, UNIQUE(token_id, tick_utc))
+
+### loops/ directory
+- REMOVE entire directory (no real-time event loops needed)
+
+### core/bot.py
+- REMOVE BotManager class entirely
+- CHANGE: to simple CLI entry point
+
+### main.py
+- CHANGE: to `streamlit run ui/app.py` entry point
+
+### ui/app.py
+- CHANGE: from trading dashboard to mispricing analysis dashboard
+- ADD page 1: Mispricing Overview (calibration gap heatmap by station x period)
+- ADD page 2: Calendar Stability (rolling-window calibration gap trend)
+- ADD page 3: Cross-Station Generalisation (leave-one-out test results)
+
+### scripts/
+- ADD run_mispricing_analysis.py [NEW]: CLI entry point for batch mispricing scan
+
+### backtest/
+- REMOVE daily_high_pmf_evaluation.py, conditional_residual_evaluation.py
+- REMOVE two_bucket_probability_stack.py, two_bucket_union_study.py
+- REMOVE peak_margin_crossfit.py, signal_slice_study.py, signal_study.py, edge_study.py
+- REMOVE two_bucket_probability_stack_frozen.py, two_bucket_union_frozen_diagnostic.py, peak_union_diagnostics.py
+- REMOVE synthetic_quotes.py, market_calibration.py, forecast_cache.py, selection.py, study.py
+- KEEP engine.py, analysis.py, reporting.py, observations.py, replay.py
+
+### backtest/analysis.py
+- CHANGE: compare "market vs truth" instead of "model vs market"
+- ADD calibration_gap() metric: E[truth] - E[market_prob] per stratum
+- ADD paired bootstrap CI for calibration gap
+- ADD rolling-window stability diagnostic
+- KEEP existing proper scores (Brier, log score, RPS, ECE/MCE) adapted for market-vs-truth
+
+### backtest/mispricing_metric.py  [NEW]
+- ADD MispricingMetric class: stratum = (station, lead_time_band, calendar_period)
+- ADD compute(): returns calibration gap + bootstrap CI per stratum
+- ADD generalisability test: leave-one-station-out cross-validation
+
+### docs/archieve/
+- KEEP all original engineering conclusion reports (do not delete)
+
+### docs/archieve/
+- KEEP all original engineering conclusion reports (do not delete)
+
 - ADD `trading_loop_interval_s: int = 300` (TradingLoop 5-min tick, configurable)
 - ADD `staleness_threshold_min: int = 65` (TradingLoop halts new orders when forecast older than this)
 - ADD `staleness_edge_bump: float = 0.02` (reserved for future graduated response; not used in halt mode)
@@ -399,7 +455,7 @@ New files use heading: `### path/to/newfile.py  [NEW]`
   latest values, day_offset in {0, 1, 2}
 
 **Layer 4 -- loops/**
-- `ForecastLoop`: wall-clock UTC hour alignment fires within ±5 s of the hour
+- `ForecastLoop`: wall-clock UTC hour alignment fires within ï¿½5 s of the hour
 - `TradingLoop`: 5-min tick cadence; staleness gate halts order submission and
   emits `AlertEvent(alert_type="data_stale")` when age exceeds threshold;
   holds exactly one `MultiStrategy` and one `RiskPipeline`
