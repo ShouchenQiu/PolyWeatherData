@@ -10,6 +10,8 @@ Sidebar navigation:
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import streamlit as st
 
 st.set_page_config(
@@ -22,7 +24,11 @@ st.sidebar.title("PolyWeatherData")
 page = st.sidebar.radio(
     "Navigation",
     [
-        "Mispricing Overview",
+        "Data Overview",
+        "First-Layer Calibration",
+        "First-Layer (Equal-Weighted)",
+        "First-Layer (Aligned Dates)",
+        "Event-Layer Scores (Brier/LogL/RPS)",
         "Calendar Stability",
         "Cross-Station",
     ],
@@ -30,20 +36,43 @@ page = st.sidebar.radio(
 
 st.title(f"PolyWeatherData — {page}")
 
-if page == "Mispricing Overview":
-    st.markdown(
-        """
-        ### Calibration Gap by Station x Period
+if page == "Data Overview":
+    # render the data overview page inline
+    import runpy
 
-        **calibration gap** = E[settlement_truth] - E[market_probability]
+    runpy.run_path(str(Path(__file__).parent / "pages" / "data_overview.py"), run_name="__main__")
 
-        - Positive gap -> market underpricing
-        - Negative gap -> market overpricing
+elif page == "First-Layer Calibration":
+    import runpy
 
-        Reported with bootstrap 95% CI per stratum.
-        """
+    runpy.run_path(
+        str(Path(__file__).parent / "pages" / "first_layer_calibration.py"),
+        run_name="__main__",
     )
-    st.info("Dashboard awaiting data. Pull CLOB snapshots to populate charts.")
+
+elif page == "First-Layer (Equal-Weighted)":
+    import runpy
+
+    runpy.run_path(
+        str(Path(__file__).parent / "pages" / "first_layer_equal_weighted.py"),
+        run_name="__main__",
+    )
+
+elif page == "First-Layer (Aligned Dates)":
+    import runpy
+
+    runpy.run_path(
+        str(Path(__file__).parent / "pages" / "first_layer_aligned_dates.py"),
+        run_name="__main__",
+    )
+
+elif page == "Event-Layer Scores (Brier/LogL/RPS)":
+    import runpy
+
+    runpy.run_path(
+        str(Path(__file__).parent / "pages" / "event_layer_scores.py"),
+        run_name="__main__",
+    )
 
 elif page == "Calendar Stability":
     st.markdown(

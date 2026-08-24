@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Slug parser registry  ->  (lo_f, hi_f) in degrees F
+# Slug parser registry  ->  (lo_f, hi_f) in degrees (F or C as in slug)
 # ---------------------------------------------------------------------------
 
 def _hi_bound(m: re.Match) -> tuple[float, float]:
@@ -43,6 +43,21 @@ def _range_bound(m: re.Match) -> tuple[float, float]:
     return (float(m.group(1)), float(m.group(2)) + 1.0)
 
 
+def _c_hi_bound(m: re.Match) -> tuple[float, float]:
+    # Celsius buckets are whole degrees: "10c-or-higher" -> [10, +inf)
+    return (float(m.group(1)), float("inf"))
+
+
+def _c_lo_bound(m: re.Match) -> tuple[float, float]:
+    # "9c-or-below" -> (-inf, 10)  (exclusive upper)
+    return (float("-inf"), float(m.group(1)) + 1.0)
+
+
+def _c_single_bound(m: re.Match) -> tuple[float, float]:
+    # "10c" -> the single whole-degree Celsius bucket [10, 11)
+    return (float(m.group(1)), float(m.group(1)) + 1.0)
+
+
 # Each entry: (compiled pattern, handler).  First match wins.
 # To add a new slug format, append one tuple here -- no other change needed.
 _SLUG_REGISTRY = [
@@ -51,9 +66,9 @@ _SLUG_REGISTRY = [
         re.compile(r"(?:be-)?(?:\d+-)?(\d+)f(?:-or-higher|-or-above|orhigher|orabove)"),
         _hi_bound,
     ),
-    # Xf-or-below / Xforbelow / be-Xf-or-below
+    # Xf-or-below / Xforbelow / be-Xf-or-below / Xf-or-lower / be-Xf-or-lower
     (
-        re.compile(r"(?:be-)?(\d+)f(?:-or-below|orbelow)"),
+        re.compile(r"(?:be-)?(\d+)f(?:-or-below|orbelow|-or-lower|orlower)"),
         _lo_bound,
     ),
     # Legacy NYC markets compact two two-digit endpoints: between-6263f.
@@ -61,15 +76,67 @@ _SLUG_REGISTRY = [
         re.compile(r"between-(\d{2})(\d{2})f"),
         _range_bound,
     ),
+    # Compact two-digit endpoints without prefix: be-6667f.
+    (
+        re.compile(r"(?:be-)(\d{2})(\d{2})f"),
+        _range_bound,
+    ),
+    # Seattle/Atlanta compact range: between-4849-f (48-49F).
+    (
+        re.compile(r"between-(\d{2})(\d{2})-f"),
+        _range_bound,
+    ),
+    # Seattle/Atlanta hyphenated single: be-47-f-or-below / be-58-f-or-higher.
+    (
+        re.compile(r"(?:be-)?(\d+)-f(?:-or-higher|-or-above|-or-below|-or-lower)"),
+        lambda m: (
+            _hi_bound(m)
+            if "-or-higher" in m.group(0) or "-or-above" in m.group(0)
+            else _lo_bound(m)
+        ),
+    ),
+    # Celsius buckets (London post-2025-12): Xc / Xcorbelow / Xcorhigher
+    (
+        re.compile(r"(?:be-)?(\d+)c(?:-or-higher|-or-above|orhigher|orabove)"),
+        _c_hi_bound,
+    ),
+    (
+        re.compile(r"(?:be-)?(\d+)c(?:-or-below|orbelow|-or-lower|orlower)"),
+        _c_lo_bound,
+    ),
+    (
+        re.compile(r"(?:be-)?(\d+)c\b"),
+        _c_single_bound,
+    ),
+    # Hyphenated Celsius buckets (Seoul/Toronto): be-3-c-or-below / be-4-c
+    (
+        re.compile(r"(?:be-)?(\d+)-c(?:-or-higher|-or-above)"),
+        _c_hi_bound,
+    ),
+    (
+        re.compile(r"(?:be-)?(\d+)-c(?:-or-below|-or-lower)"),
+        _c_lo_bound,
+    ),
+    (
+        re.compile(r"(?:be-)?(\d+)-c\b"),
+        _c_single_bound,
+    ),
     # X-Yf  (range)
     (
         re.compile(r"(\d+)-(\d+)f"),
         _range_bound,
     ),
+    # between-Xf-and-Yf (London Jan-26 variant)
+    (
+        re.compile(r"between-(\d+)f-and-(\d+)f"),
+        _range_bound,
+    ),
 ]
 
 
-def parse_slug(slug: str) -> tuple[float, float] | None:
+def parse_slug(
+    slug: str, *, require_station: bool = True
+) -> tuple[float, float] | None:
     """Parse a Polymarket market slug into a temperature bucket (lo_f, hi_f).
 
     Patterns handled (case-insensitive):
@@ -83,8 +150,10 @@ def parse_slug(slug: str) -> tuple[float, float] | None:
     degree at the upper edge.
 
     V2V01: returns None unless the slug also contains a recognizable station
-    token (ICAO identifier or alias from config.stations.STATIONS).  Slugs
-    matching only the temperature pattern are treated as unrecognized.
+    token (ICAO identifier or alias from config.stations.STATIONS) when
+    ``require_station`` is True.  Slugs matching only the temperature pattern
+    are treated as unrecognized.  Pass ``require_station=False`` for
+    multi-city ingestion where the station is not registered locally.
 
     Returns None and logs a WARNING if no pattern matches or no station found.
     """
@@ -93,14 +162,15 @@ def parse_slug(slug: str) -> tuple[float, float] | None:
     s = slug.lower()
 
     # Check for at least one station alias in the slug
-    has_station = any(
-        alias in s
-        for st in STATIONS.values()
-        for alias in (st.slug_aliases or [st.station_id.lower()])
-    )
-    if not has_station:
-        logger.warning("parse_slug: no station token found in slug {!r}", slug)
-        return None
+    if require_station:
+        has_station = any(
+            alias in s
+            for st in STATIONS.values()
+            for alias in (st.slug_aliases or [st.station_id.lower()])
+        )
+        if not has_station:
+            logger.warning("parse_slug: no station token found in slug {!r}", slug)
+            return None
 
     for pattern, handler in _SLUG_REGISTRY:
         m = pattern.search(s)

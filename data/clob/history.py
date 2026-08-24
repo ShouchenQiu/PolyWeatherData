@@ -24,22 +24,57 @@ class JsonTransport(Protocol):
 class RequestsJsonTransport:
     """Requests-backed JSON transport for public Polymarket APIs."""
 
+    def __init__(self, min_interval_s: float = 0.4) -> None:
+        # Throttle every request to stay under data-api rate limits.
+        self._min_interval_s = float(min_interval_s)
+        self._last_request = 0.0
+
     def get_json(self, url: str, params: dict) -> object:
         import requests
 
-        for attempt in range(3):
+        now = time.monotonic()
+        wait = self._min_interval_s - (now - self._last_request)
+        if wait > 0:
+            time.sleep(wait)
+        marker = params.get("market") or params.get("slug") or ""
+        for attempt in range(6):
             try:
                 response = requests.get(url, params=params, timeout=30)
                 response.raise_for_status()
+                self._last_request = time.monotonic()
                 return response.json()
             except requests.HTTPError as exc:
                 status = exc.response.status_code if exc.response else None
-                if status not in {429, 500, 502, 503, 504} or attempt == 2:
+                if status == 429:
+                    # Rate limit: back off 30s, 60s, 120s, 240s, 480s, 960s.
+                    delay = 30 * (2 ** attempt)
+                    print(
+                        f"[ratelimit] attempt={attempt + 1}/6 key={marker[:16]} "
+                        f"sleep={delay}s",
+                        flush=True,
+                    )
+                    time.sleep(delay)
+                    continue
+                if status in {500, 502, 503, 504} and attempt < 5:
+                    delay = 2 ** attempt
+                    print(
+                        f"[server-error] status={status} attempt={attempt + 1}/6 "
+                        f"key={marker[:16]} sleep={delay}s",
+                        flush=True,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                if attempt == 5:
                     raise
-            except (requests.ConnectionError, requests.Timeout):
-                if attempt == 2:
-                    raise
-            time.sleep(2**attempt)
+                delay = 2 ** attempt
+                print(
+                    f"[net-error] {type(exc).__name__} attempt={attempt + 1}/6 "
+                    f"key={marker[:16]} sleep={delay}s",
+                    flush=True,
+                )
+                time.sleep(delay)
         raise RuntimeError("unreachable historical API retry state")
 
 
@@ -194,7 +229,7 @@ class HistoricalClobDataset:
 
 
 class HistoricalClobSource:
-    """Download canonical NYC daily-high events and their public trades."""
+    """Download canonical daily-high events and their public trades."""
 
     _NYC_DAILY_WEATHER_SERIES_ID = "10005"
     _SERIES_PAGE_SIZE = 100
@@ -209,18 +244,25 @@ class HistoricalClobSource:
         max_trade_offset: int = 10_000,
         cache_dir: Path | str | None = None,
         progress_callback: Callable[[int, int, str, int, int], None] | None = None,
+        series_id: str = "10005",
+        min_interval_s: float = 0.4,
+        skip_on_rate_limit: bool = False,
     ) -> None:
         if not 1 <= trade_page_size <= 1_000:
             raise ValueError("trade_page_size must be between 1 and 1,000")
         if max_trade_offset < 0:
             raise ValueError("max_trade_offset must be non-negative")
-        self._transport = transport or RequestsJsonTransport()
+        self._transport = transport or RequestsJsonTransport(
+            min_interval_s=min_interval_s
+        )
         self._gamma_api = gamma_api.rstrip("/")
         self._data_api = data_api.rstrip("/")
         self._trade_page_size = trade_page_size
         self._max_trade_offset = max_trade_offset
         self._cache_dir = Path(cache_dir) if cache_dir is not None else None
         self._progress_callback = progress_callback
+        self._series_id = str(series_id)
+        self._skip_on_rate_limit = bool(skip_on_rate_limit)
 
     def fetch(
         self,
@@ -333,6 +375,163 @@ class HistoricalClobSource:
             station_id=str(getattr(station, "station_id")),
         )
 
+    def fetch_series(
+        self,
+        *,
+        station_id: str,
+        series_id: str | None = None,
+    ) -> HistoricalClobDataset:
+        """Fetch every event in a daily-weather series by series_id (Scheme A).
+
+        Unlike fetch(), this walks the full series event list rather than
+        reconstructing slugs per target date, so legacy no-year slugs are
+        handled naturally. Raw trade pages are cached per condition_id, so
+        interrupted runs resume from the cache on retry.
+        """
+        sid = str(series_id or self._series_id)
+        if self._progress_callback is not None:
+            self._progress_callback(0, 0, "series", 0, 0)
+        series_events = self._fetch_nyc_daily_weather_series()
+        # Re-request with the caller's series id if it differs from default,
+        # because the cache key is fixed to the default series.
+        if sid != self._NYC_DAILY_WEATHER_SERIES_ID:
+            series_events = self._fetch_series_by_id(sid)
+        event_rows: list[dict] = []
+        market_rows: list[dict] = []
+        trade_rows: list[dict] = []
+        total = len(series_events)
+
+        for completed, event in enumerate(series_events, start=1):
+            event_id = str(event.get("id") or "")
+            if not event_id:
+                continue
+            event_rows.append(
+                {
+                    "event_id": event_id,
+                    "event_slug": str(event.get("slug") or ""),
+                    "event_title": str(
+                        event.get("title") or event.get("question") or ""
+                    ),
+                    "target_date": _event_target_date(event)
+                    or "",
+                    "event_end_at": pd.to_datetime(
+                        event.get("endDate"), utc=True, errors="coerce"
+                    ),
+                    "station_id": station_id,
+                }
+            )
+            for market in event.get("markets", []) or []:
+                normalized = self._normalize_market(
+                    event_id, market, allow_unknown_station=True
+                )
+                if normalized is None:
+                    continue
+                market_rows.append(normalized)
+                trade_rows.extend(
+                    self._fetch_trades(normalized["condition_id"])
+                )
+            if self._progress_callback is not None and (
+                completed % 10 == 0 or completed == total
+            ):
+                self._progress_callback(
+                    completed,
+                    total,
+                    str(event.get("slug") or ""),
+                    len(market_rows),
+                    len(trade_rows),
+                )
+
+        events_frame = pd.DataFrame(
+            event_rows,
+            columns=[
+                "event_id",
+                "event_slug",
+                "event_title",
+                "target_date",
+                "event_end_at",
+                "station_id",
+            ],
+        ).drop_duplicates(subset=["event_id"])
+        markets_frame = pd.DataFrame(
+            market_rows,
+            columns=[
+                "event_id",
+                "market_id",
+                "condition_id",
+                "market_slug",
+                "yes_token_id",
+                "no_token_id",
+                "bucket_lo_f",
+                "bucket_hi_f",
+                "yes_outcome_price",
+                "no_outcome_price",
+                "resolved_yes",
+                "fees_enabled",
+                "fee_type",
+                "fee_rate",
+                "fee_exponent",
+                "fee_taker_only",
+                "fee_rebate_rate",
+                "maker_base_fee",
+                "taker_base_fee",
+                "min_tick_size",
+                "min_order_size",
+                "accepting_orders",
+                "active",
+                "closed",
+                "neg_risk",
+                "market_start_at",
+                "market_end_at",
+                "accepting_orders_at",
+                "closed_at",
+            ],
+        ).drop_duplicates(subset=["condition_id"])
+        trades_frame = self._trade_frame(trade_rows)
+        start_date = (
+            events_frame["target_date"].dropna().min()
+            if len(events_frame)
+            else ""
+        )
+        end_date = (
+            events_frame["target_date"].dropna().max()
+            if len(events_frame)
+            else ""
+        )
+        return HistoricalClobDataset(
+            events=events_frame.reset_index(drop=True),
+            markets=markets_frame.reset_index(drop=True),
+            trades=trades_frame,
+            start_date=str(start_date),
+            end_date=str(end_date),
+            station_id=station_id,
+        )
+
+    def _fetch_series_by_id(self, series_id: str) -> list[dict]:
+        """Page through all events of a series by id, caching a complete copy."""
+        key = f"series-{series_id}"
+        cached = self._read_cache("series", key)
+        if isinstance(cached, dict) and cached.get("complete") is True:
+            rows = cached.get("rows", [])
+            return [item for item in rows if isinstance(item, dict)]
+        rows: list[dict] = []
+        offset = 0
+        while True:
+            payload = self._transport.get_json(
+                f"{self._gamma_api}/events",
+                {
+                    "series_id": series_id,
+                    "closed": "true",
+                    "limit": self._SERIES_PAGE_SIZE,
+                    "offset": offset,
+                },
+            )
+            page = list(payload) if isinstance(payload, list) else []
+            rows.extend(item for item in page if isinstance(item, dict))
+            if len(page) < self._SERIES_PAGE_SIZE:
+                self._write_cache("series", key, {"complete": True, "rows": rows})
+                return rows
+            offset += self._SERIES_PAGE_SIZE
+
     def _fetch_nyc_daily_weather_series(self) -> list[dict]:
         """Load the series because older events did not use date/year slugs."""
         key = "nyc-daily-weather"
@@ -346,7 +545,7 @@ class HistoricalClobSource:
             payload = self._transport.get_json(
                 f"{self._gamma_api}/events",
                 {
-                    "series_id": self._NYC_DAILY_WEATHER_SERIES_ID,
+                    "series_id": self._series_id,
                     "closed": "true",
                     "limit": self._SERIES_PAGE_SIZE,
                     "offset": offset,
@@ -360,7 +559,9 @@ class HistoricalClobSource:
             offset += self._SERIES_PAGE_SIZE
 
     @staticmethod
-    def _normalize_market(event_id: str, market: dict) -> dict | None:
+    def _normalize_market(
+        event_id: str, market: dict, *, allow_unknown_station: bool = False
+    ) -> dict | None:
         token_ids = _json_list(market.get("clobTokenIds"))
         outcomes = _json_list(market.get("outcomes"))
         if len(token_ids) != len(outcomes):
@@ -372,7 +573,7 @@ class HistoricalClobSource:
         if not tokens.get("YES") or not tokens.get("NO"):
             return None
         slug = str(market.get("slug") or "")
-        bucket = parse_slug(slug)
+        bucket = parse_slug(slug, require_station=not allow_unknown_station)
         if bucket is None:
             return None
         lo_f, hi_f = bucket
@@ -444,15 +645,28 @@ class HistoricalClobSource:
         rows: list[dict] = []
         offset = 0
         while offset <= self._max_trade_offset:
-            payload = self._transport.get_json(
-                f"{self._data_api}/trades",
-                {
-                    "market": condition_id,
-                    "limit": self._trade_page_size,
-                    "offset": offset,
-                    "takerOnly": "true",
-                },
-            )
+            try:
+                payload = self._transport.get_json(
+                    f"{self._data_api}/trades",
+                    {
+                        "market": condition_id,
+                        "limit": self._trade_page_size,
+                        "offset": offset,
+                        "takerOnly": "true",
+                    },
+                )
+            except Exception as exc:
+                # When rate-limited for too long and skip is enabled, keep the
+                # partial rows and move on instead of crashing the whole run.
+                if self._skip_on_rate_limit:
+                    import warnings
+
+                    warnings.warn(
+                        f"skip condition {condition_id} after rate-limit "
+                        f"failure at offset {offset}: {exc}"
+                    )
+                    return rows
+                raise
             page = list(payload) if isinstance(payload, list) else []
             rows.extend(page)
             if len(page) < self._trade_page_size:
@@ -618,10 +832,13 @@ def _event_target_date(event: dict) -> str | None:
         if month is None:
             return None
     end_at = pd.to_datetime(event.get("endDate"), utc=True, errors="coerce")
-    if explicit_year is not None:
-        year = int(explicit_year)
-    elif not pd.isna(end_at):
+    if not pd.isna(end_at):
+        # endDate is the settlement timestamp and is authoritative; the slug's
+        # explicit year can be wrong (e.g. Polymarket wrote jan-26-2024 for an
+        # event settling 2025-01-26), so prefer the endDate year.
         year = int(end_at.year)
+    elif explicit_year is not None:
+        year = int(explicit_year)
     else:
         return None
     try:

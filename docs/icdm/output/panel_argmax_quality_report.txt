@@ -1,0 +1,106 @@
+Panel (argmax-based) coverage report
+=============================================
+
+ATLANTA: events=205 conditions=1912
+  p_48h: coverage=52.5%
+  p_36h: coverage=78.1%
+  p_24h: coverage=81.4%
+  p_12h: coverage=85.6%
+  p_6h: coverage=83.9%
+  p_1h: coverage=81.3%
+
+CHICAGO: events=161 conditions=1611
+  p_48h: coverage=47.7%
+  p_36h: coverage=75.9%
+  p_24h: coverage=76.0%
+  p_12h: coverage=76.8%
+  p_6h: coverage=74.9%
+  p_1h: coverage=68.0%
+
+DALLAS: events=208 conditions=1940
+  p_48h: coverage=47.0%
+  p_36h: coverage=70.0%
+  p_24h: coverage=72.5%
+  p_12h: coverage=74.9%
+  p_6h: coverage=69.9%
+  p_1h: coverage=68.8%
+
+DENVER: events=99 conditions=1085
+  p_48h: coverage=38.1%
+  p_36h: coverage=64.6%
+  p_24h: coverage=66.9%
+  p_12h: coverage=67.6%
+  p_6h: coverage=64.3%
+  p_1h: coverage=59.2%
+
+LONDON: events=522 conditions=4142
+  p_48h: coverage=46.9%
+  p_36h: coverage=60.5%
+  p_24h: coverage=78.9%
+  p_12h: coverage=85.7%
+  p_6h: coverage=85.2%
+  p_1h: coverage=81.8%
+
+MIAMI: events=161 conditions=1611
+  p_48h: coverage=63.2%
+  p_36h: coverage=87.0%
+  p_24h: coverage=85.8%
+  p_12h: coverage=86.0%
+  p_6h: coverage=81.6%
+  p_1h: coverage=80.6%
+
+NYC: events=362 conditions=2657
+  p_48h: coverage=33.2%
+  p_36h: coverage=48.2%
+  p_24h: coverage=71.9%
+  p_12h: coverage=84.5%
+  p_6h: coverage=87.8%
+  p_1h: coverage=87.1%
+
+NYC_Q2: events=88 conditions=968
+  p_48h: coverage=50.5%
+  p_36h: coverage=83.8%
+  p_24h: coverage=87.0%
+  p_12h: coverage=89.9%
+  p_6h: coverage=86.9%
+  p_1h: coverage=82.6%
+
+SEATTLE: events=204 conditions=1908
+  p_48h: coverage=38.9%
+  p_36h: coverage=67.2%
+  p_24h: coverage=71.7%
+  p_12h: coverage=79.7%
+  p_6h: coverage=76.2%
+  p_1h: coverage=73.1%
+
+SEOUL: events=207 conditions=1929
+  p_48h: coverage=46.0%
+  p_36h: coverage=79.7%
+  p_24h: coverage=83.0%
+  p_12h: coverage=83.1%
+  p_6h: coverage=78.7%
+  p_1h: coverage=71.5%
+
+SHANGHAI: events=110 conditions=1204
+  p_48h: coverage=57.6%
+  p_36h: coverage=85.0%
+  p_24h: coverage=91.2%
+  p_12h: coverage=86.0%
+  p_6h: coverage=81.3%
+  p_1h: coverage=74.4%
+
+TOKYO: events=113 conditions=1231
+  p_48h: coverage=44.2%
+  p_36h: coverage=82.2%
+  p_24h: coverage=88.5%
+  p_12h: coverage=80.3%
+  p_6h: coverage=70.9%
+  p_1h: coverage=67.9%
+
+TORONTO: events=207 conditions=1937
+  p_48h: coverage=45.0%
+  p_36h: coverage=70.3%
+  p_24h: coverage=75.1%
+  p_12h: coverage=82.3%
+  p_6h: coverage=79.9%
+  p_1h: coverage=74.4%

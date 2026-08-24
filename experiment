@@ -1,0 +1,62 @@
+"""Load ALL city historical order data (with timestamps) into memory.
+
+Trades carry per-trade UTC timestamps; each row is enriched with market
+(bucket, resolved) and event (target date) context via condition_id.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+
+BASE = Path(r"d:\NN\PolyWeatherData\data_store\backtest\clob")
+CITIES = {
+    "NYC": "KLGA/20250401_20260331_resolution_v2",
+    "LONDON": "LONDON/20250121_20260810",
+    "CHICAGO": "CHICAGO/20251204_20260810",
+    "DALLAS": "DALLAS/20250101_20260812",
+    "MIAMI": "MIAMI/20250101_20260812",
+    "DENVER": "DENVER/20250101_20260812",
+    "SEATTLE": "SEATTLE/20250101_20260812",
+    "ATLANTA": "ATLANTA/20250101_20260812",
+}
+
+TRADE_COLS = [
+    "condition_id", "token_id", "timestamp", "outcome", "side",
+    "price", "size", "usdc", "transaction_hash", "proxy_wallet",
+]
+MARKET_COLS = [
+    "condition_id", "event_id", "market_slug", "bucket_lo_f", "bucket_hi_f",
+    "yes_outcome_price", "no_outcome_price", "resolved_yes",
+    "market_start_at", "market_end_at", "closed_at",
+]
+EVENT_COLS = ["event_id", "event_slug", "target_date", "event_end_at", "station_id"]
+
+
+def load_all_cities() -> pd.DataFrame:
+    """Return one big DataFrame of every trade across all cities."""
+    frames: list[pd.DataFrame] = []
+    for city, rel in CITIES.items():
+        root = BASE / rel
+        tr = pd.read_parquet(root / "trades.parquet", columns=TRADE_COLS)
+        mk = pd.read_parquet(root / "markets.parquet", columns=MARKET_COLS)
+        ev = pd.read_parquet(root / "events.parquet", columns=EVENT_COLS)
+        tr["city"] = city
+        tr = tr.merge(mk, on="condition_id", how="left")
+        tr = tr.merge(ev, on="event_id", how="left")
+        frames.append(tr)
+        print(f"[loaded] {city}: {len(tr):,} trades", flush=True)
+    df = pd.concat(frames, ignore_index=True)
+    df = df.sort_values(["timestamp", "condition_id"]).reset_index(drop=True)
+    print(f"[total] {len(df):,} trades across {df['city'].nunique()} cities", flush=True)
+    return df
+
+
+if __name__ == "__main__":
+    all_trades = load_all_cities()
+    print("\n=== schema ===")
+    print(all_trades.dtypes.to_string())
+    print("\n=== head ===")
+    print(all_trades.head(5).to_string())
+    print("\n=== time range ===")
+    print(f"{all_trades['timestamp'].min()} -> {all_trades['timestamp'].max()}")

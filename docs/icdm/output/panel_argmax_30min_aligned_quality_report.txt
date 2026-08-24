@@ -1,0 +1,26 @@
+Panel aligned to target_date >= 2025-12-05
+============================================================
+
+ATLANTA: events=246 conditions=2363
+
+CHICAGO: events=201 conditions=2055
+
+DALLAS: events=248 conditions=2384
+
+DENVER: events=139 conditions=1529
+
+LONDON: events=249 conditions=2395
+
+MIAMI: events=201 conditions=2055
+
+NYC: events=246 conditions=2362
+
+SEATTLE: events=245 conditions=2359
+
+SEOUL: events=248 conditions=2380
+
+SHANGHAI: events=151 conditions=1655
+
+TOKYO: events=154 conditions=1682
+
+TORONTO: events=248 conditions=2388
