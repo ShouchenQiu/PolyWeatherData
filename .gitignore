@@ -26,3 +26,5 @@ htmlcov/
 runs/
 .old_data_code/
 .codex/
+analysis_*/
+analysis/
