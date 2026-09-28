@@ -49,55 +49,76 @@ if not CSV_SUM.exists() or not CSV_LONG.exists():
 summ = pd.read_csv(CSV_SUM).sort_values("horizon_h")
 long = pd.read_csv(CSV_LONG)
 
-st.subheader("Scores vs time to high")
-fig = make_subplots(
-    rows=1, cols=3,
-    subplot_titles=("Brier Score", "Log Loss", "RPS"),
-    shared_yaxes=False,
-)
-metrics = [
-    ("BS", "BS", "#1f6fb4", "BS"),
-    ("LogLoss", "LogLoss", "#c1121f", "LogL"),
+st.subheader("Scores vs time to high (combined, normalized to 48h = 1)")
+# The three metrics live on very different scales (Brier ~0.70, LogLoss
+# ~1.40, RPS ~0.50), so plotting them on one shared y-axis would squash
+# two of them. Normalize each metric by its 48h value: every line then
+# starts at 1.0 and shows the RELATIVE improvement as the high approaches.
+base = summ[summ["horizon_h"] == 48].iloc[0]
+norm = summ.copy()
+norm_labels = {}
+for key, ci_key in [("BS", "BS"), ("LogLoss", "LogL"), ("RPS", "RPS")]:
+    b = base[key]
+    norm[f"{key}_n"] = summ[key] / b
+    norm[f"{key}_lo_n"] = summ[f"{ci_key}_ci_lo"] / b
+    norm[f"{key}_hi_n"] = summ[f"{ci_key}_ci_hi"] / b
+    # relative improvement 48h -> 1h, for the legend
+    v1 = summ[summ["horizon_h"] == 1][key].iloc[0]
+    norm_labels[key] = (1.0 - v1 / b) * 100
+
+fig = go.Figure()
+metric_lines = [
+    ("BS", "Brier", "#1f6fb4", "BS"),
+    ("LogLoss", "Log Loss", "#c1121f", "LogL"),
     ("RPS", "RPS", "#2e8b57", "RPS"),
 ]
-for i, (key, title, color, ci_key) in enumerate(metrics, start=1):
-    s = summ
+for key, title, color, ci_key in metric_lines:
+    y = norm[f"{key}_n"]
     fig.add_trace(go.Scatter(
-        x=s["horizon_h"], y=s[key], mode="lines+markers",
-        name=title, line=dict(color=color, width=3),
+        x=norm["horizon_h"], y=y, mode="lines+markers",
+        name=title,
+        line=dict(color=color, width=3),
         marker=dict(size=9),
         error_y=dict(
             type="data", symmetric=False,
-            array=s[f"{ci_key}_ci_hi"] - s[key],
-            arrayminus=s[key] - s[f"{ci_key}_ci_lo"],
+            array=norm[f"{key}_hi_n"] - y,
+            arrayminus=y - norm[f"{key}_lo_n"],
             visible=True, thickness=1.2, color=color,
         ),
         hovertemplate="%{x:.0f}h: %{y:.4f}<extra></extra>",
-    ), row=1, col=i)
-    fig.update_xaxes(
-        tickmode="array", tickvals=s["horizon_h"],
-        ticktext=[f"{int(h)}h" for h in s["horizon_h"]],
-        row=1, col=i, title=dict(text="Hours before high", font=AXIS_FONT),
-        tickfont=TICK_FONT,
-    )
-    fig.update_yaxes(row=1, col=i, title=dict(text=title, font=AXIS_FONT),
-                     tickfont=TICK_FONT)
+    ))
+fig.add_hline(y=1.0, line_dash="dash", line_color="#888888",
+              line_width=1.2, annotation_text="48h baseline",
+              annotation_font=dict(size=12, color="#666666"))
+fig.update_xaxes(
+    tickmode="array", tickvals=norm["horizon_h"],
+    ticktext=[f"{int(h)}h" for h in norm["horizon_h"]],
+    title=dict(text="Hours Before The Highest Temperature", font=AXIS_FONT),
+    tickfont=TICK_FONT,
+)
+fig.update_yaxes(title=dict(text="Relative Score", font=AXIS_FONT),
+                 tickfont=TICK_FONT)
 fig.update_layout(
-    height=420,
-    showlegend=False,
-    margin=dict(l=70, r=30, t=50, b=60),
+    height=430,
+    margin=dict(l=80, r=40, t=50, b=60),
     plot_bgcolor="white",
+    legend=dict(font=dict(size=14, color="#000000",
+                          family="Arial, sans-serif", weight=700),
+                orientation="h", yanchor="bottom", y=1.02,
+                xanchor="right", x=1),
 )
 st.plotly_chart(fig, use_container_width=True)
 st.caption(
-    "WARNING: per-horizon means are NOT directly comparable across "
-    "horizons. Each horizon scores a DIFFERENT set of full-coverage events "
-    "(adjacent horizons overlap only ~50%). The 24h and 9h 'dips' are "
-    "sample-composition artifacts, not real effects: in paired comparisons "
-    "on the SAME events, every adjacent pair improves monotonically (see "
-    "the Paired comparison section below). Read this figure for the overall "
-    "48h->1h improvement trend only, not for horizon-to-horizon wiggle. "
-    "Error bars = bootstrap 95% CI over whole events."
+    "The three metrics are combined on ONE chart by normalizing each to "
+    "its 48h value (48h = 1.0); the y-axis shows relative score, so all "
+    "three lines are directly comparable. Legend shows the total relative "
+    "improvement from 48h to 1h. WARNING: per-horizon means are NOT "
+    "directly comparable across horizons - each horizon scores a DIFFERENT "
+    "set of full-coverage events (adjacent horizons overlap only ~50%). "
+    "The 24h and 9h 'dips' are sample-composition artifacts, not real "
+    "effects (see the Paired comparison section). Error bars = bootstrap "
+    "95% CI over whole events, normalized by the same 48h value. Raw "
+    "metric values are in the Summary table below."
 )
 
 st.subheader("Paired adjacent-horizon comparison (within common events)")
@@ -131,6 +152,7 @@ figp = make_subplots(
     rows=1, cols=3,
     subplot_titles=("Δ Brier", "Δ Log Loss", "Δ RPS"),
     shared_yaxes=False,
+    horizontal_spacing=0.16,
 )
 for i, (key, color) in enumerate([("dBS", "#1f6fb4"), ("dLogL", "#c1121f"),
                                   ("dRPS", "#2e8b57")], start=1):
@@ -140,7 +162,9 @@ for i, (key, color) in enumerate([("dBS", "#1f6fb4"), ("dLogL", "#c1121f"),
         hovertemplate="%{x}: %{y:+.4f}<extra></extra>",
     ), row=1, col=i)
     figp.update_xaxes(
-        tickangle=-45, tickfont=dict(size=11, color="#000"),
+        tickangle=-45, tickfont=dict(size=11, color="#000",
+                                      family="Arial, sans-serif",
+                                      weight=700),
         row=1, col=i,
         title=dict(text="", font=AXIS_FONT),
     )
@@ -155,6 +179,8 @@ figp.update_layout(
     margin=dict(l=70, r=30, t=50, b=90),
     plot_bgcolor="white",
 )
+figp.update_annotations(font=dict(color="#000000", size=16,
+                                  family="Arial, sans-serif", weight=700))
 st.plotly_chart(figp, use_container_width=True)
 st.caption(
     "Delta = (nearer horizon) - (farther horizon) on the SAME events. "
@@ -182,6 +208,181 @@ st.caption(
     "S = sum of raw bucket prices before normalization (median 1.006-1.027, "
     "i.e. small market friction). CI = 2000-draw bootstrap over whole events."
 )
+
+# --------------------------------------------------------------------------
+# Bucket-count dependence and excess scores
+# --------------------------------------------------------------------------
+EXCESS_CSV = Path(r"d:\NN\PolyWeatherData\docs\icdm\output\excess_scores.csv")
+DEP_CSV = Path(r"d:\NN\PolyWeatherData\docs\icdm\output\bucket_dependence.csv")
+if EXCESS_CSV.exists() and DEP_CSV.exists():
+    st.subheader("Bucket-count dependence and excess scores")
+    st.caption(
+        "All three metrics have a bucket-count dependence: a PERFECTLY "
+        "calibrated forecaster still scores a positive floor "
+        "(Brier floor = 1 - sum q^2, LogLoss floor = entropy H(q), "
+        "RPS floor = sum F(1-F)). Events with more buckets therefore "
+        "score worse mechanically, and bucket counts differ across splits "
+        "(train 9.51 vs test 10.75) and horizons (48h 10.15 vs 1h 9.41). "
+        "EXCESS = RAW - FLOOR measures the distance from perfect "
+        "calibration and is expected to be 0 for a calibrated forecaster "
+        "at ANY bucket count, so it largely removes that dependence. "
+        "Below: market prices (RAW variant), test set 2026-07."
+    )
+    ex = pd.read_csv(EXCESS_CSV)
+    dep = pd.read_csv(DEP_CSV)
+    _cell = ("border:1px solid #d0d0d0;padding:8px 10px;"
+             "font-weight:700;color:#000000;")
+    _head = ("border:1px solid #d0d0d0;padding:8px 10px;"
+             "background:#f3f3f3;font-weight:700;color:#000000;")
+
+    sp_raw = ex[(ex["scope_type"] == "split") & (ex["variant"] == "raw")]
+    sp_raw = sp_raw.set_index("scope_value")
+    rows_html = []
+    for sn in ["train", "val", "test", "ALL"]:
+        if sn not in sp_raw.index:
+            continue
+        r = sp_raw.loc[sn]
+        rows_html.append(
+            f'<tr>'
+            f'<td style="{_cell}">{sn.upper()}</td>'
+            f'<td style="{_cell}">{int(r["n_events"])}</td>'
+            f'<td style="{_cell}">{r["n_buckets_mean"]:.2f}</td>'
+            f'<td style="{_cell}">{r["BS_raw"]:.4f}</td>'
+            f'<td style="{_cell}">{r["BS_excess"]:+.4f}</td>'
+            f'<td style="{_cell}">{r["LogLoss_raw"]:.4f}</td>'
+            f'<td style="{_cell}">{r["LogLoss_excess"]:+.4f}</td>'
+            f'<td style="{_cell}">{r["RPS_raw"]:.4f}</td>'
+            f'<td style="{_cell}">{r["RPS_excess"]:+.4f}</td>'
+            f'</tr>'
+        )
+    st.markdown(
+        '<table style="width:98%;margin:0 auto;border-collapse:collapse;'
+        'text-align:center;font-family:Arial,sans-serif;">'
+        '<thead><tr>'
+        f'<th style="{_head}">SPLIT</th>'
+        f'<th style="{_head}">EVENTS</th>'
+        f'<th style="{_head}">MEAN BUCKETS</th>'
+        f'<th style="{_head}">BRIER (RAW)</th>'
+        f'<th style="{_head}">BRIER (EXCESS)</th>'
+        f'<th style="{_head}">LOGLOSS (RAW)</th>'
+        f'<th style="{_head}">LOGLOSS (EXCESS)</th>'
+        f'<th style="{_head}">RPS (RAW)</th>'
+        f'<th style="{_head}">RPS (EXCESS)</th>'
+        '</tr></thead><tbody>' + "".join(rows_html) + '</tbody></table>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        "**Per-bucket average Brier** - the total Brier divided by the "
+        "number of buckets, i.e. the average squared error contributed by "
+        "one bucket. This puts the score on an intuitive scale (directly "
+        "comparable to a single binary Brier):"
+    )
+    pb_rows = []
+    for sn in ["train", "val", "test", "ALL"]:
+        if sn not in sp_raw.index:
+            continue
+        r = sp_raw.loc[sn]
+        pb_rows.append(
+            f'<tr>'
+            f'<td style="{_cell}">{sn.upper()}</td>'
+            f'<td style="{_cell}">{r["n_buckets_mean"]:.2f}</td>'
+            f'<td style="{_cell}">{r["BS_raw_per_bucket"]:.5f}</td>'
+            f'<td style="{_cell}">{r["BS_floor_per_bucket"]:.5f}</td>'
+            f'<td style="{_cell}">{r["BS_excess_per_bucket"]:+.5f}</td>'
+            f'</tr>'
+        )
+    anchors = [
+        ("Uniform guess, n=7", "0.12245"),
+        ("Uniform guess, n=9", "0.09877"),
+        ("Uniform guess, n=11", "0.08264"),
+        ("Single bucket at p=0.50", "0.25000"),
+        ("Single bucket at p=0.10", "0.09000"),
+        ("Single bucket at p=0.01", "0.00990"),
+    ]
+    anc_rows = "".join(
+        f'<tr><td style="{_cell}">{k}</td>'
+        f'<td style="{_cell}">{v}</td></tr>' for k, v in anchors)
+
+    st.markdown(
+        '<table style="width:60%;margin:0 auto;border-collapse:collapse;'
+        'text-align:center;font-family:Arial,sans-serif;">'
+        '<thead><tr>'
+        f'<th style="{_head}">SPLIT</th>'
+        f'<th style="{_head}">MEAN BUCKETS</th>'
+        f'<th style="{_head}">BRIER / N</th>'
+        f'<th style="{_head}">FLOOR / N</th>'
+        f'<th style="{_head}">EXCESS / N</th>'
+        '</tr></thead><tbody>' + "".join(pb_rows) + '</tbody></table>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<table style="width:60%;margin:12px auto 0 auto;'
+        'border-collapse:collapse;text-align:center;'
+        'font-family:Arial,sans-serif;">'
+        '<thead><tr>'
+        f'<th style="{_head}">REFERENCE ANCHOR</th>'
+        f'<th style="{_head}">BRIER PER BUCKET</th>'
+        '</tr></thead><tbody>' + anc_rows + '</tbody></table>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Reading the scale: the market's per-bucket Brier is about 0.066, "
+        "i.e. each bucket contributes ~0.066 squared error on average. For "
+        "comparison, a uniform guess costs 0.083-0.122 per bucket (n=11 to "
+        "n=7), and a single bucket quoted at p=0.50 costs 0.250. The market "
+        "sits essentially AT its own perfect-calibration floor (0.0664), so "
+        "the remaining error is almost entirely irreducible weather "
+        "uncertainty rather than miscalibration. CAVEAT: dividing by n "
+        "OVER-corrects the bucket dependence (corr flips to -0.263), so use "
+        "BRIER/N for intuitive scale only; use the EXCESS columns for fair "
+        "cross-split and cross-horizon comparisons."
+    )
+
+    st.markdown(
+        "**Bucket dependence, quantified** - regression of each metric on "
+        "the number of buckets per event (market prices, all splits):"
+    )
+    dep_rows = []
+    for _, d in dep.iterrows():
+        dep_rows.append(
+            f'<tr>'
+            f'<td style="{_cell}">{str(d["metric"]).upper()}</td>'
+            f'<td style="{_cell}">{d["corr_raw"]:+.3f}</td>'
+            f'<td style="{_cell}">{d["slope_raw"]:+.5f}</td>'
+            f'<td style="{_cell}">{d["corr_excess"]:+.3f}</td>'
+            f'<td style="{_cell}">{d["slope_excess"]:+.5f}</td>'
+            f'<td style="{_cell}">{d["corr_per_bucket"]:+.3f}</td>'
+            f'<td style="{_cell}">{d["corr_excess_per_bucket"]:+.3f}</td>'
+            f'</tr>'
+        )
+    st.markdown(
+        '<table style="width:92%;margin:0 auto;border-collapse:collapse;'
+        'text-align:center;font-family:Arial,sans-serif;">'
+        '<thead><tr>'
+        f'<th style="{_head}">METRIC</th>'
+        f'<th style="{_head}">CORR VS N (RAW)</th>'
+        f'<th style="{_head}">SLOPE VS N (RAW)</th>'
+        f'<th style="{_head}">CORR VS N (EXCESS)</th>'
+        f'<th style="{_head}">SLOPE VS N (EXCESS)</th>'
+        f'<th style="{_head}">CORR VS N (RAW/N)</th>'
+        f'<th style="{_head}">CORR VS N (EXCESS/N)</th>'
+        '</tr></thead><tbody>' + "".join(dep_rows) + '</tbody></table>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "RAW metrics correlate positively with bucket count (corr +0.11 to "
+        "+0.14, slope +0.021 to +0.070 per extra bucket): more buckets "
+        "mechanically worsen the score. EXCESS scores cut that dependence "
+        "by 83-88% (corr |r| <= 0.02, i.e. indistinguishable from zero at "
+        "this sample size), so cross-split and cross-horizon comparisons "
+        "are fair on the excess scale. Negative excess means the market is "
+        "slightly UNDER-confident (the realized winner is, on average, "
+        "given more probability than the spread of the predicted "
+        "distribution implies). Absolute levels are not directly "
+        "comparable across studies with different bucket counts; use "
+        "EXCESS for comparisons and RAW for absolute reporting."
+    )
 
 # --------------------------------------------------------------------------
 # Recalibration comparison (price3: 3 price segments, roadmap Section 6)
@@ -229,6 +430,7 @@ if PRICE3_CSV.exists():
         subplot_titles=("Δ Brier (raw - recal)", "Δ LogLoss (raw - recal)",
                         "Δ RPS (raw - recal)"),
         shared_yaxes=False,
+        horizontal_spacing=0.16,
     )
     for i, (key, color) in enumerate(
             [("dBS", "#1f6fb4"), ("dLogL", "#c1121f"), ("dRPS", "#2e8b57")],
@@ -241,7 +443,8 @@ if PRICE3_CSV.exists():
             hovertemplate="%{x}: %{y:+.4f}<extra></extra>",
         ), row=1, col=i)
         figp.update_xaxes(
-            tickfont=dict(size=13, color="#000"),
+            tickfont=dict(size=13, color="#000",
+                          family="Arial, sans-serif", weight=700),
             row=1, col=i, title=dict(text="", font=AXIS_FONT),
         )
         figp.update_yaxes(row=1, col=i, title=dict(text=key, font=AXIS_FONT),
@@ -252,6 +455,8 @@ if PRICE3_CSV.exists():
         margin=dict(l=70, r=30, t=50, b=60),
         plot_bgcolor="white",
     )
+    figp.update_annotations(font=dict(color="#000000", size=16,
+                                      family="Arial, sans-serif", weight=700))
     st.plotly_chart(figp, use_container_width=True)
     st.caption(
         "Delta > 0 means recalibration IMPROVES the score (lower is better). "
@@ -260,6 +465,166 @@ if PRICE3_CSV.exists():
         "inside the bootstrap CI, i.e. not significant. This matches the "
         "roadmap Section 6 verdict: the bias is real but too small to be "
         "exploited out-of-sample with a simple calibration function."
+    )
+
+# --------------------------------------------------------------------------
+# Recalibration comparison (B-spline: 7 / 8 / 9 total parameters)
+# --------------------------------------------------------------------------
+SPLINE_CSV = Path(r"d:\NN\PolyWeatherData\docs\icdm\output\recalibration_spline_results.csv")
+if SPLINE_CSV.exists():
+    st.subheader("Recalibration comparison (B-spline)")
+    st.caption(
+        "Cubic B-spline calibration on logit(p), one GLOBAL curve for all "
+        "horizons, fitted on the TRAIN set only. Three capacities shown: "
+        "7 / 8 / 9 total parameters = 1 intercept + spline basis of "
+        "2 / 3 / 4 inner knots (basis size = knots + degree + 1 = knots + 4). "
+        "Knots sit at TRAIN quantiles of logit(p). After per-bucket "
+        "recalibration the event is re-normalized before scoring, as in "
+        "the price3 section. Delta = raw - recalibrated, positive means "
+        "the recalibration improves the score."
+    )
+    sp_df = pd.read_csv(SPLINE_CSV)
+    delta_rows = []
+    for n_params in [7, 8, 9]:
+        sub = sp_df[sp_df["params"] == n_params]
+        deltas = []
+        for sn in ["train", "val", "test"]:
+            raw = sub[(sub["split"] == sn)
+                      & (sub["version"] == "raw")].iloc[0]
+            cal = sub[(sub["split"] == sn)
+                      & (sub["version"].str.startswith("spline"))].iloc[0]
+            deltas.append({
+                "split": sn,
+                "dBS": float(raw["BS"] - cal["BS"]),
+                "dLogL": float(raw["LogLoss"] - cal["LogLoss"]),
+                "dRPS": float(raw["RPS"] - cal["RPS"]),
+            })
+        dd = pd.DataFrame(deltas)
+        for row in dd.itertuples():
+            delta_rows.append({
+                "params": n_params, "split": row.split,
+                "dBS": row.dBS, "dLogL": row.dLogL, "dRPS": row.dRPS,
+            })
+
+        st.markdown(
+            f"**B-spline, {n_params} total parameters "
+            f"({n_params - 5} inner knots)**"
+        )
+        if n_params == 7:
+            # 7-parameter version: TEST only, concrete raw vs recalibrated
+            # scores (not deltas), uppercase, bold black, centered.
+            cell_style = (
+                "border:1px solid #d0d0d0;padding:7px 8px;"
+                "font-weight:700;color:#000000;"
+            )
+            head_style = (
+                "border:1px solid #d0d0d0;padding:7px 8px;"
+                "background:#f3f3f3;font-weight:700;color:#000000;"
+            )
+            t_raw = sub[(sub["split"] == "test")
+                        & (sub["version"] == "raw")].iloc[0]
+            t_cal = sub[(sub["split"] == "test")
+                        & (sub["version"].str.startswith("spline"))].iloc[0]
+            # (name, raw, cal, raw CI lo, raw CI hi, cal CI lo, cal CI hi)
+            metric_rows = [
+                ("BRIER", t_raw["BS"], t_cal["BS"],
+                 t_raw["BS_lo"], t_raw["BS_hi"],
+                 t_cal["BS_lo"], t_cal["BS_hi"]),
+                ("LOGLOSS", t_raw["LogLoss"], t_cal["LogLoss"],
+                 t_raw["LogLoss_lo"], t_raw["LogLoss_hi"],
+                 t_cal["LogLoss_lo"], t_cal["LogLoss_hi"]),
+                ("RPS", t_raw["RPS"], t_cal["RPS"],
+                 t_raw["RPS_lo"], t_raw["RPS_hi"],
+                 t_cal["RPS_lo"], t_cal["RPS_hi"]),
+            ]
+            rows_html = []
+            for name, rv, cv, rlo, rhi, clo, chi in metric_rows:
+                rows_html.append(
+                    f'<tr>'
+                    f'<td style="{cell_style}">{name}</td>'
+                    f'<td style="{cell_style}">{rv:.4f}</td>'
+                    f'<td style="{cell_style}">{rlo:.4f} ~ {rhi:.4f}</td>'
+                    f'<td style="{cell_style}">{cv:.4f}</td>'
+                    f'<td style="{cell_style}">{clo:.4f} ~ {chi:.4f}</td>'
+                    f'<td style="{cell_style}">{rv - cv:+.4f}</td>'
+                    f'</tr>'
+                )
+            table_html = (
+                '<table style="width:66%;margin:0 auto;border-collapse:'
+                'collapse;text-align:center;font-family:Arial,sans-serif;"'
+                ' cellpadding="0" cellspacing="0">'
+                '<thead><tr>'
+                f'<th style="{head_style}">METRIC</th>'
+                f'<th style="{head_style}">RAW</th>'
+                f'<th style="{head_style}">RAW 95% CI</th>'
+                f'<th style="{head_style}">CALIB.</th>'
+                f'<th style="{head_style}">CALIB. 95% CI</th>'
+                f'<th style="{head_style}">&Delta;</th>'
+                '</tr></thead><tbody>'
+                + "".join(rows_html)
+                + '</tbody></table>'
+            )
+            st.markdown(table_html, unsafe_allow_html=True)
+            st.caption(
+                "Test set (2026-07), event-level full-coverage scoring. "
+                "RAW = original market prices; CALIB. = 7-parameter cubic "
+                "B-spline (2 inner knots) recalibrated prices. "
+                "CIs are event-level bootstrap 95% intervals (2,000 "
+                "resamples of whole events). Lower is better. "
+                "Delta = RAW - CALIB. (>0 means recalibration improves the "
+                "score); the deltas are tiny - the recalibration cannot "
+                "improve on the raw market."
+            )
+            continue
+        figs = make_subplots(
+            rows=1, cols=3,
+            subplot_titles=("Δ Brier (raw - spline)",
+                            "Δ LogLoss (raw - spline)",
+                            "Δ RPS (raw - spline)"),
+            shared_yaxes=False,
+            horizontal_spacing=0.16,
+        )
+        for i, (key, color) in enumerate(
+                [("dBS", "#1f6fb4"), ("dLogL", "#c1121f"),
+                 ("dRPS", "#2e8b57")], start=1):
+            figs.add_trace(go.Bar(
+                x=dd["split"], y=dd[key], name=key,
+                marker_color=color, marker_line_width=0,
+                text=[f"{v:+.4f}" for v in dd[key]],
+                textposition="outside",
+                textfont=dict(size=13, color="#000"),
+                hovertemplate="%{x}: %{y:+.4f}<extra></extra>",
+            ), row=1, col=i)
+            figs.update_xaxes(
+                tickfont=dict(size=13, color="#000",
+                              family="Arial, sans-serif", weight=700),
+                row=1, col=i, title=dict(text="", font=AXIS_FONT),
+            )
+            figs.update_yaxes(row=1, col=i,
+                              title=dict(text=key, font=AXIS_FONT),
+                              tickfont=TICK_FONT)
+        figs.update_layout(
+            height=380,
+            showlegend=False,
+            margin=dict(l=70, r=30, t=50, b=60),
+            plot_bgcolor="white",
+        )
+        figs.update_annotations(font=dict(color="#000000", size=16,
+                                          family="Arial, sans-serif",
+                                          weight=700))
+        st.plotly_chart(figs, use_container_width=True)
+
+    dsum = pd.DataFrame(delta_rows)
+    st.dataframe(dsum.round(4), use_container_width=True, hide_index=True)
+    st.caption(
+        "All three capacities are statistically indistinguishable: test-set "
+        "dRPS = +0.00055 (7), +0.00064 (8), +0.00041 (9) - all inside the "
+        "bootstrap CI. Validation improves monotonically with capacity "
+        "(overfitting toward the train-adjacent June data) while the "
+        "July test set peaks at 8 parameters and falls back - the "
+        "bias-variance turning point. Function form and parameter count "
+        "are not the bottleneck; the bias is too small to exploit "
+        "out-of-sample."
     )
 
 st.subheader("Random-uniform baseline")

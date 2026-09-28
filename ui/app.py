@@ -29,6 +29,7 @@ page = st.sidebar.radio(
         "First-Layer (Equal-Weighted)",
         "First-Layer (Aligned Dates)",
         "Event-Layer Scores (Brier/LogL/RPS)",
+        "Strategy Backtest (Favorite/Longshot)",
         "Calendar Stability",
         "Cross-Station",
     ],
@@ -71,6 +72,14 @@ elif page == "Event-Layer Scores (Brier/LogL/RPS)":
 
     runpy.run_path(
         str(Path(__file__).parent / "pages" / "event_layer_scores.py"),
+        run_name="__main__",
+    )
+
+elif page == "Strategy Backtest (Favorite/Longshot)":
+    import runpy
+
+    runpy.run_path(
+        str(Path(__file__).parent / "pages" / "strategy_backtest.py"),
         run_name="__main__",
     )
 

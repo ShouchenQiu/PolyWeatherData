@@ -108,7 +108,7 @@ fig.add_trace(go.Scatter(
 fig.add_hline(y=0, line_dash="dot", line_color="gray")
 fig.update_layout(
     height=420,
-    xaxis_title="Hours before high (h)",
+    xaxis_title="Hours Before The Highest Temperature",
     yaxis_title="D_h(0.10)",
     xaxis=dict(tickmode="array", tickvals=HORIZONS,
                ticktext=[f"{int(h)}h" for h in HORIZONS]),
@@ -147,7 +147,7 @@ for i, city in enumerate(cities):
 fig2.add_hline(y=0, line_dash="dot", line_color="gray")
 fig2.update_layout(
     height=520,
-    xaxis_title="Hours before high (h)",
+    xaxis_title="Hours Before The Highest Temperature",
     yaxis_title="D_h(0.10)",
     xaxis=dict(tickmode="array", tickvals=HORIZONS,
                ticktext=[f"{int(h)}h" for h in HORIZONS]),

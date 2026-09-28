@@ -106,12 +106,58 @@ for i, r in df.iterrows():
             df.at[i, "resolved_pct"] = None
 
 st.subheader("Station summary")
-display = df[["label", "station", "events", "markets", "trades", "start", "end", "resolved_pct", "status"]].copy()
-display.columns = ["Label", "Station", "Events", "Markets", "Trades", "Start", "End", "Resolved %", "Status"]
-display["Resolved %"] = display["Resolved %"].apply(
-    lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A"
-)
-st.dataframe(display, use_container_width=True, hide_index=True)
+# Exclude DALLAS / DENVER (excluded from the study), drop the date range,
+# resolved% and status columns. ONE merged table, two cities per row
+# (8 columns in pairs), original st.dataframe format, text centered.
+active = df[~df["station"].isin(["DALLAS", "DENVER"])].copy()
+active["label"] = active["label"].replace({"NYC": "New York City"})
+disp = active[["label", "events", "markets", "trades"]].copy()
+disp.columns = ["City", "Events", "Markets", "Trades"]
+disp["Trades"] = disp["Trades"].map(
+    lambda x: f"{x:,.0f}" if pd.notna(x) else "N/A")
+# uppercase every label and sort alphabetically by city name
+disp["City"] = disp["City"].str.upper()
+disp = disp.sort_values("City").reset_index(drop=True)
+
+left_df = disp.iloc[0::2].reset_index(drop=True)
+right_df = disp.iloc[1::2].reset_index(drop=True)
+if len(left_df) > len(right_df):
+    right_df = pd.concat([right_df, pd.DataFrame(
+        [["", "", "", ""]], columns=disp.columns)], ignore_index=True)
+merged = pd.concat([left_df, right_df], axis=1, ignore_index=True)
+# single-level flat header (drop the City A / City B group row).
+# Column names must be unique for pyarrow; the second city block uses a
+# trailing space (renders visually identical to the first block).
+merged.columns = [
+    "CITY", "EVENTS", "MARKETS", "TRADES",
+    "CITY\u200b", "EVENTS\u200b", "MARKETS\u200b", "TRADES\u200b",
+]
+# st.dataframe renders via Glide Data Grid (canvas), which ignores CSS
+# text-align; st.table renders a real HTML table, so centering works.
+# Streamlit forces inline text-align:left on cells, so we override with
+# !important CSS on the table's own selector.
+styler = merged.style.set_table_styles([{
+    "selector": "th, td",
+    "props": [("border", "1px solid #d0d0d0")],
+}, {
+    "selector": "th",
+    "props": [("background-color", "#f3f3f3"),
+              ("font-weight", "700"),
+              ("color", "#000000"),
+              ("font-family", "Arial, sans-serif")],
+}, {
+    "selector": "td",
+    "props": [("text-align", "center !important"),
+              ("padding", "6px 10px"),
+              ("font-weight", "700 !important"),
+              ("color", "#000000 !important"),
+              ("font-family", "Arial, sans-serif")],
+}, {
+    "selector": "th",
+    "props": [("text-align", "center !important"),
+              ("padding", "6px 10px")],
+}])
+st.table(styler)
 
 # --- raw order statistics (from step-8 CSV if present) ---
 raw_csv = Path(r"d:\NN\PolyWeatherData\docs\icdm\output\raw_trade_stats.csv")
@@ -180,7 +226,7 @@ if len(done) > 0:
     fig2 = go.Figure()
     for _, r in tdf.iterrows():
         fig2.add_trace(go.Bar(
-            name=r["label"], x=[r["end"] - r["start"]],
+            name=r["label"], x=[r["end"]],
             y=[r["label"]], orientation="h", base=r["start"],
             text=f"{r['events']} events",
             textposition="outside",

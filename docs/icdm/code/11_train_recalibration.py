@@ -243,7 +243,12 @@ def score_from_long(lng: pd.DataFrame, price_col: str) -> pd.DataFrame:
         p = g[price_col].to_numpy(dtype=float)
         y = g["y"].to_numpy(dtype=int)
         S = p.sum()
-        if S <= 0:
+        # Guard: the winning bucket must be among the priced buckets. The
+        # coverage check above is computed on the priced long frame, so an
+        # event whose winning bucket NEVER traded can pass it falsely; its
+        # metrics would then be meaningless (LogLoss would pick an
+        # arbitrary bucket via argmax). Drop such rows.
+        if S <= 0 or int(y.sum()) != 1:
             continue
         q = p / S
         F = np.cumsum(q)
