@@ -12,7 +12,7 @@ from typing import Callable, Protocol
 
 import pandas as pd
 
-from events.discovery import parse_slug
+from data.clob.slug import parse_slug
 
 
 class JsonTransport(Protocol):

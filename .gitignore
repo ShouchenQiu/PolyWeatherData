@@ -7,6 +7,7 @@ __pycache__/
 venv/
 env/
 data_store/
+output/
 model/store/v*/
 model/store/active_version.txt
 logs/

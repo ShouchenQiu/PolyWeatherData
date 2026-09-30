@@ -1,4 +1,9 @@
-"""data.clob package -- CLOB orderbook fetcher."""
-from data.clob.orderbook import OrderbookFetcher, OrderbookReader
+"""data.clob package -- Polymarket CLOB data ingestion and quality checks."""
+from data.clob.history import HistoricalClobDataset, HistoricalClobSource
+from data.clob.quality import audit_historical_clob
 
-__all__ = ["OrderbookFetcher", "OrderbookReader"]
+__all__ = [
+    "HistoricalClobDataset",
+    "HistoricalClobSource",
+    "audit_historical_clob",
+]

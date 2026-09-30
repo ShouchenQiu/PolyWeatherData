@@ -19,6 +19,7 @@ Data: docs/icdm/output/event_layer_scores.csv + event_layer_scores_long.csv
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -27,8 +28,11 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-CSV_SUM = Path(r"d:\NN\PolyWeatherData\docs\icdm\output\event_layer_scores.csv")
-CSV_LONG = Path(r"d:\NN\PolyWeatherData\docs\icdm\output\event_layer_scores_long.csv")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from common import OUT_DIR  # noqa: E402
+
+CSV_SUM = OUT_DIR / "event_layer_scores.csv"
+CSV_LONG = OUT_DIR / "event_layer_scores_long.csv"
 
 AXIS_FONT = dict(size=16, color="#000000", family="Arial, sans-serif", weight=700)
 TICK_FONT = dict(size=14, color="#000000", family="Arial, sans-serif", weight=700)
@@ -43,7 +47,7 @@ st.caption(
 )
 
 if not CSV_SUM.exists() or not CSV_LONG.exists():
-    st.error("Run docs/icdm/code/10_event_level_scores.py first.")
+    st.error("Run pipeline/2_scores/20_event_level_scores.py first.")
     st.stop()
 
 summ = pd.read_csv(CSV_SUM).sort_values("horizon_h")
@@ -210,267 +214,9 @@ st.caption(
 )
 
 # --------------------------------------------------------------------------
-# Bucket-count dependence and excess scores
-# --------------------------------------------------------------------------
-EXCESS_CSV = Path(r"d:\NN\PolyWeatherData\docs\icdm\output\excess_scores.csv")
-DEP_CSV = Path(r"d:\NN\PolyWeatherData\docs\icdm\output\bucket_dependence.csv")
-if EXCESS_CSV.exists() and DEP_CSV.exists():
-    st.subheader("Bucket-count dependence and excess scores")
-    st.caption(
-        "All three metrics have a bucket-count dependence: a PERFECTLY "
-        "calibrated forecaster still scores a positive floor "
-        "(Brier floor = 1 - sum q^2, LogLoss floor = entropy H(q), "
-        "RPS floor = sum F(1-F)). Events with more buckets therefore "
-        "score worse mechanically, and bucket counts differ across splits "
-        "(train 9.51 vs test 10.75) and horizons (48h 10.15 vs 1h 9.41). "
-        "EXCESS = RAW - FLOOR measures the distance from perfect "
-        "calibration and is expected to be 0 for a calibrated forecaster "
-        "at ANY bucket count, so it largely removes that dependence. "
-        "Below: market prices (RAW variant), test set 2026-07."
-    )
-    ex = pd.read_csv(EXCESS_CSV)
-    dep = pd.read_csv(DEP_CSV)
-    _cell = ("border:1px solid #d0d0d0;padding:8px 10px;"
-             "font-weight:700;color:#000000;")
-    _head = ("border:1px solid #d0d0d0;padding:8px 10px;"
-             "background:#f3f3f3;font-weight:700;color:#000000;")
-
-    sp_raw = ex[(ex["scope_type"] == "split") & (ex["variant"] == "raw")]
-    sp_raw = sp_raw.set_index("scope_value")
-    rows_html = []
-    for sn in ["train", "val", "test", "ALL"]:
-        if sn not in sp_raw.index:
-            continue
-        r = sp_raw.loc[sn]
-        rows_html.append(
-            f'<tr>'
-            f'<td style="{_cell}">{sn.upper()}</td>'
-            f'<td style="{_cell}">{int(r["n_events"])}</td>'
-            f'<td style="{_cell}">{r["n_buckets_mean"]:.2f}</td>'
-            f'<td style="{_cell}">{r["BS_raw"]:.4f}</td>'
-            f'<td style="{_cell}">{r["BS_excess"]:+.4f}</td>'
-            f'<td style="{_cell}">{r["LogLoss_raw"]:.4f}</td>'
-            f'<td style="{_cell}">{r["LogLoss_excess"]:+.4f}</td>'
-            f'<td style="{_cell}">{r["RPS_raw"]:.4f}</td>'
-            f'<td style="{_cell}">{r["RPS_excess"]:+.4f}</td>'
-            f'</tr>'
-        )
-    st.markdown(
-        '<table style="width:98%;margin:0 auto;border-collapse:collapse;'
-        'text-align:center;font-family:Arial,sans-serif;">'
-        '<thead><tr>'
-        f'<th style="{_head}">SPLIT</th>'
-        f'<th style="{_head}">EVENTS</th>'
-        f'<th style="{_head}">MEAN BUCKETS</th>'
-        f'<th style="{_head}">BRIER (RAW)</th>'
-        f'<th style="{_head}">BRIER (EXCESS)</th>'
-        f'<th style="{_head}">LOGLOSS (RAW)</th>'
-        f'<th style="{_head}">LOGLOSS (EXCESS)</th>'
-        f'<th style="{_head}">RPS (RAW)</th>'
-        f'<th style="{_head}">RPS (EXCESS)</th>'
-        '</tr></thead><tbody>' + "".join(rows_html) + '</tbody></table>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        "**Per-bucket average Brier** - the total Brier divided by the "
-        "number of buckets, i.e. the average squared error contributed by "
-        "one bucket. This puts the score on an intuitive scale (directly "
-        "comparable to a single binary Brier):"
-    )
-    pb_rows = []
-    for sn in ["train", "val", "test", "ALL"]:
-        if sn not in sp_raw.index:
-            continue
-        r = sp_raw.loc[sn]
-        pb_rows.append(
-            f'<tr>'
-            f'<td style="{_cell}">{sn.upper()}</td>'
-            f'<td style="{_cell}">{r["n_buckets_mean"]:.2f}</td>'
-            f'<td style="{_cell}">{r["BS_raw_per_bucket"]:.5f}</td>'
-            f'<td style="{_cell}">{r["BS_floor_per_bucket"]:.5f}</td>'
-            f'<td style="{_cell}">{r["BS_excess_per_bucket"]:+.5f}</td>'
-            f'</tr>'
-        )
-    anchors = [
-        ("Uniform guess, n=7", "0.12245"),
-        ("Uniform guess, n=9", "0.09877"),
-        ("Uniform guess, n=11", "0.08264"),
-        ("Single bucket at p=0.50", "0.25000"),
-        ("Single bucket at p=0.10", "0.09000"),
-        ("Single bucket at p=0.01", "0.00990"),
-    ]
-    anc_rows = "".join(
-        f'<tr><td style="{_cell}">{k}</td>'
-        f'<td style="{_cell}">{v}</td></tr>' for k, v in anchors)
-
-    st.markdown(
-        '<table style="width:60%;margin:0 auto;border-collapse:collapse;'
-        'text-align:center;font-family:Arial,sans-serif;">'
-        '<thead><tr>'
-        f'<th style="{_head}">SPLIT</th>'
-        f'<th style="{_head}">MEAN BUCKETS</th>'
-        f'<th style="{_head}">BRIER / N</th>'
-        f'<th style="{_head}">FLOOR / N</th>'
-        f'<th style="{_head}">EXCESS / N</th>'
-        '</tr></thead><tbody>' + "".join(pb_rows) + '</tbody></table>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<table style="width:60%;margin:12px auto 0 auto;'
-        'border-collapse:collapse;text-align:center;'
-        'font-family:Arial,sans-serif;">'
-        '<thead><tr>'
-        f'<th style="{_head}">REFERENCE ANCHOR</th>'
-        f'<th style="{_head}">BRIER PER BUCKET</th>'
-        '</tr></thead><tbody>' + anc_rows + '</tbody></table>',
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        "Reading the scale: the market's per-bucket Brier is about 0.066, "
-        "i.e. each bucket contributes ~0.066 squared error on average. For "
-        "comparison, a uniform guess costs 0.083-0.122 per bucket (n=11 to "
-        "n=7), and a single bucket quoted at p=0.50 costs 0.250. The market "
-        "sits essentially AT its own perfect-calibration floor (0.0664), so "
-        "the remaining error is almost entirely irreducible weather "
-        "uncertainty rather than miscalibration. CAVEAT: dividing by n "
-        "OVER-corrects the bucket dependence (corr flips to -0.263), so use "
-        "BRIER/N for intuitive scale only; use the EXCESS columns for fair "
-        "cross-split and cross-horizon comparisons."
-    )
-
-    st.markdown(
-        "**Bucket dependence, quantified** - regression of each metric on "
-        "the number of buckets per event (market prices, all splits):"
-    )
-    dep_rows = []
-    for _, d in dep.iterrows():
-        dep_rows.append(
-            f'<tr>'
-            f'<td style="{_cell}">{str(d["metric"]).upper()}</td>'
-            f'<td style="{_cell}">{d["corr_raw"]:+.3f}</td>'
-            f'<td style="{_cell}">{d["slope_raw"]:+.5f}</td>'
-            f'<td style="{_cell}">{d["corr_excess"]:+.3f}</td>'
-            f'<td style="{_cell}">{d["slope_excess"]:+.5f}</td>'
-            f'<td style="{_cell}">{d["corr_per_bucket"]:+.3f}</td>'
-            f'<td style="{_cell}">{d["corr_excess_per_bucket"]:+.3f}</td>'
-            f'</tr>'
-        )
-    st.markdown(
-        '<table style="width:92%;margin:0 auto;border-collapse:collapse;'
-        'text-align:center;font-family:Arial,sans-serif;">'
-        '<thead><tr>'
-        f'<th style="{_head}">METRIC</th>'
-        f'<th style="{_head}">CORR VS N (RAW)</th>'
-        f'<th style="{_head}">SLOPE VS N (RAW)</th>'
-        f'<th style="{_head}">CORR VS N (EXCESS)</th>'
-        f'<th style="{_head}">SLOPE VS N (EXCESS)</th>'
-        f'<th style="{_head}">CORR VS N (RAW/N)</th>'
-        f'<th style="{_head}">CORR VS N (EXCESS/N)</th>'
-        '</tr></thead><tbody>' + "".join(dep_rows) + '</tbody></table>',
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        "RAW metrics correlate positively with bucket count (corr +0.11 to "
-        "+0.14, slope +0.021 to +0.070 per extra bucket): more buckets "
-        "mechanically worsen the score. EXCESS scores cut that dependence "
-        "by 83-88% (corr |r| <= 0.02, i.e. indistinguishable from zero at "
-        "this sample size), so cross-split and cross-horizon comparisons "
-        "are fair on the excess scale. Negative excess means the market is "
-        "slightly UNDER-confident (the realized winner is, on average, "
-        "given more probability than the spread of the predicted "
-        "distribution implies). Absolute levels are not directly "
-        "comparable across studies with different bucket counts; use "
-        "EXCESS for comparisons and RAW for absolute reporting."
-    )
-
-# --------------------------------------------------------------------------
-# Recalibration comparison (price3: 3 price segments, roadmap Section 6)
-# --------------------------------------------------------------------------
-PRICE3_CSV = Path(r"d:\NN\PolyWeatherData\docs\icdm\output\recalibration_price3_results.csv")
-if PRICE3_CSV.exists():
-    st.subheader("Recalibration comparison (price3)")
-    st.caption(
-        "Logit recalibration fitted per PRICE segment on the TRAIN set "
-        "(roadmap Section 6, 3 segments: p<=0.15, 0.15<p<0.75, p>=0.75), "
-        "then applied to each split. Parameters (train): "
-        "p1: a=+0.111 b=+1.073 | p2: a=+0.015 b=+1.021 | "
-        "p3: a=-0.593 b=+1.182. "
-        "After per-bucket recalibration the event is re-normalized "
-        "(q_hat = p_hat / sum p_hat) before scoring."
-    )
-    pr = pd.read_csv(PRICE3_CSV)
-    pr["label"] = pr["split"] + " / " + pr["version"]
-    pr = pr.sort_values(["split", "version"], ascending=[True, False])
-
-    # comparison table
-    disp_pr = pr[["split", "version", "n_events", "BS", "LogLoss", "RPS",
-                  "BS_lo", "BS_hi", "LogLoss_lo", "LogLoss_hi",
-                  "RPS_lo", "RPS_hi"]].copy()
-    disp_pr.columns = ["Split", "Version", "Events", "Brier", "LogLoss", "RPS",
-                       "Brier lo", "Brier hi", "LogL lo", "LogL hi",
-                       "RPS lo", "RPS hi"]
-    st.dataframe(disp_pr.round(4), use_container_width=True, hide_index=True)
-
-    # delta (raw - price3) per split: positive = recalibration improves
-    piv = pr.pivot(index="split", columns="version",
-                   values=["BS", "LogLoss", "RPS"])
-    deltas = []
-    for sn in ["train", "val", "test"]:
-        deltas.append({
-            "split": sn,
-            "dBS": float(piv.loc[sn, ("BS", "raw")] - piv.loc[sn, ("BS", "price3")]),
-            "dLogL": float(piv.loc[sn, ("LogLoss", "raw")] - piv.loc[sn, ("LogLoss", "price3")]),
-            "dRPS": float(piv.loc[sn, ("RPS", "raw")] - piv.loc[sn, ("RPS", "price3")]),
-        })
-    dd = pd.DataFrame(deltas)
-
-    figp = make_subplots(
-        rows=1, cols=3,
-        subplot_titles=("Δ Brier (raw - recal)", "Δ LogLoss (raw - recal)",
-                        "Δ RPS (raw - recal)"),
-        shared_yaxes=False,
-        horizontal_spacing=0.16,
-    )
-    for i, (key, color) in enumerate(
-            [("dBS", "#1f6fb4"), ("dLogL", "#c1121f"), ("dRPS", "#2e8b57")],
-            start=1):
-        figp.add_trace(go.Bar(
-            x=dd["split"], y=dd[key], name=key,
-            marker_color=color, marker_line_width=0,
-            text=[f"{v:+.4f}" for v in dd[key]], textposition="outside",
-            textfont=dict(size=13, color="#000"),
-            hovertemplate="%{x}: %{y:+.4f}<extra></extra>",
-        ), row=1, col=i)
-        figp.update_xaxes(
-            tickfont=dict(size=13, color="#000",
-                          family="Arial, sans-serif", weight=700),
-            row=1, col=i, title=dict(text="", font=AXIS_FONT),
-        )
-        figp.update_yaxes(row=1, col=i, title=dict(text=key, font=AXIS_FONT),
-                          tickfont=TICK_FONT)
-    figp.update_layout(
-        height=380,
-        showlegend=False,
-        margin=dict(l=70, r=30, t=50, b=60),
-        plot_bgcolor="white",
-    )
-    figp.update_annotations(font=dict(color="#000000", size=16,
-                                      family="Arial, sans-serif", weight=700))
-    st.plotly_chart(figp, use_container_width=True)
-    st.caption(
-        "Delta > 0 means recalibration IMPROVES the score (lower is better). "
-        "On train/val the price3 recalibration helps slightly (dRPS "
-        "+0.001~+0.0012); on the 7-month TEST set the gain is +0.0004 - "
-        "inside the bootstrap CI, i.e. not significant. This matches the "
-        "roadmap Section 6 verdict: the bias is real but too small to be "
-        "exploited out-of-sample with a simple calibration function."
-    )
-
-# --------------------------------------------------------------------------
 # Recalibration comparison (B-spline: 7 / 8 / 9 total parameters)
 # --------------------------------------------------------------------------
-SPLINE_CSV = Path(r"d:\NN\PolyWeatherData\docs\icdm\output\recalibration_spline_results.csv")
+SPLINE_CSV = OUT_DIR / "recalibration_spline_results.csv"
 if SPLINE_CSV.exists():
     st.subheader("Recalibration comparison (B-spline)")
     st.caption(

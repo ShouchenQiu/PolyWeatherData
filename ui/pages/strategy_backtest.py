@@ -1,6 +1,6 @@
 """Favorite/Longshot buy-NO strategy backtest results page.
 
-Renders, from analysis_klga_l2_strategy/:
+Renders, from POLYWEATHER_OUT_DIR (default <repo>/output/):
   - cross_city_fav_ls_summary.csv   (10-city favorite & longshot buy-NO)
   - favorite_fixed_h_bins.csv       (fixed signal-hour bins with CI)
 Fee model: real Polymarket schedule Fee = Theta * C * p * (1 - p),
@@ -13,13 +13,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import sys
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-OUT = Path(r"d:\NN\PolyWeatherData\analysis_klga_l2_strategy")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from common import OUT_DIR  # noqa: E402
+
+OUT = OUT_DIR
 SUMMARY = OUT / "cross_city_fav_ls_summary.csv"
 HBINS = OUT / "favorite_fixed_h_bins.csv"
 NOTIONAL = 10.0
@@ -34,8 +39,8 @@ st.caption(
 
 if not SUMMARY.exists() or not HBINS.exists():
     st.error(
-        "Results not found. Run scripts/cross_city_fav_ls_pnl.py and "
-        "scripts/favorite_fixed_h_bins.py first."
+        "Results not found. Run pipeline/5_buy_no/50_cross_city_buy_no.py and "
+        "pipeline/5_buy_no/51_favorite_fixed_h_bins.py first."
     )
     st.stop()
 

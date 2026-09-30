@@ -1,4 +1,9 @@
-# Codex Execution Protocol
+# Agent Execution Protocol (historical)
+
+> **Note:** this file is a tooling/process protocol inherited from an earlier,
+> much larger version of the repository. It is **not** part of the paper pipeline
+> and nothing in `pipeline/` depends on it. It is kept only as a record of the
+> execution conventions used while the analysis was being run.
 
 ## Long-Running Commands
 

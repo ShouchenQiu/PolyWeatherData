@@ -2,7 +2,7 @@
 
 > 本文件记录基于 $D_h(0.75\sim0.95)<0$（favorite 被高估）构建的"买 NO"策略，
 > 在 10 个城市历史 CLOB 数据上的完整回测设计与结果（真实费率下费后盈利 $932.99 / +50.71%）。
-> 对应脚本：`scripts/cross_city_fav_ls_pnl.py`、`scripts/favorite_fixed_h_bins.py`。
+> 对应脚本：`pipeline/5_buy_no/50_cross_city_buy_no.py`、`pipeline/5_buy_no/51_favorite_fixed_h_bins.py`。
 
 ---
 
@@ -171,10 +171,9 @@ $$
 
 ## 十、脚本与产出
 
-- `scripts/cross_city_fav_ls_pnl.py` —— 10 城主回测（favorite + longshot 双策略）
-- `scripts/favorite_fixed_h_bins.py` —— 固定 h 分箱优化
-- `scripts/favorite_buy_no_hist.py` —— KLGA 单城原型（发现样本不足，被 10 城版取代）
-- 输出（`analysis_klga_l2_strategy/`）：
+- `pipeline/5_buy_no/50_cross_city_buy_no.py` —— 10 城主回测（favorite + longshot 双策略）
+- `pipeline/5_buy_no/51_favorite_fixed_h_bins.py` —— 固定 h 分箱优化
+- 输出（写入 `POLYWEATHER_OUT_DIR`，默认 `<repo>/output/`）：
   - `cross_city_fav_ls_summary.csv`
   - `cross_city_favorite_NO_trades.csv` / `cross_city_longshot_NO_trades.csv`
   - `favorite_fixed_h_bins.csv`
