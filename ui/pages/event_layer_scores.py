@@ -15,7 +15,7 @@ Method:
   - RPS = sum_{k=1}^{n-1} (F_k - O_k)^2   (ordered buckets)
   - 95% CI via bootstrap resampling WHOLE events (roadmap 7.3).
 
-Data: docs/icdm/output/event_layer_scores.csv + event_layer_scores_long.csv
+Data: <OUT_DIR>/event_layer_scores.csv + event_layer_scores_long.csv
 """
 from __future__ import annotations
 

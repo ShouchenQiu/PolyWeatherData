@@ -10,7 +10,7 @@ Figures (standalone, NOT replacing the UI):
 
 Logic mirrors ui/pages/*.py exactly (event-weighted, excludes
 DENVER/DALLAS, 30-min argmax panel). Output PNGs are written to
-docs/icdm/output/.
+<OUT_DIR>/.
 """
 from __future__ import annotations
 

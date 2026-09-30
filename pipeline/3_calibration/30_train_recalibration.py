@@ -19,8 +19,8 @@ step 10, computed directly from a LONG frame (one row per
 condition_id x horizon) to avoid pivot/merge hazards.
 
 Outputs:
-  docs/icdm/output/recalibration_params.csv
-  docs/icdm/output/recalibration_results.csv
+  <OUT_DIR>/recalibration_params.csv
+  <OUT_DIR>/recalibration_results.csv
 """
 from __future__ import annotations
 

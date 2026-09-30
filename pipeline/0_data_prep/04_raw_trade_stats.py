@@ -1,7 +1,7 @@
 """Step 8: raw order-data statistics per station.
 
 Computes order-level statistics for every canonical CLOB artifact and
-writes docs/icdm/output/raw_trade_stats.csv (also shown on the Data
+writes <OUT_DIR>/raw_trade_stats.csv (also shown on the Data
 Overview UI page).
 
 Metrics per station:

@@ -5,7 +5,7 @@ The KLGA 20260401_20260630 artifact was downloaded with an older schema
 outcomePrices via the Gamma public-search endpoint, querying by EVENT SLUG
 (one request per event, ~88 events total, much faster than per-condition).
 
-Output: docs/icdm/output/klga_q2_resolution.parquet
+Output: <OUT_DIR>/klga_q2_resolution.parquet
 """
 from __future__ import annotations
 

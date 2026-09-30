@@ -6,7 +6,7 @@ score raw vs recalibrated on train / val / test with the event-level
 full-coverage scoring from step 10 and bootstrap 95% CI.
 
 Outputs:
-  docs/icdm/output/recalibration_spline_results.csv
+  <OUT_DIR>/recalibration_spline_results.csv
   (long format: split, version, params, n_events, BS, LogLoss, RPS + CIs)
 """
 from __future__ import annotations

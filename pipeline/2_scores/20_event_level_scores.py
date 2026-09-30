@@ -17,8 +17,8 @@ Method (strict per roadmap 5.1-5.4):
      bootstrap 95% CI (resample whole events, roadmap 7.3).
 
 Outputs:
-  docs/icdm/output/event_layer_scores.csv
-  docs/icdm/output/event_layer_scores_bootstrap.csv
+  <OUT_DIR>/event_layer_scores.csv
+  <OUT_DIR>/event_layer_scores_bootstrap.csv
 """
 from __future__ import annotations
 

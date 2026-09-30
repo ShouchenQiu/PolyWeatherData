@@ -3,7 +3,7 @@
 US stations: IEM ASOS minute-level data, fetched in MONTHLY chunks (a full
 multi-month request times out).  International stations: Open-Meteo hourly.
 
-Output: docs/icdm/output/daily_high_argmax.parquet
+Output: <OUT_DIR>/daily_high_argmax.parquet
   columns: station, target_date, high_value, argmax_utc, argmax_hour_local
 """
 from __future__ import annotations

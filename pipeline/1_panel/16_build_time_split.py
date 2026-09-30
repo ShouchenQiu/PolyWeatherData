@@ -13,7 +13,7 @@ The canonical panel (`first_layer_panel_argmax_30min.parquet`) is keyed by
 event to its target date and writes the assignment that later steps consume.
 
 Output:
-    docs/icdm/output/train_val_test_split.parquet
+    <OUT_DIR>/train_val_test_split.parquet
         columns: event_id, target_date, split
 """
 from __future__ import annotations

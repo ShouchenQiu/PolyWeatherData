@@ -125,7 +125,7 @@ data/                   Polymarket CLOB ingestion — only what the paper needs
 config/                 station registry (ICAO codes, coordinates, timezones)
 scripts/                data download / audit CLIs
 ui/                     optional Streamlit dashboard for interactive review
-docs/                   data schema (DATA.md) and method notes
+docs/                   data schema (DATA.md)
 ```
 
 `data/`, `config/`, and `scripts/` exist so the raw artifacts can be rebuilt from
