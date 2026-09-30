@@ -15,6 +15,7 @@ dependencies = [
     "loguru",
     "streamlit",
     "plotly",
+    "pillow",
 ]
 
 [project.optional-dependencies]

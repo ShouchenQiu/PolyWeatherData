@@ -25,16 +25,19 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import CLOB_ROOT, OUT_DIR, PANEL, ensure_out_dir  # noqa: E402
-from constants import ARTIFACT, NODES, TRAIN_END, VALID_END  # noqa: E402
+from constants import ARTIFACT, NODES, OUTLIERS, TRAIN_END, VALID_END  # noqa: E402
 
 CLOB = CLOB_ROOT
 TEST_END = "2026-07-31"
 
+# The paper analyses the ten non-outlier cities only.
+ANALYSIS_NODES = {k: v for k, v in NODES.items() if k not in OUTLIERS}
+
 
 def load_event_dates() -> pd.DataFrame:
-    """Collect (event_id, target_date) for every canonical node."""
+    """Collect (event_id, target_date) for every analysed node."""
     frames = []
-    for node, station in NODES.items():
+    for node, station in ANALYSIS_NODES.items():
         ev = pd.read_parquet(
             CLOB / station / ARTIFACT / "events.parquet",
             columns=["event_id", "target_date"],

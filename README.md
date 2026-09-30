@@ -46,17 +46,27 @@ approaches.
 ## 2. Results → code map
 
 Every number and figure in the paper comes from a script in this repository.
+The `paper_en/` LaTeX text includes figures under names like
+`figure1_reliability.png`; `40_export_figures.py` writes both its native
+`figN_*.png` names and those paper-ready aliases into `POLYWEATHER_OUT_DIR`.
 
-| Paper item | Produced by |
-|---|---|
-| Table I — dataset summary | `pipeline/0_data_prep/04_raw_trade_stats.py` |
-| Fig. 1 — reliability by horizon | `pipeline/4_figures/40_export_figures.py` (fig3) |
-| Fig. 2 — range bias $D_h$ (dual axis) | `pipeline/4_figures/40_export_figures.py` (fig2) |
-| Fig. 3 — Brier / Log Loss / RPS vs horizon | `pipeline/2_scores/20_event_level_scores.py` → `pipeline/4_figures/40_export_figures.py` (fig1) |
-| Fig. 4 — calibration-error heatmap | `pipeline/4_figures/40_export_figures.py` (fig4) |
-| Table II — B-spline recalibration | `pipeline/3_calibration/31_spline_recalibration.py` (7-parameter fit) |
-| Table III — Buy-NO diagnostics | `pipeline/5_buy_no/50_cross_city_buy_no.py` |
-| §III-B event split (train/val/test) | `pipeline/1_panel/16_build_time_split.py` |
+| Paper item | Produced by | Output file |
+|---|---|---|
+| Table I — dataset summary | `pipeline/0_data_prep/04_raw_trade_stats.py` | `raw_trade_stats.csv` |
+| Fig. 1 — reliability by horizon | `pipeline/4_figures/40_export_figures.py` | `figure1_reliability.png` |
+| Fig. 2 — range bias $D_h$ (dual axis) | `pipeline/4_figures/40_export_figures.py` | `figure2_dh.png` |
+| Fig. 3 — Brier / Log Loss / RPS vs horizon | `pipeline/2_scores/20_event_level_scores.py` → `pipeline/4_figures/40_export_figures.py` | `figure3_precalibration_metrics.png` |
+| Fig. 4 — calibration-error heatmap | `pipeline/4_figures/40_export_figures.py` | `figure_heatmap_reversed.png` |
+| Table II — B-spline recalibration | `pipeline/3_calibration/31_spline_recalibration.py` (7-parameter fit, `spline_p7`) | `recalibration_spline_results.csv` |
+| Table III — Buy-NO diagnostics | `pipeline/5_buy_no/50_cross_city_buy_no.py` | `cross_city_fav_ls_summary.csv` |
+| §III-B event split (train/val/test) | `pipeline/1_panel/16_build_time_split.py` | `train_val_test_split.parquet` |
+
+**Note on Fig. 4.** The heatmap panel in the paper was exported from the
+Streamlit dashboard rather than from `40_export_figures.py`, so its pixel
+dimensions differ from the other three figures. The pipeline version
+reproduces the same statistic (realized win rate minus mean price, per price
+bin × horizon, on the training sample); it is not byte-identical to the
+published PNG.
 
 ---
 
@@ -84,6 +94,12 @@ Parquet artifacts laid out as:
 <CLOB_ROOT>/<STATION>/<ARTIFACT>/{events,markets,trades,coverage}.parquet
 <CLOB_ROOT>/<STATION>/<ARTIFACT>/manifest.json
 ```
+
+`<ARTIFACT>` is the **canonical window label** `20251205_20260810` for every
+station — `pipeline/0_data_prep/02_merge_nyc_artifact.py` produces it for NYC
+and `pipeline/0_data_prep/03_create_canonical_artifacts.py` for the other
+nine. Those two scripts read the *raw* per-station downloads, whose folder
+names differ by station; nothing downstream needs to know about them.
 
 See [`docs/DATA.md`](docs/DATA.md) for the full column-by-column schema, the
 bucket-parsing rules, and the integrity checks.
@@ -113,9 +129,10 @@ pipeline/               analysis pipeline, run in numeric order
 │   └── 31_spline_recalibration.py          -> Table II
 ├── 4_figures/          paper figures
 │   └── 40_export_figures.py                -> Figs. 1, 2, 3, 4
+│                                              (+ paper-ready file aliases)
 └── 5_buy_no/           Buy-NO strategy tests
     ├── 50_cross_city_buy_no.py             -> Table III
-    └── 51_favorite_fixed_h_bins.py
+    └── 51_favorite_fixed_h_bins.py         -> per-horizon companion
 
 data/                   Polymarket CLOB ingestion — only what the paper needs
 └── clob/
@@ -192,12 +209,22 @@ python pipeline/3_calibration/31_spline_recalibration.py
 python pipeline/4_figures/40_export_figures.py
 ```
 
+Writes four `fig1_*.png … fig4_*.png` files and, alongside them, copies to
+the names `paper_en/main.tex` includes (`figure1_reliability.png`,
+`figure2_dh.png`, `figure3_precalibration_metrics.png`,
+`figure_heatmap_reversed.png`). Copy those four into `paper_en/` to rebuild
+the PDF.
+
 ### Stage 5 — Buy-NO tests (Table III)
 
 ```bash
 python pipeline/5_buy_no/50_cross_city_buy_no.py
 python pipeline/5_buy_no/51_favorite_fixed_h_bins.py
 ```
+
+Both read the canonical panel, so the signal horizons are **hours before the
+daily temperature peak** — the same definition used by Figs. 1–4 — and the
+evaluation window is the July test split.
 
 ### Optional — interactive dashboard
 

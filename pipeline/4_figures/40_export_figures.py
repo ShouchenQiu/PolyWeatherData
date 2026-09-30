@@ -1,16 +1,38 @@
-"""Generate high-res PNGs of the three key UI figures for the paper.
+"""Export the four paper figures as high-resolution PNGs.
 
-Figures (standalone, NOT replacing the UI):
-  1. Scores vs time to high (combined, normalized to 48h = 1)
-     (Event-Distribution Layer page)
-  2. Combined D_h(0.10) vs D_h(0.75~0.95) (dual axes)
-     (First-Layer Aligned-Dates page)
-  3. Reliability diagram: all horizons overlaid
-     (First-Layer Aligned-Dates page)
+Produces, into <OUT_DIR>/:
 
-Logic mirrors ui/pages/*.py exactly (event-weighted, excludes
-DENVER/DALLAS, 30-min argmax panel). Output PNGs are written to
-<OUT_DIR>/.
+    fig1_scores_combined_normalized_48h.png   -> paper Figure 3
+    fig2_combined_dh_dual_axes.png            -> paper Figure 2
+    fig3_reliability_all_horizons.png         -> paper Figure 1
+    fig4_bias_heatmap_bin_x_horizon.png       -> paper Figure 4
+
+INTERNAL FILE NAMES vs PAPER FIGURE NUMBERS
+-------------------------------------------
+The file names are ordered by the original export order (scores first),
+which is NOT the order the figures appear in the paper.  The mapping is:
+
+    paper Figure 1 (reliability)  = fig3_reliability_all_horizons.png
+    paper Figure 2 (range bias D) = fig2_combined_dh_dual_axes.png
+    paper Figure 3 (scores)       = fig1_scores_combined_normalized_48h.png
+    paper Figure 4 (heatmap)      = fig4_bias_heatmap_bin_x_horizon.png
+
+The same PNGs are also copied to the names `main.tex` actually includes, so
+that pipeline output drops straight into the LaTeX tree:
+
+    figure1_reliability.png             = fig3_reliability_all_horizons.png
+    figure2_dh.png                      = fig2_combined_dh_dual_axes.png
+    figure3_precalibration_metrics.png  = fig1_scores_combined_normalized_48h.png
+    figure_heatmap_reversed.png         = fig4_bias_heatmap_bin_x_horizon.png
+
+All figures use the training sample (2025-12-05 .. 2026-05-31) for Figs. 1,
+2 and 4 — consistent with the paper — while Fig. 3 (scores) reads the
+event-layer CSV, which is also training-sample based.  Logic mirrors
+ui/pages/*.py (event-weighted, DENVER/DALLAS excluded, 30-min argmax panel).
+
+The heatmap is written with the y-axis reversed (highest price bin on top)
+and flipped vertically on export to match `figure_heatmap_reversed.png`; the
+LaTeX `includegraphics` trims the top so the in-paper orientation is right.
 """
 from __future__ import annotations
 
@@ -29,6 +51,16 @@ PANEL = OUT_DIR / "first_layer_panel_argmax_30min.parquet"
 CSV_SUM = OUT_DIR / "event_layer_scores.csv"
 HORIZONS = [48.0, 42.0, 36.0, 30.0, 24.0, 18.0, 12.0, 9.0, 6.0, 3.0, 1.0]
 OUTLIERS = ["DENVER", "DALLAS"]
+
+# <OUT_DIR> file name -> file name `paper_en/main.tex` includes.
+# Keep in sync with the docstring and with README section 2.
+PAPER_ALIASES = {
+    "fig3_reliability_all_horizons.png": "figure1_reliability.png",
+    "fig2_combined_dh_dual_axes.png": "figure2_dh.png",
+    "fig1_scores_combined_normalized_48h.png":
+        "figure3_precalibration_metrics.png",
+    "fig4_bias_heatmap_bin_x_horizon.png": "figure_heatmap_reversed.png",
+}
 
 AXIS_FONT = dict(size=18, color="#000000", family="Arial, sans-serif",
                  weight=700)
@@ -96,38 +128,38 @@ def main() -> int:
     dh_hi = dh_range(panel, 0.75, 0.95)
 
     # ---- Figure 2: combined D_h dual axes -----------------------------
-    fig4 = go.Figure()
-    fig4.add_trace(go.Scatter(
+    fig_dh = go.Figure()
+    fig_dh.add_trace(go.Scatter(
         x=dh["horizon_h"], y=dh["event"], mode="lines+markers",
         name="D_h(0.10) event-wtd", line=dict(color="#1f6fb4", width=3),
         marker=dict(size=9), yaxis="y",
         hovertemplate="D_h(0.10) event: %{y:+.4f}<extra></extra>",
     ))
-    fig4.add_trace(go.Scatter(
+    fig_dh.add_trace(go.Scatter(
         x=dh["horizon_h"], y=dh["equal"], mode="lines+markers",
         name="D_h(0.10) station-eq", line=dict(color="#8e44ad", width=3,
                                                dash="dash"),
         marker=dict(size=9), yaxis="y",
         hovertemplate="D_h(0.10) equal: %{y:+.4f}<extra></extra>",
     ))
-    fig4.add_trace(go.Scatter(
+    fig_dh.add_trace(go.Scatter(
         x=dh_hi["horizon_h"], y=dh_hi["event"], mode="lines+markers",
         name="D_h(0.75~0.95) event-wtd", line=dict(color="#c1121f", width=3),
         marker=dict(size=9), yaxis="y2",
         hovertemplate="D_h(0.75~0.95) event: %{y:+.4f}<extra></extra>",
     ))
-    fig4.add_trace(go.Scatter(
+    fig_dh.add_trace(go.Scatter(
         x=dh_hi["horizon_h"], y=dh_hi["equal"], mode="lines+markers",
         name="D_h(0.75~0.95) station-eq", line=dict(color="#f39c12", width=3,
                                                     dash="dash"),
         marker=dict(size=9), yaxis="y2",
         hovertemplate="D_h(0.75~0.95) equal: %{y:+.4f}<extra></extra>",
     ))
-    fig4.add_hline(y=0, line_dash=ZERO_LINE["dash"], line_color=ZERO_LINE["color"],
+    fig_dh.add_hline(y=0, line_dash=ZERO_LINE["dash"], line_color=ZERO_LINE["color"],
                    line_width=ZERO_LINE["width"], yref="y")
-    fig4.add_hline(y=0, line_dash=ZERO_LINE["dash"], line_color="#999999",
+    fig_dh.add_hline(y=0, line_dash=ZERO_LINE["dash"], line_color="#999999",
                    line_width=1, yref="y2")
-    fig4.update_layout(
+    fig_dh.update_layout(
         height=560,
         xaxis=dict(
             tickmode="array", tickvals=HORIZONS,
@@ -146,29 +178,29 @@ def main() -> int:
         margin=dict(l=90, r=90, t=70, b=70),
         plot_bgcolor="white",
     )
-    fig4.write_image(OUT_DIR / "fig2_combined_dh_dual_axes.png",
+    fig_dh.write_image(OUT_DIR / "fig2_combined_dh_dual_axes.png",
                      scale=3, width=1400, height=560)
     print("[done] fig2_combined_dh_dual_axes.png", flush=True)
 
     # ---- Figure 3: reliability diagram --------------------------------
-    fig3 = go.Figure()
+    fig_rel = go.Figure()
     rel_colors = sample_colorscale("Blues", len(HORIZONS))
     for i, h in enumerate(HORIZONS):
         col = f"p_{int(h)}h"
         rp = reliability_points(panel, col)
         rp = rp[rp["n_events"] >= 30]
-        fig3.add_trace(go.Scatter(
+        fig_rel.add_trace(go.Scatter(
             x=rp["mean_p"], y=rp["mean_y"], mode="lines+markers",
             name=f"{int(h)}h", line=dict(color=rel_colors[i], width=1.6),
             marker=dict(size=6),
             hovertemplate="%{x:.3f} -> %{y:.3f}<extra></extra>",
         ))
-    fig3.add_trace(go.Scatter(
+    fig_rel.add_trace(go.Scatter(
         x=[0, 1], y=[0, 1], mode="lines",
         line=dict(color="#E63946", dash="dash", width=3.5),
         name="Perfect calibration", hoverinfo="skip",
     ))
-    fig3.update_layout(
+    fig_rel.update_layout(
         height=640,
         showlegend=True,
         legend=dict(
@@ -189,7 +221,7 @@ def main() -> int:
         margin=dict(l=90, r=50, t=90, b=70),
         plot_bgcolor="white",
     )
-    fig3.write_image(OUT_DIR / "fig3_reliability_all_horizons.png",
+    fig_rel.write_image(OUT_DIR / "fig3_reliability_all_horizons.png",
                      scale=3, width=1400, height=640)
     print("[done] fig3_reliability_all_horizons.png", flush=True)
 
@@ -203,14 +235,14 @@ def main() -> int:
         norm[f"{key}_lo_n"] = summ[f"{ci_key}_ci_lo"] / b
         norm[f"{key}_hi_n"] = summ[f"{ci_key}_ci_hi"] / b
 
-    fig1 = go.Figure()
+    fig_scores = go.Figure()
     for key, title, color, ci_key in [
         ("BS", "Brier", "#1f6fb4", "BS"),
         ("LogLoss", "Log Loss", "#c1121f", "LogL"),
         ("RPS", "RPS", "#2e8b57", "RPS"),
     ]:
         y = norm[f"{key}_n"]
-        fig1.add_trace(go.Scatter(
+        fig_scores.add_trace(go.Scatter(
             x=norm["horizon_h"], y=y, mode="lines+markers", name=title,
             line=dict(color=color, width=3), marker=dict(size=10),
             error_y=dict(
@@ -221,19 +253,19 @@ def main() -> int:
             ),
             hovertemplate="%{x:.0f}h: %{y:.4f}<extra></extra>",
         ))
-    fig1.add_hline(y=1.0, line_dash="dash", line_color="#888888",
+    fig_scores.add_hline(y=1.0, line_dash="dash", line_color="#888888",
                    line_width=1.2, annotation_text="48h baseline",
                    annotation_font=dict(size=14, color="#666666"))
-    fig1.update_xaxes(
+    fig_scores.update_xaxes(
         tickmode="array", tickvals=norm["horizon_h"],
         ticktext=[f"{int(h)}h" for h in norm["horizon_h"]],
         title=dict(text="Hours Before The Highest Temperature",
                    font=AXIS_FONT),
         tickfont=TICK_FONT,
     )
-    fig1.update_yaxes(title=dict(text="Relative Score", font=AXIS_FONT),
+    fig_scores.update_yaxes(title=dict(text="Relative Score", font=AXIS_FONT),
                       tickfont=TICK_FONT)
-    fig1.update_layout(
+    fig_scores.update_layout(
         height=500,
         margin=dict(l=90, r=50, t=70, b=70),
         plot_bgcolor="white",
@@ -242,7 +274,7 @@ def main() -> int:
                     orientation="h", yanchor="bottom", y=1.05,
                     xanchor="right", x=1),
     )
-    fig1.write_image(OUT_DIR / "fig1_scores_combined_normalized_48h.png",
+    fig_scores.write_image(OUT_DIR / "fig1_scores_combined_normalized_48h.png",
                      scale=3, width=1400, height=500)
     print("[done] fig1_scores_combined_normalized_48h.png", flush=True)
 
@@ -281,7 +313,7 @@ def main() -> int:
             star = ("*" if (np.isfinite(Sm[i, j])
                             and abs(Dm[i, j]) > 2 * Sm[i, j]) else "")
             ann[i, j] = f"{Dm[i, j]:+.1f}{star}"
-    fig4 = go.Figure(go.Heatmap(
+    fig_dh = go.Figure(go.Heatmap(
         z=Dm, x=[f"{int(h)}h" for h in HORIZONS], y=BIN_LABELS,
         zmin=-vmax, zmax=vmax, zmid=0,
         colorscale=[[0.00, "#4575b4"], [0.25, "#abd0e6"],
@@ -296,7 +328,7 @@ def main() -> int:
                       ticktext=[f"{-vmax:.1f}", "0", f"{vmax:.1f}"]),
         hovertemplate=("bin %{y}, %{x}<br>D = %{z:+.2f} pp<extra></extra>"),
     ))
-    fig4.update_layout(
+    fig_dh.update_layout(
         height=760, width=1400,
         xaxis=dict(title=dict(text="Hours Before The Highest Temperature",
                               font=AXIS_FONT), tickfont=TICK_FONT),
@@ -320,11 +352,32 @@ def main() -> int:
                            family="Arial, sans-serif", weight=700)),
         ],
     )
-    fig4.write_image(OUT_DIR / "fig4_bias_heatmap_bin_x_horizon.png",
+    fig_dh.write_image(OUT_DIR / "fig4_bias_heatmap_bin_x_horizon.png",
                      scale=3, width=1400, height=620)
     print("[done] fig4_bias_heatmap_bin_x_horizon.png", flush=True)
 
+    # ---- Copy to the file names main.tex actually \includegraphics -----
+    # so the paper can be rebuilt straight from pipeline output.  The heatmap
+    # is flipped vertically: the axis is reversed for reading, while the
+    # LaTeX \includegraphics trims the top and expects the low-price bins at
+    # the bottom.
+    from PIL import Image
+
+    for src_name, dst_name in PAPER_ALIASES.items():
+        src = OUT_DIR / src_name
+        if not src.exists():
+            print(f"[skip] {src_name} not found", flush=True)
+            continue
+        dst = OUT_DIR / dst_name
+        if dst_name == "figure_heatmap_reversed.png":
+            Image.open(src).transpose(Image.FLIP_TOP_BOTTOM).save(dst)
+        else:
+            dst.write_bytes(src.read_bytes())
+        print(f"[alias] {dst_name}  <-  {src_name}", flush=True)
+
     print("\nAll four PNGs written to", OUT_DIR, flush=True)
+    print("(plus paper-ready aliases: "
+          + ", ".join(sorted(PAPER_ALIASES.values())) + ")", flush=True)
     return 0
 
 

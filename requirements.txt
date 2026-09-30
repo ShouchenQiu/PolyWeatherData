@@ -7,5 +7,11 @@ python-dotenv>=1.0
 loguru>=0.7
 plotly>=5.20
 
+# Static PNG export for pipeline/4_figures (plotly .write_image).
+# plotly 7 renders through a bundled Chromium and needs no kaleido; older
+# plotly needs kaleido. Either pin works — install kaleido only if your
+# plotly is < 7.
+pillow>=10.0
+
 # Optional — interactive dashboard (ui/)
 streamlit>=1.35

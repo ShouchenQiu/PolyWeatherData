@@ -3,10 +3,17 @@
 Run with:
     streamlit run ui/app.py
 
-Sidebar navigation:
-    Mispricing Overview        -- calibration gap heatmap by station x period
-    Calendar Stability         -- rolling-window calibration gap trend
-    Cross-Station              -- leave-one-station-out generalisation
+Sidebar navigation (each item maps to a file in ui/pages/):
+    Data Overview           -- per-station CLOB artifact status
+    First-Layer (Aligned Dates) -- D_h by horizon + reliability diagram
+    Event-Layer Scores      -- Brier / Log Loss / RPS by horizon
+    Strategy Backtest       -- favorite / longshot buy-NO results
+
+    Calendar Stability      -- placeholder, awaiting a rolling-window module
+    Cross-Station           -- placeholder, awaiting a leave-one-out module
+
+Every non-placeholder entry below resolves to a real file under ui/pages/;
+keep this list and ui/pages/ in sync when adding or removing a page.
 """
 from __future__ import annotations
 
@@ -25,8 +32,6 @@ page = st.sidebar.radio(
     "Navigation",
     [
         "Data Overview",
-        "First-Layer Calibration",
-        "First-Layer (Equal-Weighted)",
         "First-Layer (Aligned Dates)",
         "Event-Layer Scores (Brier/LogL/RPS)",
         "Strategy Backtest (Favorite/Longshot)",
@@ -37,49 +42,19 @@ page = st.sidebar.radio(
 
 st.title(f"PolyWeatherData — {page}")
 
-if page == "Data Overview":
-    # render the data overview page inline
-    import runpy
+# page label -> file under ui/pages/
+PAGE_FILES = {
+    "Data Overview": "data_overview.py",
+    "First-Layer (Aligned Dates)": "first_layer_aligned_dates.py",
+    "Event-Layer Scores (Brier/LogL/RPS)": "event_layer_scores.py",
+    "Strategy Backtest (Favorite/Longshot)": "strategy_backtest.py",
+}
 
-    runpy.run_path(str(Path(__file__).parent / "pages" / "data_overview.py"), run_name="__main__")
-
-elif page == "First-Layer Calibration":
-    import runpy
-
-    runpy.run_path(
-        str(Path(__file__).parent / "pages" / "first_layer_calibration.py"),
-        run_name="__main__",
-    )
-
-elif page == "First-Layer (Equal-Weighted)":
+if page in PAGE_FILES:
     import runpy
 
     runpy.run_path(
-        str(Path(__file__).parent / "pages" / "first_layer_equal_weighted.py"),
-        run_name="__main__",
-    )
-
-elif page == "First-Layer (Aligned Dates)":
-    import runpy
-
-    runpy.run_path(
-        str(Path(__file__).parent / "pages" / "first_layer_aligned_dates.py"),
-        run_name="__main__",
-    )
-
-elif page == "Event-Layer Scores (Brier/LogL/RPS)":
-    import runpy
-
-    runpy.run_path(
-        str(Path(__file__).parent / "pages" / "event_layer_scores.py"),
-        run_name="__main__",
-    )
-
-elif page == "Strategy Backtest (Favorite/Longshot)":
-    import runpy
-
-    runpy.run_path(
-        str(Path(__file__).parent / "pages" / "strategy_backtest.py"),
+        str(Path(__file__).parent / "pages" / PAGE_FILES[page]),
         run_name="__main__",
     )
 

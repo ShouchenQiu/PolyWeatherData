@@ -5,8 +5,11 @@ Sources:
   - 20260401_20260630             (all; backfill resolved_yes from klga_q2_resolution.parquet)
   - 20260701_20260818             (take target_date <= 2026-08-10)
 
-Output: data_store/backtest/clob/KLGA/20251205_20260810/
+Output: <CLOB_ROOT>/KLGA/20251205_20260810/
   events.parquet, markets.parquet, trades.parquet, coverage.parquet, manifest.json
+
+where <CLOB_ROOT> is POLYWEATHER_CLOB_ROOT (default <repo>/data_store/clob).
+The intermediate klga_q2_resolution.parquet is written to <OUT_DIR>.
 
 The merged artifact becomes the single NYC node: events covering
 [2025-12-05, 2026-08-10]. Raw source artifacts are left untouched.

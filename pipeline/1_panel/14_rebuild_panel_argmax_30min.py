@@ -26,6 +26,10 @@ from constants import ARTIFACT, CUTOFF, HORIZONS, NODES, START_DATE, WIN_HALF_H 
 CLOB = CLOB_ROOT
 
 # (city, station) pairs for this build step.
+# `NODES` maps city -> CLOB artifact directory name, which is the station
+# label used on disk (e.g. CHICAGO, MIAMI, KLGA).  The argmax parquet from
+# step 10 instead stores ICAO codes for the US sites, so a second map is
+# needed to join against it.  International sites share the same name in both.
 NODE_DIRS: dict[str, tuple[str, str]] = {
     city: (station, ARTIFACT) for city, station in NODES.items()
 }
