@@ -18,11 +18,7 @@ approaches.
 2. [Results → code map](#2-results--code-map)
 3. [Data](#3-data)
 4. [Repository layout](#4-repository-layout)
-5. [Setup](#5-setup)
-6. [Reproduction steps](#6-reproduction-steps)
-7. [Method summary](#7-method-summary)
-8. [Configuration](#8-configuration)
-9. [Notes and limitations](#9-notes-and-limitations)
+5. [Setup and reproduction](#5-setup-and-reproduction)
 
 ---
 
@@ -145,7 +141,7 @@ Two paths are configurable, so nothing is machine-specific:
 
 ---
 
-## 5. Setup
+## 5. Setup and reproduction
 
 Requires **Python 3.11+**.
 
@@ -154,10 +150,6 @@ python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
-
----
-
-## 6. Reproduction steps
 
 Run the stages in order. Each writes into `POLYWEATHER_OUT_DIR`.
 
@@ -212,73 +204,3 @@ python pipeline/5_buy_no/51_favorite_fixed_h_bins.py
 ```bash
 streamlit run ui/app.py
 ```
-
----
-
-## 7. Method summary
-
-**Price definition.** At horizon $h$, a bucket's price $p$ is the **mean of all
-taker trade prices** in the $h \pm 0.5$ hour window before the daily temperature
-peak. Smaller $h$ is closer to the peak; the same definition is used throughout.
-
-**Range bias.** For horizon $h$ and price range $[a,b]$,
-
-$$D_h(a,b) = \operatorname{mean}(y - p), \qquad a \le p \le b.$$
-
-Negative means the price exceeds the observed win rate (overpricing). Longshots
-are $0 < p \le 0.10$; favorites are $0.75 \le p \le 0.95$. Two weighting schemes
-are reported: **event-weighted** (average within event, then equally across
-events) and **station-equal** (event-weighted per city, then equally across the
-ten cities).
-
-**Event-level scores.** Prices are normalized to a distribution over the event's
-buckets, $q_k = p_k / \sum_j p_j$, then scored with
-
-- Brier score: $\sum_k (q_k - y_k)^2$
-- Log Loss: $-\log(q_{\text{winner}})$
-- RPS: $\sum_{k=1}^{n-1} (F_k - O_k)^2$ with $F$ / $O$ the cumulative forecast and
-  outcome
-
-Only **full-coverage** events (every bucket priced at that horizon, at least 7
-buckets) enter the event-level scores. Confidence intervals bootstrap **whole
-events**.
-
-**Recalibration.** A cubic B-spline on $z = \operatorname{logit}(p)$,
-
-$$\operatorname{logit}(\hat p) = w_0 + \sum_{j=1}^{6} w_j B_j(z),$$
-
-with knots at the 0.35 and 0.65 quantiles of training logit prices. Fitted on
-training only, applied once to the July test month.
-
-**Buy-NO.** A negative range bias means YES is overpriced, so buying NO takes the
-opposite side. Fees follow the Polymarket schedule
-$F = C f r (1-r)$ with rate $f = 0.05$, $C = 10/r$ shares, $r = 1-p$ the NO
-price, and \$10 notional per trade.
-
-**Time split.** chronological, by event date — train 2025-12-05…2026-05-31,
-validation June 2026, test July 2026.
-
----
-
-## 8. Configuration
-
-Shared settings live in **`pipeline/constants.py`** so the analysis is defined in
-one place: the horizon grid, the longshot/favorite bounds, the city list, the
-outlier cities, and the fee model. Paths live in **`pipeline/common.py`** and
-honour the two environment variables above.
-
----
-
-## 9. Notes and limitations
-
-- **Test period.** All July 2026 results come from a single month across ten
-  cities; event counts, liquidity, and forecast quality differ by city. Event
-  confidence intervals are wide.
-- **Price definitions.** The July KLGA sample uses live CLOB bid/ask snapshots,
-  while the remaining cities use taker trade prices. The paper states this
-  difference explicitly.
-- **Buy-NO is a diagnostic, not a strategy.** The calculations ignore order-book
-  depth, bid–ask spreads, and slippage, so the reported returns do not establish
-  executable profits.
-- **Market accuracy ≠ forecast skill.** These results assess market calibration
-  and do not establish an advantage over public weather forecasts.
