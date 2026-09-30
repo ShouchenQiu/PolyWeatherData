@@ -8,6 +8,7 @@ stations.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -15,7 +16,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-BASE = Path(r"d:\NN\PolyWeatherData\data_store\backtest\clob")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from common import CLOB_ROOT, OUT_DIR  # noqa: E402
+
+BASE = CLOB_ROOT
 
 # Canonical artifacts to display (exclude legacy KLGA versions and Phoenix).
 # All nodes share the integrated window artifact 20251205_20260810.
@@ -160,7 +164,7 @@ styler = merged.style.set_table_styles([{
 st.table(styler)
 
 # --- raw order statistics (from step-8 CSV if present) ---
-raw_csv = Path(r"d:\NN\PolyWeatherData\docs\icdm\output\raw_trade_stats.csv")
+raw_csv = OUT_DIR / "raw_trade_stats.csv"
 if raw_csv.exists():
     st.subheader("Raw order statistics")
     raw = pd.read_csv(raw_csv)
