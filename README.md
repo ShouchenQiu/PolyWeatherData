@@ -5,6 +5,8 @@ Code and analysis pipeline for the paper:
 > **Time-Varying Favorite–Longshot Bias in Polymarket Weather Markets**
 > Shouchen Qiu, Huaijun Qiu — ICDM (student paper)
 
+Paper: <https://arxiv.org/abs/2610.13593>
+
 The study asks whether market prices in daily maximum-temperature markets behave
 like probabilities, and how that behaviour differs between cheap *longshot*
 contracts and expensive *favorite* contracts as the daily temperature peak
